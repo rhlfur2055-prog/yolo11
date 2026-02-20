@@ -1,0 +1,58 @@
+# Output & temp
+output/
+temp/
+data/
+logs/
+plate_results*/
+debug_crops/
+preview_frames/
+temp_youtube/
+aihub_data/
+
+# Media files
+*.mp4
+*.wav
+*.mp3
+*.avi
+*.mkv
+
+# Model weights & binaries
+*.pt
+*.onnx
+*.onnx.bak
+*.engine
+*.exe
+aihubshell
+
+# API keys & credentials
+.env
+*.json
+!requirements.txt
+!package.json
+
+# Log & debug files
+*.log
+gui_log.txt
+gui_stdout.txt
+test_out.txt
+test_err.txt
+frame_test_log.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
