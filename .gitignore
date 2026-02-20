@@ -26,9 +26,15 @@ aihubshell
 
 # API keys & credentials
 .env
-*.json
-!requirements.txt
-!package.json
+
+# Large data directories
+103.*/
+.claude/
+.paddleocr/
+server_results/
+uploads/
+aihub_results/
+nul
 
 # Log & debug files
 *.log

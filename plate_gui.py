@@ -601,15 +601,33 @@ class PlateGUIApp(tk.Tk):
         except Exception as e:
             self._log(f"저장 오류: {e}")
 
+    @staticmethod
+    def _levenshtein(s1: str, s2: str) -> int:
+        """편집 거리 (Levenshtein distance) 계산."""
+        if len(s1) < len(s2):
+            return PlateGUI._levenshtein(s2, s1)
+        if not s2:
+            return len(s1)
+        prev = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            curr = [i + 1]
+            for j, c2 in enumerate(s2):
+                curr.append(min(prev[j + 1] + 1, curr[j] + 1, prev[j] + (0 if c1 == c2 else 1)))
+            prev = curr
+        return prev[-1]
+
     def _text_similar(self, t1: str, t2: str) -> bool:
+        """편집거리 1 이하면 같은 번호판으로 판단."""
         t1 = t1.replace(" ", "")
         t2 = t2.replace(" ", "")
         if t1 == t2:
             return True
         if not t1 or not t2:
             return False
-        common = sum(1 for c in t1 if c in t2)
-        return common / max(len(t1), len(t2)) > 0.7
+        # 길이 차이가 2 이상이면 빠른 반환
+        if abs(len(t1) - len(t2)) > 1:
+            return False
+        return self._levenshtein(t1, t2) <= 1
 
     def _refresh_history_list(self) -> None:
         self.history_list.delete(0, tk.END)

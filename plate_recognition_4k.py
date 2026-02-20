@@ -70,10 +70,10 @@ VEHICLE_CLASS_IDS: set[int] = {2, 3, 5, 7}  # car, motorcycle, bus, truck
 DEFAULT_CONFIDENCE: float = 0.5
 MIN_VEHICLE_WIDTH: int = 200   # COCO 폴백 시 최소 차량 너비 (px)
 MIN_VEHICLE_HEIGHT: int = 150  # COCO 폴백 시 최소 차량 높이 (px)
-MIN_PLATE_WIDTH: int = 28      # 번호판 직접 탐지 시 최소 너비 (CCTV 원거리 번호판 허용)
-MIN_PLATE_HEIGHT: int = 8      # 번호판 직접 탐지 시 최소 높이
-PLATE_MIN_ASPECT: float = 1.5  # 번호판 최소 가로세로비 (w/h)
-PLATE_MAX_ASPECT: float = 6.5  # 번호판 최대 가로세로비
+MIN_PLATE_WIDTH: int = 60      # 번호판 직접 탐지 시 최소 너비 (개선1: 28→60, 소형 노이즈 제거)
+MIN_PLATE_HEIGHT: int = 20     # 번호판 직접 탐지 시 최소 높이 (개선1: 8→20)
+PLATE_MIN_ASPECT: float = 2.0  # 번호판 최소 가로세로비 (개선1: 1.5→2.0)
+PLATE_MAX_ASPECT: float = 5.0  # 번호판 최대 가로세로비 (개선1: 6.5→5.0)
 PLATE_MAX_AREA_RATIO: float = 0.05  # 프레임 면적 대비 번호판 최대 비율
 MAX_PLATE_TEXT_LEN: int = 12   # 번호판 OCR 최대 글자수 (초과 시 폐기)
 MIN_OCR_CONFIDENCE: float = 0.6   # OCR 최소 신뢰도 상향 (0.5→0.6, 오인식 필터링 강화)
@@ -96,8 +96,13 @@ SAHI_OVERLAP_RATIO: float = 0.2
 
 # -- 크롭 & 선명도 --
 PLATE_PADDING_RATIO: float = 0.35  # COCO 폴백용 (차량→번호판 추출 시)
-PLATE_MODEL_PADDING_RATIO: float = 0.05  # 번호판 전용 모델용 (bbox가 이미 타이트)
+PLATE_MODEL_PADDING_H: float = 0.30  # 번호판 전용 모델: 좌우 패딩 30% (bbox 좌측 잘림 방지)
+PLATE_MODEL_PADDING_V: float = 0.20  # 번호판 전용 모델: 상하 패딩 20%
 SHARPNESS_THRESHOLD: float = 100.0
+
+# -- 시간축 앙상블 (개선5) --
+TEMPORAL_WINDOW: int = 5       # 시간축 앙상블 슬라이딩 윈도우 크기
+TEMPORAL_LEVENSHTEIN_MAX: int = 2  # 동일 번호판 판정 최대 편집 거리
 
 # -- 한국 번호판 OCR 설정 --
 # 한글 자음모음 + 숫자 + 번호판에 사용되는 한글 글자
@@ -372,7 +377,7 @@ _VALID_PLATE_HANGUL_ALL = (
 _HANGUL_PLATE_CORRECTION: dict[str, str] = {
     # OCR이 빈번하게 혼동하는 자가용 한글 (Row 1 유사자)
     "기": "가", "개": "가", "깨": "가", "까": "가", "간": "가",
-    "내": "나", "네": "나", "니": "나", "닝": "나",
+    "내": "나", "네": "나", "니": "나", "닝": "나", "녀": "너",
     "디": "다", "데": "다", "대": "다",
     "리": "라", "래": "라", "레": "라",
     "미": "마", "매": "마", "메": "마",
@@ -406,6 +411,170 @@ _HANGUL_PLATE_CORRECTION: dict[str, str] = {
     "혹": "호",
 }
 
+# ── OCR 오인식 한글 교정 확장 (plate_ocr_pipeline.py 통합, 개선4) ──
+# EasyOCR/PaddleOCR가 빈번하게 오인식하는 패턴 → 실제 번호판 한글로 매핑
+_HANGUL_OCR_EXTENDED: dict[str, str] = {
+    # EasyOCR 오인식 (받침 포함 문자 → 용도 한글)
+    '륙': '바', '릎': '바', '휴': '바', '푹': '바', '선': '바',
+    '춤': '바', '식': '바', '겸': '바', '겨': '바', '겪': '바',
+    '릅': '바', '륜': '바', '륨': '바', '륩': '바',
+    '늑': '나', '닉': '나', '냑': '나',
+    '딕': '다', '딘': '다', '덕': '다',
+    '럭': '라', '럽': '라', '렉': '라',
+    '먹': '마', '멕': '마', '먕': '마',
+    '벽': '버', '볍': '버', '벡': '버',
+    '석': '서', '섭': '서', '섞': '서',
+    '억': '어', '엌': '어',
+    '젝': '저', '젖': '저', '젊': '저',
+    '곡': '고', '곤': '고', '곧': '고',
+    '녹': '노', '논': '노', '놉': '노',
+    '독': '도', '돈': '도', '돋': '도',
+    '록': '로', '론': '로', '롯': '로',
+    '목': '모', '몬': '모', '몫': '모',
+    '복': '보', '본': '보', '볼': '보',
+    '속': '소', '손': '소', '솔': '소',
+    '옥': '오', '온': '오', '올': '오',
+    '족': '조', '존': '조', '졸': '조',
+    '국': '구', '군': '구', '굿': '구',
+    '눈': '누', '눌': '누', '눔': '누',
+    '둔': '두', '둘': '두', '둠': '두',
+    '룬': '루', '룰': '루', '룸': '루',
+    '문': '무', '물': '무', '뭄': '무',
+    '분': '부', '불': '부', '붐': '부',
+    '순': '수', '술': '수', '숨': '수',
+    '운': '우', '울': '우', '움': '우',
+    '준': '주', '줄': '주', '줌': '주',
+    '헌': '허', '헐': '허', '험': '허',
+    '한': '하', '할': '하', '함': '하',
+    '혼': '호', '홀': '호', '홈': '호',
+    '백': '배', '밸': '배', '뱅': '배',
+}
+# _HANGUL_PLATE_CORRECTION 에 없는 항목만 병합
+for _k, _v in _HANGUL_OCR_EXTENDED.items():
+    if _k not in _HANGUL_PLATE_CORRECTION:
+        _HANGUL_PLATE_CORRECTION[_k] = _v
+
+
+def _jamo_decompose(ch: str) -> tuple[int, int, int]:
+    """한글 1글자를 초성/중성/종성 인덱스로 분해."""
+    code = ord(ch) - 0xAC00
+    if code < 0 or code > 11171:
+        return (-1, -1, -1)
+    cho = code // 588
+    jung = (code % 588) // 28
+    jong = code % 28
+    return (cho, jung, jong)
+
+
+# 유효 한글 52자의 자모 분해 캐시
+_VALID_HANGUL_JAMO: list[tuple[str, tuple[int, int, int]]] = [
+    (ch, _jamo_decompose(ch)) for ch in _VALID_PLATE_HANGUL_ALL
+    if ch not in _VALID_PLATE_HANGUL_REGION  # 지역명 한글은 제외 (단자 교정용)
+]
+
+
+def _find_nearest_valid_hangul(ch: str) -> str | None:
+    """자모 유사도 기반으로 가장 가까운 유효 번호판 한글 반환."""
+    cho, jung, jong = _jamo_decompose(ch)
+    if cho < 0:
+        return None
+    best_ch = None
+    best_dist = 999
+    for valid_ch, (v_cho, v_jung, v_jong) in _VALID_HANGUL_JAMO:
+        # 초성 일치 가중치 0, 불일치 3 / 중성 불일치 2 / 종성 불일치 1
+        dist = (0 if cho == v_cho else 3) + (0 if jung == v_jung else 2) + (0 if jong == v_jong else 1)
+        if dist < best_dist:
+            best_dist = dist
+            best_ch = valid_ch
+    # 거리 5 이하만 교정 (너무 다른 글자는 교정하지 않음)
+    return best_ch if best_dist <= 5 else None
+
+
+# ── 지역명 교정 테이블 (개선4) ──
+_REGION_LIST = [
+    '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
+    '경기', '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주',
+]
+_REGION_SET = set(_REGION_LIST)
+
+_REGION_CORRECTION: dict[str, str] = {
+    # 경기
+    '걍기': '경기', '겅기': '경기', '견기': '경기',
+    '경끼': '경기', '경키': '경기', '껭기': '경기', '격기': '경기',
+    # 서울
+    '서을': '서울', '서운': '서울', '셔울': '서울',
+    '서욿': '서울', '석울': '서울',
+    # 인천
+    '인쳔': '인천', '인촌': '인천', '인첨': '인천',
+    # 부산
+    '부선': '부산', '부샨': '부산',
+    # 대구
+    '대귀': '대구', '대굴': '대구', '대국': '대구',
+    # 대전
+    '대잔': '대전', '대젼': '대전', '대졘': '대전',
+    # 광주
+    '괄주': '광주', '광쥬': '광주', '괌주': '광주',
+    # 울산
+    '울선': '울산',
+    # 강원
+    '깡원': '강원', '강월': '강원', '강완': '강원',
+    # 충북
+    '충붂': '충북', '총북': '충북',
+    # 충남
+    '총남': '충남', '충납': '충남',
+    # 전북
+    '전붂': '전북', '젼북': '전북',
+    # 전남
+    '젼남': '전남', '전납': '전남',
+    # 경북
+    '겅북': '경북', '경붂': '경북',
+    # 경남
+    '겅남': '경남', '경납': '경남',
+    # 제주
+    '재주': '제주', '제쥬': '제주', '졔주': '제주',
+    # 세종
+    '셰종': '세종', '세좀': '세종',
+}
+
+
+def _correct_region(text: str) -> str:
+    """지역명 2자 교정"""
+    if text in _REGION_SET:
+        return text
+    return _REGION_CORRECTION.get(text, text)
+
+
+def _find_region_in_text(text: str) -> str | None:
+    """텍스트에서 지역명(2자) 후보 찾기"""
+    hangul_only = re.findall(r'[가-힣]', text)
+    if len(hangul_only) >= 2:
+        for i in range(len(hangul_only) - 1):
+            pair = hangul_only[i] + hangul_only[i + 1]
+            corrected = _correct_region(pair)
+            if corrected in _REGION_SET:
+                return corrected
+    return None
+
+
+# 숫자 자리에 나타나는 영문 → 숫자 교정
+_DIGIT_CORRECTION: dict[str, str] = {
+    'O': '0', 'o': '0', 'Q': '0', 'D': '0',
+    'I': '1', 'l': '1', '|': '1', 'i': '1',
+    'Z': '2', 'z': '2',
+    'S': '5', 's': '5',
+    'B': '8', 'b': '6',
+    'G': '6', 'g': '9',
+    'T': '7', 'A': '4',
+}
+
+
+def _correct_single_hangul(ch: str) -> str:
+    """한글 1자 교정: 유효 번호판 한글이면 그대로, 아니면 교정 테이블 참조"""
+    if ch in _VALID_PLATE_HANGUL_ALL:
+        return ch
+    return _HANGUL_PLATE_CORRECTION.get(ch, ch)
+
+
 # 신형 번호판 구조 검증 정규식
 _RE_NEW_PLATE = re.compile(r"^(\d{2,3})([가-힣])(\d{4})$")     # 123가4567
 _RE_OLD_PLATE = re.compile(r"^([가-힣]{2})(\d{1,2})([가-힣])(\d{4})$")  # 서울12가1234
@@ -435,11 +604,13 @@ def validate_plate_format(text: str) -> tuple[str, float]:
         prefix, hangul, suffix = m.group(1), m.group(2), m.group(3)
         if hangul in _VALID_PLATE_HANGUL_ALL:
             return text, 1.0  # 완벽한 형식
-        # 유효하지 않은 한글 → 교정 시도
+        # 유효하지 않은 한글 → 교정 시도 (테이블 → 자모 유사도 폴백)
         corrected = _HANGUL_PLATE_CORRECTION.get(hangul)
         if corrected:
-            return prefix + corrected + suffix, 0.90  # 교정 적용
-        return text, 0.70  # 한글은 있으나 교정 불가
+            return prefix + corrected + suffix, 0.90
+        corrected = _find_nearest_valid_hangul(hangul)
+        if corrected:
+            return prefix + corrected + suffix, 0.80  # 자모 유사도 교정
 
     # 구형 번호판 검증
     m = _RE_OLD_PLATE.match(text)
@@ -452,7 +623,9 @@ def validate_plate_format(text: str) -> tuple[str, float]:
             corrected = _HANGUL_PLATE_CORRECTION.get(hangul)
             if corrected:
                 return region + num + corrected + suffix, 0.90
-            return text, 0.70
+            corrected = _find_nearest_valid_hangul(hangul)
+            if corrected:
+                return region + num + corrected + suffix, 0.80
         return text, 0.50
 
     return text, 0.0  # 형식 불일치
@@ -945,18 +1118,20 @@ class PlateRecognizer:
         box_xyxy: list[float],
         padding_ratio: float = PLATE_PADDING_RATIO,
         padding_left: float | None = None,
+        padding_right: float | None = None,
         padding_top: float | None = None,
+        padding_bottom: float | None = None,
     ) -> np.ndarray:
-        """원본 프레임에서 영역 크롭 (패딩 포함, 좌측/상단 비대칭 지원)"""
+        """원본 프레임에서 영역 크롭 (패딩 포함, 4방향 비대칭 지원)"""
         h, w = frame.shape[:2]
         x1, y1, x2, y2 = box_xyxy
 
         box_w = x2 - x1
         box_h = y2 - y1
         pad_left = box_w * (padding_left if padding_left is not None else padding_ratio)
-        pad_right = box_w * padding_ratio
+        pad_right = box_w * (padding_right if padding_right is not None else padding_ratio)
         pad_top = box_h * (padding_top if padding_top is not None else padding_ratio)
-        pad_bottom = box_h * padding_ratio
+        pad_bottom = box_h * (padding_bottom if padding_bottom is not None else padding_ratio)
 
         x1 = max(0, int(x1 - pad_left))
         y1 = max(0, int(y1 - pad_top))
@@ -966,13 +1141,24 @@ class PlateRecognizer:
         return frame[y1:y2, x1:x2].copy()
 
     def _upscale_if_small(self, img: np.ndarray) -> np.ndarray:
-        """소형 크롭 3x 업스케일 (OCR 정확도 향상)"""
+        """소형 크롭 업스케일 (개선2: LANCZOS4 + 언샤프 마스킹)"""
         h, w = img.shape[:2]
-        if w < UPSCALE_THRESHOLD:
+        short_side = min(h, w)
+        if short_side < 100:
+            # 단변 100px 미만이면 LANCZOS4로 업스케일
+            scale = max(UPSCALE_FACTOR, 100 / short_side)
+            new_w = int(w * scale)
+            new_h = int(h * scale)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_LANCZOS4)
+            # 업스케일 후 경량 샤프닝
+            blurred = cv2.GaussianBlur(img, (0, 0), sigmaX=1.0)
+            img = cv2.addWeighted(img, 1.5, blurred, -0.5, 0)
+            img = np.clip(img, 0, 255).astype(np.uint8)
+        elif w < UPSCALE_THRESHOLD:
             img = cv2.resize(
                 img,
                 (w * UPSCALE_FACTOR, h * UPSCALE_FACTOR),
-                interpolation=cv2.INTER_CUBIC,
+                interpolation=cv2.INTER_LANCZOS4,
             )
         return img
 
@@ -1034,26 +1220,41 @@ class PlateRecognizer:
 
     def _deskew_plate(self, img: np.ndarray) -> np.ndarray:
         """
-        기울기 보정 - cv2.minAreaRect로 회전 각도 계산 후 보정.
-        기울어진 번호판을 수평으로 정렬하여 OCR 정확도 향상.
+        기울기 보정 (개선2: HoughLines 우선 → minAreaRect 폴백)
+        HoughLines가 직선 각도를 더 정확하게 추출하여 OCR 정확도 향상.
         """
         if len(img.shape) == 3:
             gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         else:
             gray = img
-        # 이진화 후 윤곽선에서 각도 추출
-        _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        coords = cv2.findNonZero(thresh)
-        if coords is None or len(coords) < 10:
-            return img
-        rect = cv2.minAreaRect(coords)
-        angle = rect[1][0]  # 회전 각도
-        # minAreaRect 각도 보정 (-90~0 범위)
-        (_, _), (w_r, h_r), angle = rect
-        if w_r < h_r:
-            angle = angle + 90
-        if abs(angle) > 45:
-            angle = angle - 90 if angle > 0 else angle + 90
+
+        angle = 0.0
+
+        # 방법1: HoughLines 기반 각도 추출 (개선2)
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=min(img.shape[1] // 3, 80))
+        if lines is not None and len(lines) > 0:
+            angles = []
+            for rho, theta in lines[:20, 0]:
+                deg = np.degrees(theta) - 90  # 수평선 기준 각도
+                if abs(deg) < 20:  # 수평에 가까운 선만
+                    angles.append(deg)
+            if angles:
+                angle = float(np.median(angles))
+
+        # 방법2: minAreaRect 폴백
+        if abs(angle) < 0.3:
+            _, thresh = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            coords = cv2.findNonZero(thresh)
+            if coords is not None and len(coords) > 10:
+                rect = cv2.minAreaRect(coords)
+                (_, _), (w_r, h_r), rect_angle = rect
+                if w_r < h_r:
+                    rect_angle = rect_angle + 90
+                if abs(rect_angle) > 45:
+                    rect_angle = rect_angle - 90 if rect_angle > 0 else rect_angle + 90
+                angle = rect_angle
+
         # 작은 기울기만 보정 (±15도 이내)
         if abs(angle) < 0.5 or abs(angle) > 15:
             return img
@@ -1086,26 +1287,51 @@ class PlateRecognizer:
 
     def _preprocess_plate(self, plate_img: np.ndarray) -> np.ndarray:
         """
-        번호판 OCR 전처리 파이프라인 (속도 최적화)
-        3단계만: 그레이스케일 → CLAHE → 적응형 이진화
-        (노이즈 제거 제거 - 속도 병목)
+        번호판 OCR 전처리 파이프라인 (개선2: CLAHE 3.0/(4,4) + 샤프닝)
         """
         if len(plate_img.shape) == 3:
             gray = cv2.cvtColor(plate_img, cv2.COLOR_BGR2GRAY)
         else:
             gray = plate_img.copy()
 
-        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        # CLAHE (개선2: tileGridSize 8→4, 로컬 대비 더 강화)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
         enhanced = clahe.apply(gray)
 
+        # 언샤프 마스킹 (개선2: 샤프닝 추가)
+        blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=1.5)
+        sharpened = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
+        sharpened = np.clip(sharpened, 0, 255).astype(np.uint8)
+
         binary = cv2.adaptiveThreshold(
-            enhanced, 255,
+            sharpened, 255,
             cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
             cv2.THRESH_BINARY,
             blockSize=11, C=2,
         )
 
         return binary
+
+    def _preprocess_plate_enhanced(self, plate_img: np.ndarray) -> np.ndarray:
+        """
+        강화된 전처리 (개선3: 앙상블용 추가 전처리 변형)
+        컬러 유지 + CLAHE + 샤프닝 (한글 인식에 유리)
+        """
+        if len(plate_img.shape) == 2:
+            plate_img = cv2.cvtColor(plate_img, cv2.COLOR_GRAY2BGR)
+
+        # LAB 컬러 공간에서 L 채널만 CLAHE
+        lab = cv2.cvtColor(plate_img, cv2.COLOR_BGR2LAB)
+        l_ch, a_ch, b_ch = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(4, 4))
+        l_ch = clahe.apply(l_ch)
+        lab = cv2.merge([l_ch, a_ch, b_ch])
+        enhanced = cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
+
+        # 샤프닝
+        blurred = cv2.GaussianBlur(enhanced, (0, 0), sigmaX=1.0)
+        sharpened = cv2.addWeighted(enhanced, 1.5, blurred, -0.5, 0)
+        return np.clip(sharpened, 0, 255).astype(np.uint8)
 
     def _preprocess_plate_soft(self, plate_img: np.ndarray) -> np.ndarray:
         """
@@ -1432,139 +1658,227 @@ class PlateRecognizer:
             return "KR"
         return "INT"  # 국제/영문 (UK, EU 등)
 
+    def _reassemble_plate(self, ocr_entries: list[tuple[str, list, float]]) -> tuple[str, float]:
+        """
+        OCR 결과(텍스트+bbox+confidence)를 번호판 패턴으로 재조합 (개선4)
+
+        bbox y중심 기준 정렬 → 패턴 매칭 → 한글/숫자 교정
+        """
+        if not ocr_entries:
+            return '', 0.0
+
+        # bbox y중심 기준 정렬
+        entries_with_y = []
+        for text, bbox, conf in ocr_entries:
+            y_center = 0.0
+            if bbox is not None:
+                try:
+                    if isinstance(bbox[0], (list, tuple)):
+                        y_center = sum(p[1] for p in bbox) / len(bbox)
+                    elif len(bbox) >= 4:
+                        y_center = (bbox[1] + bbox[3]) / 2
+                except (IndexError, TypeError):
+                    pass
+            entries_with_y.append((text, bbox, conf, y_center))
+
+        entries_with_y.sort(key=lambda x: x[3])
+
+        all_text = ''.join(e[0] for e in entries_with_y)
+        avg_conf = sum(e[2] for e in entries_with_y) / len(entries_with_y) if entries_with_y else 0
+
+        # 특수문자 제거 + 영문→숫자 교정
+        cleaned = re.sub(r'[^가-힣0-9a-zA-Z]', '', all_text)
+        cleaned = ''.join(_DIGIT_CORRECTION.get(c, c) for c in cleaned)
+
+        # 패턴A: 지역명+숫자2~3+한글1+숫자4 (구형: 경기37바5577)
+        m = re.search(r'([가-힣]{2})(\d{2,3})([가-힣])(\d{4})', cleaned)
+        if m:
+            region, nf, usage, nb = m.groups()
+            region = _correct_region(region)
+            usage = _correct_single_hangul(usage)
+            return region + nf + usage + nb, avg_conf
+
+        # 패턴B: 숫자2~3+한글1+숫자4 (신형 or 지역명 누락)
+        m = re.search(r'(\d{2,3})([가-힣])(\d{4})', cleaned)
+        if m:
+            nf, usage, nb = m.groups()
+            usage = _correct_single_hangul(usage)
+            prefix = cleaned[:m.start()]
+            region = _find_region_in_text(prefix)
+            if region:
+                return region + nf + usage + nb, avg_conf
+            return nf + usage + nb, avg_conf
+
+        # 패턴C: 2줄 번호판 상하 분리
+        if len(entries_with_y) >= 2:
+            y_values = [e[3] for e in entries_with_y]
+            y_mid = (min(y_values) + max(y_values)) / 2
+            upper = ''.join(re.sub(r'[^가-힣0-9a-zA-Z]', '', e[0]) for e in entries_with_y if e[3] < y_mid)
+            lower = ''.join(re.sub(r'[^가-힣0-9a-zA-Z]', '', e[0]) for e in entries_with_y if e[3] >= y_mid)
+            upper = ''.join(_DIGIT_CORRECTION.get(c, c) for c in upper)
+            lower = ''.join(_DIGIT_CORRECTION.get(c, c) for c in lower)
+
+            lower_nums = re.findall(r'\d{4}', lower)
+            upper_nums = re.findall(r'\d{2,3}', upper)
+            upper_hangul = re.findall(r'[가-힣]', upper)
+
+            if lower_nums and upper_nums and upper_hangul:
+                usage = _correct_single_hangul(upper_hangul[-1])
+                region = _find_region_in_text(upper)
+                base = upper_nums[0] + usage + lower_nums[0]
+                if region:
+                    base = region + base
+                return base, avg_conf
+
+        # 패턴D: 조각 모아 재조합
+        all_nums = re.findall(r'\d+', cleaned)
+        all_hangul = re.findall(r'[가-힣]', cleaned)
+        if all_nums and all_hangul:
+            d4 = [n for n in all_nums if len(n) == 4]
+            d23 = [n for n in all_nums if len(n) in (2, 3)]
+            if d4 and d23:
+                usage = _correct_single_hangul(all_hangul[-1] if len(all_hangul) == 1 else all_hangul[0])
+                return d23[0] + usage + d4[0], avg_conf
+
+        return cleaned, avg_conf
+
+    def _run_paddle_ocr(self, img: np.ndarray) -> list[tuple[str, list, float]]:
+        """PaddleOCR 실행 → [(text, bbox, confidence), ...]"""
+        if self.paddle_reader is None:
+            return []
+        if len(img.shape) == 2:
+            img = cv2.cvtColor(img, cv2.COLOR_GRAY2BGR)
+        try:
+            result = self.paddle_reader.ocr(img, cls=True)
+            entries = []
+            if result and result[0]:
+                for item in result[0]:
+                    try:
+                        text = item[1][0].strip()
+                        conf = float(item[1][1])
+                        bbox = item[0]
+                        if text:
+                            entries.append((text, bbox, conf))
+                    except (IndexError, TypeError):
+                        continue
+            return entries
+        except Exception:
+            return []
+
+    def _run_easy_ocr(self, img: np.ndarray) -> list[tuple[str, list, float]]:
+        """EasyOCR 실행 → [(text, bbox, confidence), ...]"""
+        if self._ko_reader is None:
+            return []
+        try:
+            result = self._ko_reader.readtext(
+                img, detail=1, paragraph=False,
+                text_threshold=0.3, low_text=0.3,
+            )
+            entries = []
+            if result:
+                for bbox, text, conf in result:
+                    text = text.strip()
+                    if text:
+                        entries.append((text, bbox, conf))
+            return entries
+        except Exception:
+            return []
+
+    def _postprocess_ocr_text(self, text: str, conf: float) -> tuple[str, float, bool, float]:
+        """OCR 텍스트 후처리: 한글 교정 + 패턴 검증 + 형식 교정"""
+        if not text or len(text) < 4:
+            return text, conf, False, 0.0
+        cleaned = re.sub(r"[^가-힣0-9A-Za-z]", "", text)
+        corrected = correct_ocr_hangul(cleaned)
+        corrected = correct_hangul_similarity(corrected)
+        is_valid, normalized, score = validate_korean_plate(corrected)
+        if normalized and len(normalized) >= 4:
+            fmt_corrected, fmt_score = validate_plate_format(normalized)
+            if fmt_score > 0:
+                normalized = fmt_corrected
+                score = max(score, fmt_score)
+                is_valid = True
+            has_hangul = any('\uac00' <= c <= '\ud7a3' for c in normalized)
+            if has_hangul:
+                score = max(score, 0.90)
+            return normalized, conf, is_valid or has_hangul, score
+        return text, conf, False, 0.0
+
     def _ocr_korean_plate(self, plate_img: np.ndarray) -> tuple[str, float, bool, float]:
         """
-        한국 번호판 OCR (PaddleOCR + EasyOCR Korean 앙상블)
+        한국 번호판 OCR (개선3+4: 다중 전처리 앙상블 + bbox 재조합)
 
         전략:
-        1. PaddleOCR Korean (원본 컬러) - 한글 인식 최강
-        2. EasyOCR Korean (원본 컬러) - 보조
-        3. 결과에서 한국 번호판 패턴 매칭 + 한글 오인식 보정
-        4. 최고 패턴 점수 결과 반환
+        1. PaddleOCR (원본) → bbox 기반 재조합 → 후처리
+        2. PaddleOCR (강화 전처리) → bbox 기반 재조합 → 후처리
+        3. EasyOCR (원본) → bbox 기반 재조합 → 후처리
+        4. EasyOCR (강화 전처리) → bbox 기반 재조합 → 후처리
+        5. 유효 패턴 우선 + 신뢰도 가중 투표
 
         Returns:
             (text, ocr_confidence, is_valid_plate, pattern_score)
         """
         candidates: list[tuple[str, float, bool, float]] = []
 
-        # 원본 컬러 이미지 준비 (OCR 엔진이 직접 전처리)
+        # 원본 컬러 이미지 준비
         if len(plate_img.shape) == 2:
             ocr_img = cv2.cvtColor(plate_img, cv2.COLOR_GRAY2BGR)
         else:
             ocr_img = plate_img
 
-        # ── 1. PaddleOCR Korean (한글 인식 최강) ──
-        if self.paddle_reader is not None:
-            try:
-                result = self.paddle_reader.ocr(ocr_img, cls=True)
-                if result and result[0]:
-                    lines = result[0]
-                    texts = []
-                    total_conf = 0.0
-                    count = 0
-                    for item in sorted(lines, key=lambda x: (x[0][0][1], x[0][0][0])):
-                        try:
-                            t = item[1][0].strip()
-                            c = float(item[1][1])
-                            if t:
-                                texts.append(t)
-                                total_conf += c
-                                count += 1
-                        except (IndexError, TypeError):
-                            continue
-                    combined = "".join(texts)
-                    avg_conf = total_conf / count if count > 0 else 0.0
-                    if combined and len(combined) >= 4:
-                        # 공백/특수문자 제거, 한글+숫자만
-                        cleaned = re.sub(r"[^가-힣0-9A-Za-z]", "", combined)
-                        corrected = correct_ocr_hangul(cleaned)
-                        corrected = correct_hangul_similarity(corrected)
-                        is_valid, normalized, score = validate_korean_plate(corrected)
-                        if normalized and len(normalized) >= 4:
-                            # 형식 교정: 유효하지 않은 한글 → 유효 한글 자동 보정
-                            fmt_corrected, fmt_score = validate_plate_format(normalized)
-                            if fmt_score > 0:
-                                normalized = fmt_corrected
-                                score = max(score, fmt_score)
-                                is_valid = True
-                            # PaddleOCR + 한글 감지 = 최우선 (PaddleOCR은 한글 인식 최강)
-                            has_hangul = any('\uac00' <= c <= '\ud7a3' for c in normalized)
-                            if has_hangul and avg_conf >= 0.7:
-                                score = max(score, 1.05)  # PaddleOCR 한글 고신뢰: 최우선
-                            elif has_hangul:
-                                score = max(score, 0.95)  # PaddleOCR 한글 저신뢰: 여전히 우선
-                            candidates.append((normalized, avg_conf, is_valid or has_hangul, score))
-            except Exception:
-                pass
+        # 강화 전처리 이미지 (개선3: 다중 전처리)
+        enhanced_img = self._preprocess_plate_enhanced(plate_img)
 
-        # ── 2. EasyOCR Korean (보조) ──
-        if self._ko_reader is not None:
-            try:
-                result = self._ko_reader.readtext(
-                    ocr_img, detail=1, paragraph=False,
-                    allowlist=KOREAN_PLATE_ALLOWLIST,
-                    text_threshold=0.3,
-                    low_text=0.3,
-                )
-                if result:
-                    result.sort(key=lambda r: r[0][0][0])
-                    texts = [r[1].strip() for r in result if r[1].strip()]
-                    confs = [r[2] for r in result if r[1].strip()]
-                    combined = "".join(texts)
-                    avg_conf = sum(confs) / len(confs) if confs else 0.0
-                    if combined and len(combined) >= 4:
-                        cleaned = re.sub(r"[^가-힣0-9A-Za-z]", "", combined)
-                        corrected = correct_ocr_hangul(cleaned)
-                        corrected = correct_hangul_similarity(corrected)
-                        is_valid, normalized, score = validate_korean_plate(corrected)
-                        if normalized and len(normalized) >= 4:
-                            # 형식 교정 적용
-                            fmt_corrected, fmt_score = validate_plate_format(normalized)
-                            if fmt_score > 0:
-                                normalized = fmt_corrected
-                                score = max(score, fmt_score)
-                                is_valid = True
-                            candidates.append((normalized, avg_conf, is_valid, score))
-            except Exception:
-                pass
+        # ── 1. PaddleOCR 원본 (한글 인식 최강, 최우선) ──
+        entries = self._run_paddle_ocr(ocr_img)
+        if entries:
+            text, conf = self._reassemble_plate(entries)
+            result = self._postprocess_ocr_text(text, conf)
+            if result[0] and len(result[0]) >= 4:
+                # PaddleOCR + 한글 = 최우선 보너스
+                has_hangul = any('\uac00' <= c <= '\ud7a3' for c in result[0])
+                score = result[3]
+                if has_hangul and conf >= 0.7:
+                    score = max(score, 1.05)
+                elif has_hangul:
+                    score = max(score, 0.95)
+                candidates.append((result[0], result[1], result[2], score))
 
-        # ── 3. 소프트 전처리 후 PaddleOCR 재시도 (원본 실패 시) ──
+        # ── 2. PaddleOCR 강화 전처리 ──
+        entries = self._run_paddle_ocr(enhanced_img)
+        if entries:
+            text, conf = self._reassemble_plate(entries)
+            result = self._postprocess_ocr_text(text, conf)
+            if result[0] and len(result[0]) >= 4:
+                candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
+
+        # ── 3. EasyOCR 원본 (보조) ──
+        entries = self._run_easy_ocr(ocr_img)
+        if entries:
+            text, conf = self._reassemble_plate(entries)
+            result = self._postprocess_ocr_text(text, conf)
+            if result[0] and len(result[0]) >= 4:
+                candidates.append((result[0], result[1], result[2], result[3]))
+
+        # ── 4. EasyOCR 강화 전처리 ──
+        entries = self._run_easy_ocr(enhanced_img)
+        if entries:
+            text, conf = self._reassemble_plate(entries)
+            result = self._postprocess_ocr_text(text, conf)
+            if result[0] and len(result[0]) >= 4:
+                candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
+
+        # ── 5. 소프트 전처리 PaddleOCR 재시도 (모두 실패 시) ──
         if not candidates and self.paddle_reader is not None:
             try:
                 soft = self._preprocess_plate_soft(plate_img)
                 soft_bgr = cv2.cvtColor(soft, cv2.COLOR_GRAY2BGR)
-                result = self.paddle_reader.ocr(soft_bgr, cls=True)
-                if result and result[0]:
-                    lines = result[0]
-                    texts = []
-                    total_conf = 0.0
-                    count = 0
-                    for item in sorted(lines, key=lambda x: (x[0][0][1], x[0][0][0])):
-                        try:
-                            t = item[1][0].strip()
-                            c = float(item[1][1])
-                            if t:
-                                texts.append(t)
-                                total_conf += c
-                                count += 1
-                        except (IndexError, TypeError):
-                            continue
-                    combined = "".join(texts)
-                    avg_conf = total_conf / count if count > 0 else 0.0
-                    if combined and len(combined) >= 4:
-                        cleaned = re.sub(r"[^가-힣0-9A-Za-z]", "", combined)
-                        corrected = correct_ocr_hangul(cleaned)
-                        corrected = correct_hangul_similarity(corrected)
-                        is_valid, normalized, score = validate_korean_plate(corrected)
-                        if normalized and len(normalized) >= 4:
-                            # 형식 교정 적용
-                            fmt_corrected, fmt_score = validate_plate_format(normalized)
-                            if fmt_score > 0:
-                                normalized = fmt_corrected
-                                score = max(score, fmt_score)
-                                is_valid = True
-                            # 전처리 후 결과는 약간 감점
-                            candidates.append((normalized, avg_conf * 0.95, is_valid, score * 0.95))
+                entries = self._run_paddle_ocr(soft_bgr)
+                if entries:
+                    text, conf = self._reassemble_plate(entries)
+                    result = self._postprocess_ocr_text(text, conf)
+                    if result[0] and len(result[0]) >= 4:
+                        candidates.append((result[0], result[1] * 0.90, result[2], result[3] * 0.90))
             except Exception:
                 pass
 
@@ -1711,9 +2025,33 @@ class PlateRecognizer:
 
     # ── 선명도 측정 ──────────────────────────────────────
 
+    @staticmethod
+    def _levenshtein(s1: str, s2: str) -> int:
+        """Levenshtein 편집 거리 계산 (개선5)"""
+        if len(s1) < len(s2):
+            return PlateRecognizer._levenshtein(s2, s1)
+        if len(s2) == 0:
+            return len(s1)
+        prev_row = list(range(len(s2) + 1))
+        for i, c1 in enumerate(s1):
+            curr_row = [i + 1]
+            for j, c2 in enumerate(s2):
+                cost = 0 if c1 == c2 else 1
+                curr_row.append(min(
+                    curr_row[j] + 1,        # insert
+                    prev_row[j + 1] + 1,    # delete
+                    prev_row[j] + cost,      # replace
+                ))
+            prev_row = curr_row
+        return prev_row[-1]
+
     def _track_plate(self, text: str, frame_idx: int, result: dict) -> None:
         """
-        번호판 추적: CONFIRM_FRAME_COUNT(3)프레임 이상 인식 시 confirmed 승격.
+        번호판 추적 + 시간축 앙상블 (개선5)
+
+        - 정확히 같은 키 → 기존 로직 (카운트 증가)
+        - Levenshtein ≤ 2인 유사 키 → 같은 번호판으로 그룹핑
+        - 5프레임 슬라이딩 윈도우 내 최고 confidence 결과 채택
         """
         key = re.sub(r"[^가-힣0-9A-Z]", "", text.upper())
         if not key or len(key) < 2:
@@ -1721,14 +2059,49 @@ class PlateRecognizer:
 
         safe_result = {k: v for k, v in result.items() if k not in ("plate_img", "preprocessed")}
 
+        # 시간축 앙상블: Levenshtein ≤ 2인 기존 키 찾기 (개선5)
+        matched_key = None
         if key in self._plate_tracker:
-            tracker = self._plate_tracker[key]
+            matched_key = key
+        else:
+            for existing_key in self._plate_tracker:
+                if abs(len(existing_key) - len(key)) <= TEMPORAL_LEVENSHTEIN_MAX:
+                    if self._levenshtein(key, existing_key) <= TEMPORAL_LEVENSHTEIN_MAX:
+                        matched_key = existing_key
+                        break
+
+        if matched_key is not None:
+            tracker = self._plate_tracker[matched_key]
             tracker["count"] += 1
             tracker["last_frame"] = frame_idx
-            # best_result 갱신: 더 높은 score면 교체
-            if result.get("pattern_score", 0) > tracker["best_result"].get("pattern_score", 0):
-                tracker["best_result"] = safe_result
-            # CONFIRM_FRAME_COUNT 도달 시 confirmed 승격 (중복 방지)
+
+            # 슬라이딩 윈도우에 현재 결과 추가 (개선5)
+            if "window" not in tracker:
+                tracker["window"] = []
+            tracker["window"].append({
+                "text": key,
+                "score": result.get("pattern_score", 0),
+                "conf": result.get("ocr_confidence", 0),
+                "frame": frame_idx,
+                "result": safe_result,
+            })
+            # 윈도우 크기 제한
+            if len(tracker["window"]) > TEMPORAL_WINDOW:
+                tracker["window"] = tracker["window"][-TEMPORAL_WINDOW:]
+
+            # 윈도우 내 최고 score 결과로 best_result 갱신 (개선5)
+            best_in_window = max(tracker["window"], key=lambda w: w["score"] * 0.6 + w["conf"] * 0.4)
+            if best_in_window["score"] >= tracker["best_result"].get("pattern_score", 0):
+                tracker["best_result"] = best_in_window["result"]
+                # 윈도우에서 최빈 텍스트로 교정 (다수결)
+                from collections import Counter
+                text_counts = Counter(w["text"] for w in tracker["window"])
+                majority_text, majority_count = text_counts.most_common(1)[0]
+                if majority_count >= 2 and majority_text != key:
+                    # 다수결 텍스트가 더 신뢰할 만하면 채택
+                    tracker["best_result"]["text"] = majority_text
+
+            # CONFIRM_FRAME_COUNT 도달 시 confirmed 승격
             if tracker["count"] >= CONFIRM_FRAME_COUNT and not tracker.get("confirmed"):
                 tracker["confirmed"] = True
                 confirmed_entry = dict(tracker["best_result"])
@@ -1743,11 +2116,33 @@ class PlateRecognizer:
                 "last_frame": frame_idx,
                 "confirmed": False,
                 "best_result": safe_result,
+                "window": [{
+                    "text": key,
+                    "score": result.get("pattern_score", 0),
+                    "conf": result.get("ocr_confidence", 0),
+                    "frame": frame_idx,
+                    "result": safe_result,
+                }],
             }
 
     def get_confirmed_plates(self) -> list[dict]:
-        """확정된 번호판 목록 반환."""
-        return list(self._confirmed_plates)
+        """확정된 번호판 목록 반환 (편집거리 1 이하 중복 제거)."""
+        deduped: list[dict] = []
+        for plate in self._confirmed_plates:
+            text = plate.get("text", "")
+            merged = False
+            for existing in deduped:
+                ex_text = existing.get("text", "")
+                if abs(len(text) - len(ex_text)) <= 1 and self._levenshtein(text, ex_text) <= 1:
+                    # 더 높은 score 유지
+                    if plate.get("pattern_score", 0) > existing.get("pattern_score", 0):
+                        existing.update(plate)
+                    existing["detection_count"] = existing.get("detection_count", 0) + plate.get("detection_count", 0)
+                    merged = True
+                    break
+            if not merged:
+                deduped.append(dict(plate))
+        return deduped
 
     @staticmethod
     def _calculate_sharpness(image: np.ndarray) -> float:
@@ -1900,9 +2295,25 @@ class PlateRecognizer:
         if self._is_plate_model:
             # === 번호판 전용 모델: 직접 크롭 후 OCR ===
             for det in detections:
-                plate_img = self._crop_region(frame, det["xyxy"], padding_ratio=PLATE_MODEL_PADDING_RATIO)
+                plate_img = self._crop_region(
+                    frame, det["xyxy"],
+                    padding_left=PLATE_MODEL_PADDING_H, padding_right=PLATE_MODEL_PADDING_H,
+                    padding_top=PLATE_MODEL_PADDING_V, padding_bottom=PLATE_MODEL_PADDING_V,
+                )
                 if plate_img.size == 0 or plate_img.shape[0] < 5 or plate_img.shape[1] < 10:
                     continue
+
+                # 개선1: 크롭 품질 필터 (aspect ratio + min size)
+                ph, pw = plate_img.shape[:2]
+                if pw < MIN_PLATE_WIDTH or ph < MIN_PLATE_HEIGHT:
+                    continue
+                aspect = pw / ph if ph > 0 else 0
+                if aspect < PLATE_MIN_ASPECT or aspect > PLATE_MAX_ASPECT:
+                    continue
+
+                # 개선2: 업스케일 + 기울기 보정
+                plate_img = self._upscale_if_small(plate_img)
+                plate_img = self._deskew_plate(plate_img)
 
                 # 속도 최적화: 동일 위치 bbox에 이미 확정된 번호판이 있으면 OCR 스킵
                 cached = self._find_bbox_cache(det["xyxy"], frame_idx)
@@ -2052,6 +2463,7 @@ class PlateRecognizer:
         self,
         video_path: str,
         output_dir: Optional[str] = None,
+        progress_callback=None,
     ) -> list[dict]:
         """
         비디오 전체 처리 (상태 머신 기반)
@@ -2160,6 +2572,8 @@ class PlateRecognizer:
                     f"| {elapsed:.0f}초 경과 | 잔여: {remaining:.0f}초 "
                     f"| {self.state.name} | 인식: {len(best_results)}건"
                 )
+                if progress_callback:
+                    progress_callback(frame_idx, len(best_results))
 
         cap.release()
 
