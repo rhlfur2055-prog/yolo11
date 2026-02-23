@@ -1,0 +1,69 @@
+{
+  "total": 9,
+  "valid": 6,
+  "results": [
+    {
+      "frame": 100,
+      "text": "YEEIT",
+      "valid": true,
+      "score": 0.436,
+      "det_conf": 0.659
+    },
+    {
+      "frame": 100,
+      "text": "5061",
+      "valid": true,
+      "score": 0.633,
+      "det_conf": 0.506
+    },
+    {
+      "frame": 100,
+      "text": "디9개료",
+      "valid": false,
+      "score": 0.325,
+      "det_conf": 0.501
+    },
+    {
+      "frame": 300,
+      "text": "V08HU",
+      "valid": true,
+      "score": 0.555,
+      "det_conf": 0.669
+    },
+    {
+      "frame": 300,
+      "text": "IAG",
+      "valid": false,
+      "score": 0.114,
+      "det_conf": 0.587
+    },
+    {
+      "frame": 600,
+      "text": "GLJ0S",
+      "valid": true,
+      "score": 0.547,
+      "det_conf": 0.611
+    },
+    {
+      "frame": 600,
+      "text": "OSK5U",
+      "valid": true,
+      "score": 0.599,
+      "det_conf": 0.609
+    },
+    {
+      "frame": 600,
+      "text": "베522",
+      "valid": true,
+      "score": 0.595,
+      "det_conf": 0.597
+    },
+    {
+      "frame": 600,
+      "text": "",
+      "valid": false,
+      "score": 0.0,
+      "det_conf": 0.384
+    }
+  ]
+}
