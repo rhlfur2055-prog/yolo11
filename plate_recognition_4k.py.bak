@@ -42,35 +42,6 @@ import numpy as np
 # JSON 직렬화 유틸리티 (ndarray 안전 변환)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# YOLO26 통합 모델 로더 (Ultralytics 최신 모델)
-# YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import os as _os
-
-# 모델 우선순위 (위에서부터 먼저 찾으면 사용)
-_MODEL_PRIORITY = [
-    "yolo26n.pt",          # ★ YOLO26n - 최신 경량 (번호판 전용 fine-tune 필요)
-    "yolo26s.pt",          # ★ YOLO26s - 소형
-    "yolo11x_plate.pt",    # YOLOv11x fine-tuned (mAP@50=98.4%)
-    "yolo11n_plate.pt",    # YOLOv11n 경량
-    "yolo26.pt",           # 기존 프로젝트 모델
-    "yolo11n.pt",          # COCO fallback
-    "yolov8n.pt",         # 최후 fallback
-]
-
-def _load_best_model():
-    """우선순위에 따라 가장 좋은 모델 자동 로드"""
-    from ultralytics import YOLO
-    for m in _MODEL_PRIORITY:
-        if _os.path.exists(m):
-            print(f"[YOLO26] 모델 로드: {m}")
-            return YOLO(m)
-    # 없으면 YOLO26n 자동 다운로드 (ultralytics에서)
-    print("[YOLO26] yolo26n.pt 자동 다운로드 중...")
-    return YOLO("yolo26n.pt")
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
         if isinstance(obj, np.ndarray):

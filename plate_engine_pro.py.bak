@@ -1,32 +1,3 @@
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# YOLO26 통합 모델 로더 (Ultralytics 최신 모델)
-# YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import os as _os
-
-# 모델 우선순위 (위에서부터 먼저 찾으면 사용)
-_MODEL_PRIORITY = [
-    "yolo26n.pt",          # ★ YOLO26n - 최신 경량 (번호판 전용 fine-tune 필요)
-    "yolo26s.pt",          # ★ YOLO26s - 소형
-    "yolo11x_plate.pt",    # YOLOv11x fine-tuned (mAP@50=98.4%)
-    "yolo11n_plate.pt",    # YOLOv11n 경량
-    "yolo26.pt",           # 기존 프로젝트 모델
-    "yolo11n.pt",          # COCO fallback
-    "yolov8n.pt",         # 최후 fallback
-]
-
-def _load_best_model():
-    """우선순위에 따라 가장 좋은 모델 자동 로드"""
-    from ultralytics import YOLO
-    for m in _MODEL_PRIORITY:
-        if _os.path.exists(m):
-            print(f"[YOLO26] 모델 로드: {m}")
-            return YOLO(m)
-    # 없으면 YOLO26n 자동 다운로드 (ultralytics에서)
-    print("[YOLO26] yolo26n.pt 자동 다운로드 중...")
-    return YOLO("yolo26n.pt")
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # -*- coding: utf-8 -*-
 # ============================================
 # plate_engine_pro.py
@@ -95,11 +66,6 @@ class PlateEngineConfig:
     PLATE_MIN_LEN = 7
     PLATE_MAX_LEN = 8
     CONSECUTIVE_FRAMES_REQUIRED = 3
-# 환경변수로 오버라이드: set PLATE_CONSECUTIVE_FRAMES=1
-import os as _os_eng
-_cf = _os_eng.environ.get('PLATE_CONSECUTIVE_FRAMES', '')
-if _cf.strip().isdigit(): CONSECUTIVE_FRAMES_REQUIRED = int(_cf)
-
     # 자주 혼동되는 문자 보정 (MareArts) 0↔O, 1↔I, 8↔B, 6↔G
     OCR_CONFUSION_MAP = {
         "O": "0", "Q": "0", "D": "0",

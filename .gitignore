@@ -69,3 +69,9 @@ Thumbs.db
 .DS_Store
 *.db
 *.db
+*.db
+*.pt
+
+# ── 자동 추가 (cleanup_and_yolo26_upgrade.py) ──
+*.sqlite
+_thumb/
