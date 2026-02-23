@@ -27,7 +27,12 @@ aihubshell
 # API keys & credentials
 .env
 
-# Large data directories
+# Large data directories (AI허브 데이터 개인정보 포함 - 절대 업로드 금지)
+dataset/*
+!dataset/yolo_format/
+dataset/yolo_format/*
+!dataset/yolo_format/data.yaml
+aihub_raw/
 103.*/
 .claude/
 .paddleocr/
