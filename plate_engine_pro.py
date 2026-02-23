@@ -95,10 +95,10 @@ class PlateEngineConfig:
     PLATE_MIN_LEN = 7
     PLATE_MAX_LEN = 8
     CONSECUTIVE_FRAMES_REQUIRED = 3
-# 환경변수로 오버라이드: set PLATE_CONSECUTIVE_FRAMES=1
-import os as _os_eng
-_cf = _os_eng.environ.get('PLATE_CONSECUTIVE_FRAMES', '')
-if _cf.strip().isdigit(): CONSECUTIVE_FRAMES_REQUIRED = int(_cf)
+    # 환경변수로 오버라이드: set PLATE_CONSECUTIVE_FRAMES=1
+    _cf = os.environ.get('PLATE_CONSECUTIVE_FRAMES', '')
+    if _cf.strip().isdigit():
+        CONSECUTIVE_FRAMES_REQUIRED = int(_cf)
 
     # 자주 혼동되는 문자 보정 (MareArts) 0↔O, 1↔I, 8↔B, 6↔G
     OCR_CONFUSION_MAP = {
