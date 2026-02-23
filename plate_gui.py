@@ -18,6 +18,14 @@ import time
 import queue
 import argparse
 import threading
+
+# Windows 콘솔 한글 깨짐 방지
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from typing import Optional
 
 import cv2
@@ -146,8 +154,9 @@ class VideoReader(threading.Thread):
             t0 = time.time()
             ret, frame = self.cap.read()
             if not ret:
-                # 영상 끝 → 정지
-                self.playing.clear()
+                # 영상 끝 → 처음으로 되감기 (반복 재생)
+                self.cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                self.frame_idx = 0
                 continue
 
             self.frame_idx += 1
@@ -186,8 +195,31 @@ class VideoReader(threading.Thread):
 # DetectionWorker 스레드
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
+def _pro_engine_results_to_gui(pro_results: list, frame: np.ndarray) -> list:
+    """Pro/Fast/Unified 결과를 GUI 형식으로 변환."""
+    out = []
+    for r in pro_results:
+        x1, y1, x2, y2 = r.get("bbox", [0, 0, 0, 0])
+        plate_img = None
+        if frame.size > 0 and len(r.get("bbox", [])) == 4:
+            h, w = frame.shape[:2]
+            x1_, y1_ = max(0, x1), max(0, y1)
+            x2_, y2_ = min(w, x2), min(h, y2)
+            if x2_ > x1_ and y2_ > y1_:
+                plate_img = frame[y1_:y2_, x1_:x2_].copy()
+        out.append({
+            "text": r.get("plate", ""),
+            "ocr_confidence": r.get("confidence", 0),
+            "bbox": r.get("bbox", []),
+            "is_valid_plate": True,
+            "plate_image": plate_img,
+            "pattern_score": r.get("confidence", 0),
+        })
+    return out
+
+
 class DetectionWorker(threading.Thread):
-    """PlateRecognizer로 번호판 인식, 결과를 results_queue에 전달."""
+    """PlateRecognizer 또는 PlateEnginePro로 번호판 인식, 결과를 results_queue에 전달."""
 
     def __init__(
         self,
@@ -202,16 +234,38 @@ class DetectionWorker(threading.Thread):
         self.stop_flag = threading.Event()
         self.ready = threading.Event()
         self.loading_msg = ""
+        self.use_pro_engine = recognizer_kwargs.pop("use_pro_engine", False)
+        self.engine_mode = recognizer_kwargs.pop("engine_mode", "pro")
+        self.use_multiframe = recognizer_kwargs.pop("use_multiframe", False)
+        self.recognizer = None
+        self.pro_engine = None
+        self.fast_engine = None
 
     def run(self) -> None:
-        self.loading_msg = "Loading plate model..."
-        try:
-            sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-            from plate_recognition_4k import PlateRecognizer
-            self.recognizer = PlateRecognizer(**self.recognizer_kwargs)
-        except Exception as e:
-            self.loading_msg = f"Model load error: {e}"
-            return
+        if self.use_pro_engine:
+            self.loading_msg = "Loading Pro/Fast engines..."
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from plate_engine_pro import (
+                    PlateEnginePro,
+                    PlateEngineFast,
+                    process_frame_unified,
+                )
+                self.pro_engine = PlateEnginePro()
+                self.fast_engine = PlateEngineFast()
+                self._process_frame_unified = process_frame_unified
+            except Exception as e:
+                self.loading_msg = f"Pro engine error: {e}"
+                return
+        else:
+            self.loading_msg = "Loading plate model..."
+            try:
+                sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+                from plate_recognition_4k import PlateRecognizer
+                self.recognizer = PlateRecognizer(**self.recognizer_kwargs)
+            except Exception as e:
+                self.loading_msg = f"Model load error: {e}"
+                return
         self.loading_msg = ""
         self.ready.set()
 
@@ -222,15 +276,48 @@ class DetectionWorker(threading.Thread):
                 continue
 
             t0 = time.time()
-            results = self.recognizer.process_frame(frame, frame_idx)
-            elapsed_ms = (time.time() - t0) * 1000
-
-            data = {
-                "frame_idx": frame_idx,
-                "timestamp": ts,
-                "results": results,
-                "process_ms": elapsed_ms,
-            }
+            if self.pro_engine is not None:
+                if self.engine_mode in ("fast", "auto") and getattr(self.fast_engine, "available", False):
+                    results_list, ms_pro, ms_fast = self._process_frame_unified(
+                        frame, "CAM01",
+                        engine_pro=self.pro_engine,
+                        engine_fast=self.fast_engine,
+                        engine_mode=self.engine_mode,
+                        use_multiframe=self.use_multiframe,
+                    )
+                    results = _pro_engine_results_to_gui(results_list, frame)
+                    elapsed_ms = max(ms_pro, ms_fast)
+                    data = {
+                        "frame_idx": frame_idx,
+                        "timestamp": ts,
+                        "results": results,
+                        "process_ms": elapsed_ms,
+                        "process_ms_pro": ms_pro,
+                        "process_ms_fast": ms_fast,
+                    }
+                else:
+                    pro_results = self.pro_engine.process_frame(
+                        frame, "CAM01", use_multiframe=self.use_multiframe
+                    )
+                    results = _pro_engine_results_to_gui(pro_results, frame)
+                    elapsed_ms = (time.time() - t0) * 1000
+                    data = {
+                        "frame_idx": frame_idx,
+                        "timestamp": ts,
+                        "results": results,
+                        "process_ms": elapsed_ms,
+                        "process_ms_pro": elapsed_ms,
+                        "process_ms_fast": 0.0,
+                    }
+            else:
+                results = self.recognizer.process_frame(frame, frame_idx)
+                elapsed_ms = (time.time() - t0) * 1000
+                data = {
+                    "frame_idx": frame_idx,
+                    "timestamp": ts,
+                    "results": results,
+                    "process_ms": elapsed_ms,
+                }
 
             try:
                 self.results_queue.put_nowait(data)
@@ -274,6 +361,8 @@ class PlateGUIApp(tk.Tk):
         self._detection_lock = threading.Lock()
         self._detection_history: list[dict] = []
         self._process_ms = 0.0
+        self._process_ms_pro = 0.0
+        self._process_ms_fast = 0.0
         self._det_fps_samples: list[float] = []
         self._video_w = 0
         self._video_h = 0
@@ -336,13 +425,42 @@ class PlateGUIApp(tk.Tk):
         self.plate_label = tk.Label(
             self.plate_frame, textvariable=self.plate_text_var,
             bg=C_SURFACE, fg=C_GREEN,
-            font=("Malgun Gothic", 26, "bold"),
+            font=("Malgun Gothic", 22, "bold"),
+            wraplength=SIDE_PANEL_W - 40,
         )
         self.plate_label.pack()
 
         self.conf_var = tk.StringVar(value="")
         tk.Label(right, textvariable=self.conf_var, bg=C_PANEL, fg=C_DIM,
                  font=("Consolas", 9)).pack(pady=4)
+
+        # [통합1] 엔진 선택 드롭다운
+        tk.Label(right, text="엔진", bg=C_PANEL, fg=C_DIM, font=("Segoe UI", 9)).pack(pady=(8, 2))
+        self.engine_choice_var = tk.StringVar(value="Pro 엔진")
+        engine_combo = tk.OptionMenu(
+            right, self.engine_choice_var,
+            "Pro 엔진", "Fast 엔진", "자동(높은 confidence)"
+        )
+        engine_combo.config(bg=C_SURFACE, fg=C_TEXT, font=("Consolas", 9))
+        engine_combo.pack(fill=tk.X, padx=8, pady=2)
+
+        # [통합2] 멀티프레임 모드 토글
+        self.multiframe_var = tk.BooleanVar(value=False)
+        tk.Checkbutton(
+            right, text="멀티프레임 모드 (5프레임 합성)",
+            variable=self.multiframe_var, bg=C_PANEL, fg=C_TEXT,
+            selectcolor=C_SURFACE, activebackground=C_PANEL, activeforeground=C_TEXT,
+            font=("Segoe UI", 9),
+        ).pack(anchor=tk.W, padx=8, pady=4)
+
+        # [통합4] API 서버 시작 버튼
+        self.api_server_process = None
+        self.api_btn = tk.Button(
+            right, text="API 서버 시작 (8765)",
+            command=self._on_api_server_click,
+            bg=C_ACCENT, fg="white", font=("Segoe UI", 9), relief=tk.FLAT, padx=8, pady=4,
+        )
+        self.api_btn.pack(fill=tk.X, padx=8, pady=6)
 
         # 구분선
         tk.Frame(right, bg=C_BORDER, height=1).pack(fill=tk.X, padx=8, pady=8)
@@ -372,6 +490,28 @@ class PlateGUIApp(tk.Tk):
         self.bind("<Q>", lambda e: self._on_close())
         self.bind("<Escape>", lambda e: self._on_close())
 
+    def _on_api_server_click(self) -> None:
+        """[통합4] API 서버 백그라운드 실행 (포트 8765)"""
+        if self.api_server_process is not None:
+            try:
+                self.api_server_process.terminate()
+                self.api_server_process = None
+            except Exception:
+                pass
+            self.api_btn.config(text="API 서버 시작 (8765)")
+            return
+        try:
+            import subprocess
+            self.api_server_process = subprocess.Popen(
+                [sys.executable, os.path.join(self._script_dir, "api_server.py"), "--port", "8765"],
+                cwd=self._script_dir,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            self.api_btn.config(text="API 서버 중지 (8765)")
+        except Exception as e:
+            self._log(f"API 서버 시작 실패: {e}")
+
     # ─── 영상 열기 (자동 시작) ───
 
     def _open_video(self, path: str) -> None:
@@ -395,15 +535,22 @@ class PlateGUIApp(tk.Tk):
         self.stats_var.set("Loading model...")
         self.update()
 
+        choice = self.engine_choice_var.get()
+        engine_mode = "pro" if "Pro" in choice else ("fast" if "Fast" in choice else "auto")
+        use_pro = getattr(self.cli_args, "pro_engine", True)
+        kwargs = {
+            "model_size": self.cli_args.model_size,
+            "confidence_threshold": self.cli_args.confidence,
+            "use_sahi": False,
+            "frame_skip": 1,
+            "burst_frames": 1,
+            "use_pro_engine": use_pro,
+            "engine_mode": engine_mode,
+            "use_multiframe": self.multiframe_var.get(),
+        }
         self.detection_worker = DetectionWorker(
             self.detection_queue, self.results_queue,
-            recognizer_kwargs={
-                "model_size": self.cli_args.model_size,
-                "confidence_threshold": self.cli_args.confidence,
-                "use_sahi": False,
-                "frame_skip": 1,
-                "burst_frames": 1,
-            },
+            recognizer_kwargs=kwargs,
         )
         self.detection_worker.start()
 
@@ -432,6 +579,8 @@ class PlateGUIApp(tk.Tk):
                 with self._detection_lock:
                     self._latest_detections = data["results"]
                     self._process_ms = data["process_ms"]
+                    self._process_ms_pro = data.get("process_ms_pro", 0)
+                    self._process_ms_fast = data.get("process_ms_fast", 0)
                     if data["process_ms"] > 0:
                         self._det_fps_samples.append(1000.0 / data["process_ms"])
                         if len(self._det_fps_samples) > 10:
@@ -605,7 +754,7 @@ class PlateGUIApp(tk.Tk):
     def _levenshtein(s1: str, s2: str) -> int:
         """편집 거리 (Levenshtein distance) 계산."""
         if len(s1) < len(s2):
-            return PlateGUI._levenshtein(s2, s1)
+            return PlateGUIApp._levenshtein(s2, s1)
         if not s2:
             return len(s1)
         prev = list(range(len(s2) + 1))
@@ -651,13 +800,15 @@ class PlateGUIApp(tk.Tk):
         n_det = len(self._latest_detections)
         mins, secs = divmod(int(ts), 60)
         t_mins, t_secs = divmod(int(total_sec), 60)
-
+        speed_info = f"Proc:{self._process_ms:.0f}ms"
+        if getattr(self, "_process_ms_pro", 0) or getattr(self, "_process_ms_fast", 0):
+            speed_info = f"Pro:{self._process_ms_pro:.0f}ms / Fast:{self._process_ms_fast:.0f}ms"
         status = (
             f"{mins:02d}:{secs:02d}/{t_mins:02d}:{t_secs:02d}  "
             f"F:{frame_idx}/{total}  "
             f"Det:{n_det}  "
             f"DetFPS:{det_fps:.1f}  "
-            f"Proc:{self._process_ms:.0f}ms  "
+            f"{speed_info}  "
             f"Log:{len(self._detection_history)}"
         )
         self.stats_var.set(status)
@@ -680,6 +831,12 @@ class PlateGUIApp(tk.Tk):
 
     def _on_close(self) -> None:
         self._log(f"=== PlateGUI 종료 === (저장: {self._saved_count}건, 기록: {len(self._detection_history)}건)")
+        if getattr(self, "api_server_process", None) is not None:
+            try:
+                self.api_server_process.terminate()
+                self.api_server_process = None
+            except Exception:
+                pass
         self._stop_threads()
         self.destroy()
 
@@ -701,6 +858,10 @@ def main() -> None:
                         help="Plate model size (default: n)")
     parser.add_argument("--confidence", type=float, default=0.15,
                         help="Min detection confidence (default: 0.15)")
+    parser.add_argument("--pro-engine", action="store_true", default=True,
+                        help="Use PlateEnginePro (기본값)")
+    parser.add_argument("--no-pro-engine", action="store_false", dest="pro_engine",
+                        help="Use 4k recognizer instead of Pro")
     args = parser.parse_args()
 
     # 기본 영상 결정

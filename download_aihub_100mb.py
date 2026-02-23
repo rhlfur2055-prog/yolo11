@@ -14,12 +14,19 @@
 
 import os
 import sys
+import io
 import json
 import shutil
 import random
 import argparse
 from pathlib import Path
 from collections import defaultdict
+
+# Windows cp949 콘솔 인코딩 문제 해결
+if sys.stdout.encoding != "utf-8":
+    sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
+if sys.stderr.encoding != "utf-8":
+    sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
 
 # ── 경로 설정 ──
 BASE_DIR = Path(__file__).parent
@@ -263,28 +270,27 @@ def merge_part_files():
         print(f"  → {_format_size(output.stat().st_size)}")
 
 
-def convert_bbox_to_yolo(bbox, img_w, img_h):
-    """AI허브 bbox [x, y, w, h] → YOLO [cx, cy, w, h] 정규화"""
-    x, y, w, h = bbox
-    cx = (x + w / 2) / img_w
-    cy = (y + h / 2) / img_h
-    nw = w / img_w
-    nh = h / img_h
-    # 범위 클램핑
-    cx = max(0.0, min(1.0, cx))
-    cy = max(0.0, min(1.0, cy))
-    nw = max(0.0, min(1.0, nw))
-    nh = max(0.0, min(1.0, nh))
-    return cx, cy, nw, nh
-
-
 def convert_to_yolo():
-    """AI허브 JSON + 이미지 → YOLO format 변환"""
+    """AI허브 JSON + 이미지 → YOLO format 변환
+
+    지원 데이터 형태:
+      A) 크롭형: {imagePath, value, id} - 번호판만 크롭된 이미지
+         → 이미지 전체를 bbox(0.5, 0.5, 1.0, 1.0)로 처리
+      B) 좌표형: {image:{width,height}, annotations:[{bbox}]} - 전체 차량 이미지+좌표
+         → bbox를 YOLO 정규화 좌표로 변환
+    """
+    try:
+        import numpy as np
+        import cv2
+        HAS_CV2 = True
+    except ImportError:
+        HAS_CV2 = False
+
     ensure_dirs()
 
     if not AIHUB_RAW.exists() or not any(AIHUB_RAW.iterdir()):
         print(f"[경고] {AIHUB_RAW} 가 비어있습니다.")
-        print("  → --guide 로 다운로드 방법을 확인하세요.")
+        print("  -> --guide 로 다운로드 방법을 확인하세요.")
         return 0
 
     json_files = list(AIHUB_RAW.rglob("*.json"))
@@ -299,8 +305,11 @@ def convert_to_yolo():
     random.shuffle(json_files)
 
     converted = 0
-    skipped = 0
+    skipped_no_image = 0
+    skipped_no_bbox = 0
     errors = 0
+    type_a_count = 0  # 크롭형
+    type_b_count = 0  # 좌표형
     stats = {"train": 0, "val": 0, "test": 0}
 
     for idx, jf in enumerate(json_files):
@@ -308,111 +317,139 @@ def convert_to_yolo():
             with open(jf, "r", encoding="utf-8") as f:
                 data = json.load(f)
 
-            # ── 이미지 정보 추출 (다양한 AI허브 포맷 대응) ──
-            img_info = (data.get("image")
-                       or data.get("Image_Info")
-                       or data.get("images")
-                       or {})
-            if isinstance(img_info, list) and img_info:
-                img_info = img_info[0]
+            # ── 데이터 형태 자동 감지 ──
+            if "value" in data and "imagePath" in data:
+                # ═══ A) 크롭형: {imagePath, value, id} ═══
+                img_name = data["imagePath"]
+                img_path = jf.parent / img_name
+                if not img_path.exists():
+                    img_path = jf.with_suffix(".jpg")
+                if not img_path.exists():
+                    img_path = jf.with_suffix(".png")
+                if not img_path.exists():
+                    skipped_no_image += 1
+                    continue
 
-            img_name = (img_info.get("file_name")
-                       or img_info.get("filename")
-                       or img_info.get("FILE_NAME")
-                       or "")
-            img_w = img_info.get("width", img_info.get("WIDTH", 1920))
-            img_h = img_info.get("height", img_info.get("HEIGHT", 1080))
-
-            # ── 어노테이션 추출 ──
-            annotations = (data.get("annotations")
-                          or data.get("Annotation")
-                          or data.get("annotation")
-                          or data.get("ANNOTATION")
-                          or [])
-            if isinstance(annotations, dict):
-                annotations = [annotations]
-
-            # bbox 추출
-            bboxes = []
-            for ann in annotations:
-                bbox = (ann.get("bbox")
-                       or ann.get("coord")
-                       or ann.get("BBOX")
-                       or ann.get("plate_bbox")
-                       or ann.get("Plate_bbox")
-                       or [])
-                if isinstance(bbox, dict):
-                    # {"x": .., "y": .., "w": .., "h": ..} 형태
-                    bbox = [bbox.get("x", 0), bbox.get("y", 0),
-                            bbox.get("w", bbox.get("width", 0)),
-                            bbox.get("h", bbox.get("height", 0))]
-                if len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
-                    bboxes.append(bbox)
-
-            if not bboxes:
-                skipped += 1
-                continue
-
-            # ── 이미지 파일 찾기 ──
-            img_path = None
-            if img_name:
-                # JSON과 같은 폴더에서 찾기
-                candidate = jf.parent / img_name
-                if candidate.exists():
-                    img_path = candidate
+                # 한글 파일명 대응: shutil.copy2 사용 (cv2보다 안전)
+                # train/val/test 분배 (8:1:1)
+                if idx % 10 < 8:
+                    split = "train"
+                elif idx % 10 == 8:
+                    split = "val"
                 else:
-                    # 형제 폴더에서 탐색
-                    for parent in [jf.parent, jf.parent.parent]:
-                        found = list(parent.rglob(img_name))
-                        if found:
-                            img_path = found[0]
-                            break
+                    split = "test"
 
-            # 이미지 이름으로 못 찾으면 같은 이름의 이미지 파일 탐색
-            if not img_path:
-                for ext in [".jpg", ".jpeg", ".png", ".bmp"]:
-                    candidate = jf.with_suffix(ext)
-                    if candidate.exists():
-                        img_path = candidate
-                        break
+                # 파일명을 인덱스 기반으로 변경 (한글 파일명 문제 방지)
+                safe_name = f"plate_{idx:06d}"
+                dst_img = YOLO_DIR / "images" / split / f"{safe_name}.jpg"
+                dst_label = YOLO_DIR / "labels" / split / f"{safe_name}.txt"
 
-            # 이미지가 없어도 라벨만 생성 (JSON에 좌표 정보만으로 활용)
-            has_image = img_path is not None and img_path.exists()
-
-            # ── train/val/test 분배 (8:1:1) ──
-            if idx % 10 < 8:
-                split = "train"
-            elif idx % 10 == 8:
-                split = "val"
-            else:
-                split = "test"
-
-            # 파일명 결정
-            if has_image:
-                file_stem = img_path.stem
-                file_ext = img_path.suffix
-            else:
-                file_stem = jf.stem
-                file_ext = ".jpg"  # 라벨 전용
-
-            # ── 이미지 복사 ──
-            if has_image:
-                dst_img = YOLO_DIR / "images" / split / f"{file_stem}{file_ext}"
                 if not dst_img.exists():
                     shutil.copy2(img_path, dst_img)
 
-            # ── YOLO 라벨 생성 ──
-            dst_label = YOLO_DIR / "labels" / split / f"{file_stem}.txt"
-            with open(dst_label, "w", encoding="utf-8") as lf:
-                for bbox in bboxes:
-                    cx, cy, nw, nh = convert_bbox_to_yolo(bbox, img_w, img_h)
-                    if nw > 0.001 and nh > 0.001:  # 너무 작은 bbox 필터
-                        lf.write(f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n")
+                # 크롭 이미지 전체가 번호판 → bbox = 이미지 전체
+                # YOLO format: class cx cy w h (정규화)
+                with open(dst_label, "w", encoding="utf-8") as lf:
+                    lf.write("0 0.500000 0.500000 1.000000 1.000000\n")
 
-            stats[split] += 1
-            converted += 1
+                stats[split] += 1
+                converted += 1
+                type_a_count += 1
 
-            if (idx + 1) % 5000 == 0:
+            else:
+                # ═══ B) 좌표형: {image, annotations} ═══
+                img_info = (data.get("image")
+                           or data.get("Image_Info")
+                           or data.get("images")
+                           or {})
+                if isinstance(img_info, list) and img_info:
+                    img_info = img_info[0]
+
+                img_name = (img_info.get("file_name")
+                           or img_info.get("filename")
+                           or img_info.get("FILE_NAME")
+                           or "")
+                img_w = img_info.get("width", img_info.get("WIDTH", 1920))
+                img_h = img_info.get("height", img_info.get("HEIGHT", 1080))
+
+                annotations = (data.get("annotations")
+                              or data.get("Annotation")
+                              or data.get("annotation")
+                              or data.get("ANNOTATION")
+                              or [])
+                if isinstance(annotations, dict):
+                    annotations = [annotations]
+
+                bboxes = []
+                for ann in annotations:
+                    bbox = (ann.get("bbox")
+                           or ann.get("coord")
+                           or ann.get("BBOX")
+                           or ann.get("plate_bbox")
+                           or ann.get("Plate_bbox")
+                           or [])
+                    if isinstance(bbox, dict):
+                        bbox = [bbox.get("x", 0), bbox.get("y", 0),
+                                bbox.get("w", bbox.get("width", 0)),
+                                bbox.get("h", bbox.get("height", 0))]
+                    if len(bbox) == 4 and all(isinstance(v, (int, float)) for v in bbox):
+                        bboxes.append(bbox)
+
+                if not bboxes:
+                    skipped_no_bbox += 1
+                    continue
+
+                # 이미지 파일 찾기
+                img_path = None
+                if img_name:
+                    candidate = jf.parent / img_name
+                    if candidate.exists():
+                        img_path = candidate
+                if not img_path:
+                    for ext in [".jpg", ".jpeg", ".png", ".bmp"]:
+                        candidate = jf.with_suffix(ext)
+                        if candidate.exists():
+                            img_path = candidate
+                            break
+
+                has_image = img_path is not None and img_path.exists()
+                if not has_image:
+                    skipped_no_image += 1
+                    continue
+
+                if idx % 10 < 8:
+                    split = "train"
+                elif idx % 10 == 8:
+                    split = "val"
+                else:
+                    split = "test"
+
+                safe_name = f"plate_{idx:06d}"
+                dst_img = YOLO_DIR / "images" / split / f"{safe_name}{img_path.suffix}"
+                dst_label = YOLO_DIR / "labels" / split / f"{safe_name}.txt"
+
+                if not dst_img.exists():
+                    shutil.copy2(img_path, dst_img)
+
+                with open(dst_label, "w", encoding="utf-8") as lf:
+                    for bbox in bboxes:
+                        x, y, w, h = bbox
+                        cx = (x + w / 2) / img_w
+                        cy = (y + h / 2) / img_h
+                        nw = w / img_w
+                        nh = h / img_h
+                        cx = max(0.0, min(1.0, cx))
+                        cy = max(0.0, min(1.0, cy))
+                        nw = max(0.0, min(1.0, nw))
+                        nh = max(0.0, min(1.0, nh))
+                        if nw > 0.001 and nh > 0.001:
+                            lf.write(f"0 {cx:.6f} {cy:.6f} {nw:.6f} {nh:.6f}\n")
+
+                stats[split] += 1
+                converted += 1
+                type_b_count += 1
+
+            if (idx + 1) % 10000 == 0:
                 print(f"  [진행] {idx + 1}/{len(json_files)} 처리 완료...")
 
         except json.JSONDecodeError:
@@ -428,9 +465,12 @@ def convert_to_yolo():
     print("\n" + "=" * 50)
     print("  변환 완료!")
     print("=" * 50)
-    print(f"  ✅ 변환 성공: {converted}개")
-    print(f"  ⏭️  건너뜀 (bbox 없음): {skipped}개")
-    print(f"  ❌ 에러: {errors}개")
+    print(f"  변환 성공: {converted}개")
+    print(f"    - 크롭형 (이미지=번호판): {type_a_count}개")
+    print(f"    - 좌표형 (bbox 포함):     {type_b_count}개")
+    print(f"  건너뜀 (이미지 없음): {skipped_no_image}개")
+    print(f"  건너뜀 (bbox 없음):   {skipped_no_bbox}개")
+    print(f"  에러: {errors}개")
     print(f"  ────────────────────────")
     print(f"  Train: {stats['train']}개")
     print(f"  Val:   {stats['val']}개")

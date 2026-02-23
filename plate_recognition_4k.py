@@ -24,6 +24,14 @@ import json
 import time
 import argparse
 from enum import Enum, auto
+
+# Windows 콘솔 한글 깨짐 방지
+if sys.platform == "win32":
+    try:
+        sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 from typing import Optional
 
 import cv2
@@ -2207,7 +2215,13 @@ class PlateRecognizer:
         """
         화면의 Detection Log 영역에서 번호판 텍스트를 OCR로 추출.
         N프레임마다 실행하여 속도 영향 최소화.
+
+        주의: 이 기능은 타 LPR 시스템 화면 녹화 영상에서
+        Detection Log 텍스트를 읽는 보조 기능.
+        순수 CCTV 영상에서는 불필요하므로 비활성화.
         """
+        # log_ocr 비활성화: 외부 프로그램 화면 인식 방지
+        return []
         if frame_idx - self._last_log_ocr_frame < LOG_OCR_INTERVAL:
             return []
         if self.paddle_reader is None:
