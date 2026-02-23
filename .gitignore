@@ -68,3 +68,4 @@ build/
 Thumbs.db
 .DS_Store
 *.db
+*.db
