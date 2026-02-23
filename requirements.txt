@@ -8,7 +8,9 @@ torchvision>=0.15.0
 sahi>=0.11.0
 huggingface_hub
 
-# OCR 엔진 (EasyOCR → Tesseract 순서)
+# OCR 엔진 (PaddleOCR + EasyOCR 앙상블)
+paddlepaddle
+paddleocr
 easyocr
 pytesseract
 

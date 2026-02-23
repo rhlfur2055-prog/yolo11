@@ -25,6 +25,12 @@ except ImportError:
     HAS_EASYOCR = False
 
 try:
+    from paddleocr import PaddleOCR
+    HAS_PADDLEOCR = True
+except ImportError:
+    HAS_PADDLEOCR = False
+
+try:
     import pytesseract
     HAS_TESSERACT = True
 except ImportError:
@@ -423,6 +429,18 @@ class PlateEnginePro:
         print(f"[엔진] YOLO 모델 로드: {model_path}")
 
         self.ocr_engines = {}
+        if HAS_PADDLEOCR:
+            paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False)
+            # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
+            _paddle_model_root = Path("C:/tools/paddleocr_models")
+            if _paddle_model_root.exists():
+                paddle_kwargs["det_model_dir"] = str(_paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer")
+                paddle_kwargs["rec_model_dir"] = str(_paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer")
+                paddle_kwargs["cls_model_dir"] = str(_paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer")
+            try:
+                self.ocr_engines["paddleocr"] = PaddleOCR(**paddle_kwargs)
+            except Exception as e:
+                print(f"[엔진] PaddleOCR 초기화 실패: {e}")
         if HAS_EASYOCR:
             self.ocr_engines["easyocr"] = easyocr.Reader(["ko", "en"], gpu=True)
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
@@ -507,8 +525,9 @@ class PlateEnginePro:
                 else:
                     roi_for_ocr = roi
 
-            best_text = ""
-            best_conf = 0.0
+            # ── 앙상블 투표: 19종 전처리 × N개 OCR → Counter 투표 ──
+            from collections import Counter
+            all_candidates = []  # [(normalized_text, confidence), ...]
 
             for method in self.config.PREPROCESS_METHODS:
                 try:
@@ -522,10 +541,7 @@ class PlateEnginePro:
 
                     for engine_name, engine in self.ocr_engines.items():
                         text, ocr_conf = self._run_ocr(engine_name, engine, processed)
-                        if not text:
-                            continue
-                        if ocr_conf < self.config.OCR_CONF:
-                            self.stats["filtered_by_confidence"] += 1
+                        if not text or ocr_conf < 0.3:
                             continue
                         cleaned = self.validator.clean_ocr_text(text)
                         if not self.validator.is_valid_length(cleaned):
@@ -535,11 +551,18 @@ class PlateEnginePro:
                         if not is_valid:
                             self.stats["filtered_by_pattern"] += 1
                             continue
-                        if ocr_conf > best_conf:
-                            best_text = final_text
-                            best_conf = ocr_conf
+                        all_candidates.append((final_text, ocr_conf))
                 except Exception:
                     continue
+
+            # 투표: 최다 득표 번호판 선택, 평균 confidence 계산
+            best_text = ""
+            best_conf = 0.0
+            if all_candidates:
+                counter = Counter(t for t, _ in all_candidates)
+                best_text = counter.most_common(1)[0][0]
+                confs = [c for t, c in all_candidates if t == best_text]
+                best_conf = sum(confs) / len(confs)
 
             if best_text and best_conf >= self.config.OCR_CONF:
                 seen_this_frame.add(best_text)
@@ -576,7 +599,18 @@ class PlateEnginePro:
 
     def _run_ocr(self, engine_name, engine, image):
         try:
-            if engine_name == "easyocr":
+            if engine_name == "paddleocr":
+                result = engine.ocr(image, cls=True)
+                if result and result[0]:
+                    texts = []
+                    confs = []
+                    for line in result[0]:
+                        text, conf = line[1]
+                        texts.append(text)
+                        confs.append(conf)
+                    if texts:
+                        return "".join(texts), float(np.mean(confs))
+            elif engine_name == "easyocr":
                 result = engine.readtext(image)
                 if result:
                     texts = [r[1] for r in result]
