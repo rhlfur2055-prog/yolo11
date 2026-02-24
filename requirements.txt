@@ -1,0 +1,26 @@
+# YOLO26 번호판 인식 파이프라인
+ultralytics>=8.3.0
+opencv-python>=4.8.0
+numpy
+Pillow
+torch>=2.0.0
+torchvision>=0.15.0
+sahi>=0.11.0
+huggingface_hub
+
+# OCR 엔진 (PaddleOCR + EasyOCR 앙상블)
+paddlepaddle
+paddleocr
+easyocr
+pytesseract
+
+# YouTube 영상 테스트용
+yt-dlp
+requests
+
+# [통합1] FastALPR ONNX 고속 엔진 (선택)
+# pip install fast-alpr[onnx-gpu]
+
+# [통합4] REST API 서버
+fastapi
+uvicorn[standard]

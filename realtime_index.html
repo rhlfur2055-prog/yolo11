@@ -1,0 +1,412 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AI 번호판 인식 시스템 | localhost</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: 'Segoe UI', sans-serif; background: #e8e8e8; color: #222; min-height: 100vh; overflow: hidden; }
+
+  /* 상단 타이틀바 */
+  .titlebar {
+    background: #2a2a3a; color: #fff; padding: 8px 20px;
+    display: flex; align-items: center; gap: 16px; user-select: none;
+  }
+  .titlebar .title { font-size: 0.95rem; font-weight: 700; }
+  .titlebar .btns { margin-left: auto; display: flex; gap: 8px; }
+  .titlebar .btns button {
+    padding: 5px 14px; border: none; border-radius: 4px; cursor: pointer;
+    font-size: 0.8rem; font-weight: 600;
+  }
+  .btn-start { background: #00c853; color: #000; }
+  .btn-stop  { background: #ef5350; color: #fff; }
+  .btn-src   { background: #42a5f5; color: #fff; }
+  .btn-scan  { background: #ff9800; color: #000; }
+
+  /* 메인 레이아웃 */
+  .layout { display: flex; gap: 0; height: calc(100vh - 42px); }
+
+  /* 왼쪽: 동영상 패널 */
+  .left-panel {
+    flex: 1; display: flex; flex-direction: column; gap: 0; min-width: 0;
+    border-right: 2px solid #aaa;
+  }
+  .cam-block { flex: 1; display: flex; flex-direction: column; min-height: 0; border-bottom: 2px solid #aaa; }
+  .cam-block:last-child { border-bottom: none; }
+  .cam-label-bar {
+    background: #3a3a4a; color: #ccc; padding: 5px 12px;
+    font-size: 0.78rem; font-weight: 700; flex-shrink: 0;
+  }
+  .cam-video { flex: 1; background: #000; overflow: hidden; min-height: 0; position: relative; }
+  .cam-video img { width: 100%; height: 100%; object-fit: contain; display: block; }
+  .cam-placeholder {
+    position: absolute; inset: 0; display: flex; align-items: center; justify-content: center;
+    color: #555; font-size: 0.9rem; flex-direction: column; gap: 10px;
+  }
+
+  /* 오른쪽: 정보 패널 */
+  .right-panel {
+    width: 380px; flex-shrink: 0; background: #f0f0f0;
+    display: flex; flex-direction: column;
+  }
+
+  /* 현재 번호판 */
+  .plate-current {
+    background: #f5f5f5; border-bottom: 1px solid #ccc;
+    padding: 14px 16px 10px;
+  }
+  .plate-number {
+    font-size: 2.4rem; font-weight: 900; color: #00aa44;
+    letter-spacing: 3px; line-height: 1;
+  }
+  .plate-number.empty { color: #bbb; font-size: 1.4rem; }
+  .plate-sub { display: flex; gap: 8px; margin-top: 8px; align-items: flex-start; }
+  .plate-crop {
+    width: 120px; height: 50px; object-fit: contain;
+    border: 1px solid #ccc; background: #ddd; border-radius: 4px; flex-shrink: 0;
+  }
+  .plate-crop-empty {
+    width: 120px; height: 50px; border: 1px solid #ccc; background: #ddd;
+    border-radius: 4px; flex-shrink: 0; display: flex; align-items: center;
+    justify-content: center; color: #aaa; font-size: 0.7rem;
+  }
+  .plate-context {
+    flex: 1; max-height: 60px; object-fit: cover; border-radius: 4px;
+    border: 1px solid #ccc; background: #ddd;
+  }
+
+  /* Detection Log */
+  .log-wrap { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .log-header {
+    background: #ddd; border-bottom: 1px solid #bbb;
+    padding: 7px 12px; font-size: 0.82rem; font-weight: 700; color: #444; flex-shrink: 0;
+  }
+  .log-table-wrap { flex: 1; overflow-y: auto; }
+  .log-table { width: 100%; border-collapse: collapse; font-size: 0.83rem; }
+  .log-table th {
+    background: #e0e0e0; padding: 7px 10px; text-align: center;
+    border-bottom: 1px solid #ccc; border-right: 1px solid #ccc; position: sticky; top: 0;
+    font-weight: 700; color: #444;
+  }
+  .log-table td {
+    padding: 6px 10px; border-bottom: 1px solid #ddd; border-right: 1px solid #ddd;
+    text-align: center;
+  }
+  .log-table tr:nth-child(even) { background: #f8f8f8; }
+  .log-table tr:hover { background: #e8f4ff; }
+  .status-ok { color: #007733; font-weight: 600; }
+  .log-empty { padding: 20px; text-align: center; color: #aaa; font-size: 0.85rem; }
+
+  /* 소스 입력 모달 */
+  .src-overlay {
+    display: none; position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+    z-index: 100; align-items: center; justify-content: center;
+  }
+  .src-overlay.show { display: flex; }
+  .src-modal {
+    background: #fff; border-radius: 10px; padding: 24px; width: 480px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.3);
+  }
+  .src-modal h3 { margin-bottom: 12px; font-size: 1rem; }
+  .src-modal input {
+    width: 100%; padding: 10px 12px; border: 1px solid #ccc; border-radius: 6px;
+    font-size: 0.9rem; margin-bottom: 10px;
+  }
+  .src-modal .modal-btns { display: flex; gap: 8px; justify-content: flex-end; }
+  .src-modal .modal-btns button {
+    padding: 8px 20px; border: none; border-radius: 6px; cursor: pointer; font-weight: 600;
+  }
+  .modal-ok  { background: #2196f3; color: #fff; }
+  .modal-cancel { background: #aaa; color: #fff; }
+  .quick-btns { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 10px; }
+  .quick-btn {
+    padding: 5px 10px; border: 1px solid #ccc; border-radius: 4px; cursor: pointer;
+    font-size: 0.78rem; background: #f5f5f5; color: #333;
+  }
+  .quick-btn:hover { background: #e0eaff; border-color: #2196f3; }
+</style>
+</head>
+<body>
+
+<!-- 상단 타이틀바 -->
+<div class="titlebar">
+  <span class="title">AI 번호판 인식 시스템 v2.1</span>
+  <div class="btns">
+    <button class="btn-src" id="btnSrc">소스 변경</button>
+    <button class="btn-start" id="btnStart">▶ 시작</button>
+    <button class="btn-stop"  id="btnStop">■ 중지</button>
+    <button class="btn-scan"  id="btnScan">⚡ 전체 스캔</button>
+  </div>
+</div>
+
+<!-- 전체 스캔 오버레이 -->
+<div id="scanOverlay" style="display:none;position:fixed;inset:0;background:rgba(0,0,0,0.82);z-index:9999;flex-direction:column;align-items:center;justify-content:flex-start;padding-top:40px;overflow-y:auto;">
+  <div style="background:#1a1a2e;border:2px solid #00e676;border-radius:12px;padding:28px 36px;min-width:560px;max-width:90vw;">
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:18px;">
+      <span style="color:#00e676;font-size:1.3rem;font-weight:700;">⚡ 전체 영상 스캔 결과</span>
+      <button id="scanClose" style="background:#444;color:#fff;border:none;border-radius:6px;padding:6px 14px;cursor:pointer;font-size:1rem;">✕ 닫기</button>
+    </div>
+    <!-- 진행률 -->
+    <div id="scanProgressWrap" style="margin-bottom:16px;">
+      <div style="color:#aaa;font-size:0.85rem;margin-bottom:6px;" id="scanStatusTxt">스캔 준비 중...</div>
+      <div style="background:#333;border-radius:6px;height:14px;overflow:hidden;">
+        <div id="scanBar" style="height:100%;width:0%;background:linear-gradient(90deg,#00b0ff,#00e676);transition:width 0.4s;"></div>
+      </div>
+      <div style="color:#00e676;font-size:0.85rem;margin-top:4px;" id="scanPct">0%</div>
+    </div>
+    <!-- 결과 테이블 -->
+    <div style="max-height:55vh;overflow-y:auto;">
+      <table style="width:100%;border-collapse:collapse;font-size:0.95rem;">
+        <thead>
+          <tr style="background:#0d2137;color:#90caf9;">
+            <th style="padding:8px 12px;text-align:left;">시각</th>
+            <th style="padding:8px 12px;text-align:left;">번호판</th>
+            <th style="padding:8px 12px;text-align:left;">신뢰도</th>
+          </tr>
+        </thead>
+        <tbody id="scanResultBody">
+          <tr><td colspan="3" style="color:#777;padding:16px;text-align:center;">스캔 결과가 여기에 표시됩니다</td></tr>
+        </tbody>
+      </table>
+    </div>
+    <div id="scanSummary" style="margin-top:14px;color:#fff;font-size:0.9rem;"></div>
+  </div>
+</div>
+
+<!-- 메인 레이아웃 -->
+<div class="layout">
+
+  <!-- 왼쪽: 동영상 -->
+  <div class="left-panel">
+    <div class="cam-block">
+      <div class="cam-label-bar">CAM1 (번호판)</div>
+      <div class="cam-video">
+        <img id="streamImg" src="" alt="" style="display:none;">
+        <div class="cam-placeholder" id="streamPlaceholder">
+          <div style="font-size:2rem;">▶</div>
+          <div>[시작] 버튼을 눌러 동영상 번호판 인식을 시작하세요</div>
+          <div style="font-size:0.8rem; color:#777;">기본: hiway.mp4 (고속도로 영상)</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- 오른쪽: 인식 정보 -->
+  <div class="right-panel">
+
+    <!-- 현재 번호판 -->
+    <div class="plate-current">
+      <div class="plate-number empty" id="plateNumber">번호판 대기중</div>
+      <div class="plate-sub" style="margin-top:10px;">
+        <div class="plate-crop-empty" id="plateCropWrap">크롭</div>
+        <img id="plateContext" class="plate-context" src="" alt="" style="display:none;">
+      </div>
+    </div>
+
+    <!-- Detection Log -->
+    <div class="log-wrap">
+      <div class="log-header">Detection Log</div>
+      <div class="log-table-wrap">
+        <table class="log-table">
+          <thead>
+            <tr><th>시간</th><th>번호판</th><th>상태</th></tr>
+          </thead>
+          <tbody id="logBody">
+            <tr><td colspan="3" class="log-empty">인식 대기중...</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+<!-- 소스 변경 모달 -->
+<div class="src-overlay" id="srcOverlay">
+  <div class="src-modal">
+    <h3>동영상 소스 선택</h3>
+    <div class="quick-btns">
+      <button class="quick-btn" onclick="setQuick('C:\\\\tool\\\\yolo26-main\\\\movie\\\\hiway.mp4')">hiway.mp4 (고속도로)</button>
+      <button class="quick-btn" onclick="setQuick('0')">웹캠(0)</button>
+    </div>
+    <input type="text" id="srcInput" placeholder="파일 경로 또는 YouTube URL">
+    <div class="modal-btns">
+      <button class="modal-cancel" id="btnModalCancel">취소</button>
+      <button class="modal-ok"     id="btnModalOk">확인</button>
+    </div>
+  </div>
+</div>
+
+<script>
+(function(){
+  var DEFAULT_SRC = 'C:\\tool\\yolo26-main\\movie\\hiway.mp4';
+  var currentSrc  = DEFAULT_SRC;
+
+  var img          = document.getElementById('streamImg');
+  var ph           = document.getElementById('streamPlaceholder');
+  var plateNum     = document.getElementById('plateNumber');
+  var plateCropWrap= document.getElementById('plateCropWrap');
+  var overlay      = document.getElementById('srcOverlay');
+  var srcInput     = document.getElementById('srcInput');
+  var logBody      = document.getElementById('logBody');
+  var running      = false;
+  var pollTimer    = null;
+
+  /* ── 스트림 시작/중지 ── */
+  function startStream() {
+    img.src = '/stream?source=' + encodeURIComponent(currentSrc) + '&_t=' + Date.now();
+    img.style.display = 'block';
+    ph.style.display  = 'none';
+    running = true;
+    if (!pollTimer) pollTimer = setInterval(pollLog, 600);
+  }
+  function stopStream() {
+    img.src = '';
+    img.style.display  = 'none';
+    ph.style.display   = 'block';
+    running = false;
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  document.getElementById('btnStart').onclick = startStream;
+  document.getElementById('btnStop').onclick  = stopStream;
+
+  /* ── 소스 변경 모달 ── */
+  document.getElementById('btnSrc').onclick = function() {
+    srcInput.value = currentSrc;
+    overlay.classList.add('show');
+  };
+  document.getElementById('btnModalCancel').onclick = function() { overlay.classList.remove('show'); };
+  document.getElementById('btnModalOk').onclick = function() {
+    var v = srcInput.value.trim();
+    if (v) { currentSrc = v; }
+    overlay.classList.remove('show');
+    if (running) { stopStream(); setTimeout(startStream, 200); }
+  };
+  window.setQuick = function(v) { srcInput.value = v; };
+
+  /* ── Detection Log 폴링 ── */
+  function pollLog() {
+    fetch('/api/stream_log').then(function(r){ return r.json(); }).then(function(data){
+      /* 현재 번호판 */
+      var p = data.current_plate || '';
+      if (p) {
+        plateNum.textContent = p;
+        plateNum.classList.remove('empty');
+        /* 크롭 이미지 */
+        if (data.current_img) {
+          var existing = document.getElementById('plateCropImg');
+          if (!existing) {
+            plateCropWrap.innerHTML = '';
+            existing = document.createElement('img');
+            existing.id = 'plateCropImg';
+            existing.className = 'plate-crop';
+            plateCropWrap.appendChild(existing);
+          }
+          existing.src = 'data:image/jpeg;base64,' + data.current_img;
+        }
+      }
+      /* 로그 테이블 */
+      var log = data.log || [];
+      if (log.length === 0) {
+        logBody.innerHTML = '<tr><td colspan="3" class="log-empty">인식된 번호판이 없습니다.</td></tr>';
+        return;
+      }
+      logBody.innerHTML = log.slice().reverse().slice(0, 50).map(function(row){
+        return '<tr>' +
+          '<td>' + (row.time || '').split(' ')[1] + '</td>' +
+          '<td><strong>' + (row.plate || '') + '</strong></td>' +
+          '<td class="status-ok">' + (row.status || '성공') + '</td>' +
+          '</tr>';
+      }).join('');
+    }).catch(function(){});
+  }
+
+  /* 페이지 로드 시 자동 시작 */
+  startStream();
+  pollTimer = setInterval(pollLog, 600);
+
+  /* ── 전체 스캔 ── */
+  var scanOverlay   = document.getElementById('scanOverlay');
+  var scanBar       = document.getElementById('scanBar');
+  var scanPct       = document.getElementById('scanPct');
+  var scanStatusTxt = document.getElementById('scanStatusTxt');
+  var scanResultBody= document.getElementById('scanResultBody');
+  var scanSummary   = document.getElementById('scanSummary');
+  var scanTimer     = null;
+
+  function renderScanResults(results) {
+    if (!results || results.length === 0) {
+      scanResultBody.innerHTML = '<tr><td colspan="3" style="color:#777;padding:16px;text-align:center;">아직 인식된 번호판이 없습니다</td></tr>';
+      return;
+    }
+    scanResultBody.innerHTML = results.map(function(r, i) {
+      var bg = i % 2 === 0 ? '#0d1b2a' : '#0a1520';
+      return '<tr style="background:' + bg + ';">' +
+        '<td style="padding:7px 12px;color:#90caf9;">' + (r.time || '') + '</td>' +
+        '<td style="padding:7px 12px;color:#00e676;font-weight:700;font-size:1.05rem;">' + r.plate + '</td>' +
+        '<td style="padding:7px 12px;color:#aaa;">' + (Math.round((r.conf||0)*100)) + '%</td>' +
+        '</tr>';
+    }).join('');
+  }
+
+  function pollScan() {
+    fetch('/api/full_scan_status').then(function(r){ return r.json(); }).then(function(data) {
+      scanBar.style.width = data.progress + '%';
+      scanPct.textContent = data.progress + '%';
+      renderScanResults(data.results);
+      if (data.error && data.error.length > 0) {
+        scanStatusTxt.textContent = '⚠ 오류: ' + data.error;
+      }
+      if (data.status === 'running') {
+        var cur = data.cur_time ? ' — 현재 ' + data.cur_time : '';
+        scanStatusTxt.textContent = '⚡ 스캔 중' + cur + ' (' + (data.results||[]).length + '개 발견)';
+      } else if (data.status === 'done') {
+        scanStatusTxt.textContent = '✅ 스캔 완료!';
+        scanBar.style.width = '100%';
+        scanPct.textContent = '100%';
+        scanSummary.textContent = '총 ' + (data.results||[]).length + '개 번호판 인식 완료';
+        clearInterval(scanTimer);
+      } else if (data.status === 'error') {
+        scanStatusTxt.textContent = '❌ 오류: ' + data.error;
+        clearInterval(scanTimer);
+      }
+    }).catch(function(){});
+  }
+
+  document.getElementById('btnScan').onclick = function() {
+    scanOverlay.style.display = 'flex';
+    scanBar.style.width = '0%';
+    scanPct.textContent = '0%';
+    scanStatusTxt.textContent = '스캔 시작 중...';
+    scanResultBody.innerHTML = '<tr><td colspan="3" style="color:#777;padding:16px;text-align:center;">스캔 준비 중...</td></tr>';
+    scanSummary.textContent = '';
+    fetch('/api/full_scan', {
+      method: 'POST',
+      headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({source: currentSrc})
+    }).then(function(r){
+      if (!r.ok) { return r.json().then(function(d){ throw new Error(d.error || r.status); }); }
+      return r.json();
+    }).then(function(d) {
+      if (d.error) {
+        scanStatusTxt.textContent = '❌ ' + d.error;
+      } else {
+        clearInterval(scanTimer);
+        scanTimer = setInterval(pollScan, 800);
+        pollScan(); // 즉시 1회 조회
+      }
+    }).catch(function(e) {
+      scanStatusTxt.textContent = '❌ 오류: ' + (e.message || e);
+    });
+  };
+
+  document.getElementById('scanClose').onclick = function() {
+    scanOverlay.style.display = 'none';
+    clearInterval(scanTimer);
+  };
+})();
+</script>
+</body>
+</html>

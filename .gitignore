@@ -1,0 +1,81 @@
+# Output & temp
+output/
+temp/
+data/
+logs/
+plate_results*/
+debug_crops/
+preview_frames/
+temp_youtube/
+aihub_data/
+
+# Media files
+*.mp4
+*.wav
+*.mp3
+*.avi
+*.mkv
+
+# Model weights & binaries
+*.pt
+*.onnx
+*.onnx.bak
+*.engine
+*.exe
+aihubshell
+
+# API keys & credentials
+.env
+
+# Large data directories (AI허브 데이터 개인정보 포함 - 절대 업로드 금지)
+dataset/*
+!dataset/yolo_format/
+dataset/yolo_format/*
+!dataset/yolo_format/data.yaml
+aihub_raw/
+103.*/
+.claude/
+.paddleocr/
+server_results/
+uploads/
+aihub_results/
+nul
+
+# Log & debug files
+*.log
+gui_log.txt
+gui_stdout.txt
+test_out.txt
+test_err.txt
+frame_test_log.txt
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+Thumbs.db
+.DS_Store
+*.db
+*.db
+*.db
+*.pt
+
+# ── 자동 추가 (cleanup_and_yolo26_upgrade.py) ──
+*.sqlite
+_thumb/
+movie/
+22/
+runs/
+test_results/
