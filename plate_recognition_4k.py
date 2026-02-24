@@ -223,6 +223,9 @@ def download_plate_model(
     Returns:
         다운로드된 .pt 파일의 로컬 경로
     """
+    # 내부 상수 정리: 기존 전역과 호환
+    HF_REPO_ID = HF_PLATE_REPO
+    HF_MODEL_VARIANTS = {k: HF_PLATE_FILE for k in ("n", "s", "m", "l", "x")}
     if size not in HF_MODEL_VARIANTS:
         raise ValueError(f"지원하지 않는 모델 크기: {size} (가능: {list(HF_MODEL_VARIANTS.keys())})")
 
@@ -782,9 +785,46 @@ class PlateRecognizer:
         self._bbox_cache: list[dict] = []  # [{xyxy, text, frame_idx, ...}]
         self._bbox_cache_max: int = 20
 
+        # ROI 다각형 (정규화 좌표, 예: [(0.3,0.2),(0.7,0.2),(0.8,0.9),(0.2,0.9)])
+        self.roi_polygon_norm: Optional[list[tuple[float, float]]] = None
+
         # 모델 로드
         self._load_models(model_path)
         self._init_ocr()
+
+    # ── ROI 설정/검사 ─────────────────────────────────────
+    def set_roi_polygon(self, pts_norm: list[tuple[float, float]] | None) -> None:
+        """
+        ROI 다각형을 [0,1] 정규화 좌표로 설정. None이면 ROI 비활성화.
+        """
+        self.roi_polygon_norm = pts_norm if pts_norm else None
+
+    @staticmethod
+    def _point_in_polygon(nx: float, ny: float, poly: list[tuple[float, float]]) -> bool:
+        """
+        정규화 좌표계에서 포인트가 다각형 내부인지 검사 (ray casting).
+        """
+        inside = False
+        j = len(poly) - 1
+        for i in range(len(poly)):
+            xi, yi = poly[i]
+            xj, yj = poly[j]
+            intersect = ((yi > ny) != (yj > ny)) and (nx < (xj - xi) * (ny - yi) / (yj - yi + 1e-9) + xi)
+            if intersect:
+                inside = not inside
+            j = i
+        return inside
+
+    def _bbox_center_in_roi(self, bbox: list[float], frame_w: int, frame_h: int) -> bool:
+        """
+        bbox 중심점이 ROI 다각형 내부인지 검사. ROI 미설정 시 True.
+        """
+        if not self.roi_polygon_norm:
+            return True
+        x1, y1, x2, y2 = bbox
+        cx = (x1 + x2) / 2.0 / max(1, frame_w)
+        cy = (y1 + y2) / 2.0 / max(1, frame_h)
+        return self._point_in_polygon(cx, cy, self.roi_polygon_norm)
 
     # ── 모델 초기화 ──────────────────────────────────────
 
@@ -2334,6 +2374,7 @@ class PlateRecognizer:
         # 1차 탐지: 메인 모델
         detections = self.detect_plates(frame)
         results: list[dict] = []
+        fh, fw = frame.shape[:2]
 
         if self._is_plate_model:
             # === 번호판 전용 모델: 직접 크롭 후 OCR ===
@@ -2483,6 +2524,10 @@ class PlateRecognizer:
                     continue
                 if r["detection_confidence"] < MIN_DET_CONFIDENCE:
                     continue
+            # ROI 필터: bbox 중심이 ROI 내부인지 확인
+            bbox = r.get("bbox", None)
+            if bbox is not None and not self._bbox_center_in_roi(bbox, fw, fh):
+                continue
             filtered.append(r)
 
         # 추적: CONFIRM_FRAME_COUNT 연속 인식 시 confirmed 승격
@@ -2632,6 +2677,16 @@ class PlateRecognizer:
         print(f"\n  [완료] {frame_idx}프레임 처리, {len(best_results)}개 번호판 인식")
         print(f"  [완료] 처리 시간: {total_elapsed:.1f}초")
 
+        # 한국 번호판 OCR 후처리 (오탐 제거, 패턴·한글 검증, 중복 병합, 유사 번호 교차검증)
+        try:
+            from plate_ocr_postfilter import apply_postfilter
+            n_before = len(best_results)
+            best_results = apply_postfilter(best_results)
+            if n_before != len(best_results):
+                print(f"  [후처리] {n_before}건 → {len(best_results)}건 정제 (plate_ocr_postfilter)")
+        except Exception as e:
+            print(f"  [후처리] 스킵: {e}")
+
         if output_dir and best_results:
             self._save_results(best_results, output_dir)
 
@@ -2664,6 +2719,8 @@ class PlateRecognizer:
                 "detection_method": result.get("detection_method", "unknown"),
                 "image_path": img_path,
                 "preprocessed_path": pre_path,
+                "detection_count": result.get("detection_count", 1),
+                "final_confidence": round(result.get("final_confidence", result["ocr_confidence"]), 4),
             })
 
         json_path = os.path.join(output_dir, "results.json")

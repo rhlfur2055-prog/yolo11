@@ -32,7 +32,7 @@ import cv2
 import numpy as np
 
 import tkinter as tk
-from tkinter import messagebox
+from tkinter import messagebox, filedialog
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -343,10 +343,10 @@ class PlateGUIApp(tk.Tk):
     def __init__(self, cli_args: argparse.Namespace):
         super().__init__()
         self.cli_args = cli_args
-        self.title("Plate Recognition GUI")
+        self.title("YOLO26 번호판 인식")
         self.configure(bg=C_BG)
-        self.geometry(f"{VIDEO_DISPLAY_W + SIDE_PANEL_W + 20}x{VIDEO_DISPLAY_H + 80}")
-        self.minsize(800, 500)
+        self.geometry(f"{VIDEO_DISPLAY_W}x{VIDEO_DISPLAY_H + 320}")  # 960 x 860 (지시서 v2)
+        self.minsize(900, 600)
 
         # 스레드 / 상태
         self.video_reader: Optional[VideoReader] = None
@@ -399,96 +399,115 @@ class PlateGUIApp(tk.Tk):
     # ─── UI 빌드 ───
 
     def _build_ui(self) -> None:
-        # 메인 컨테이너
+        # 지시서: 상단=영상, 하단=Detection Log(시간|번호판|신뢰도), 맨아래=재생/열기/저장
         main = tk.Frame(self, bg=C_BG)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # 좌측: 비디오
-        left = tk.Frame(main, bg=C_BG)
-        left.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+        # ── 상단: 영상 재생 영역 (번호판 bbox 오버레이) ──
+        video_frame = tk.Frame(main, bg=C_BG)
+        video_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
+        self.video_label = tk.Label(video_frame, bg="#000000", anchor="center")
+        self.video_label.pack(fill=tk.BOTH, expand=True)
 
-        self.video_label = tk.Label(left, bg="#000000", anchor="center")
-        self.video_label.pack(fill=tk.BOTH, expand=True, padx=(5, 0), pady=5)
-
-        # 우측: 정보 패널
-        right = tk.Frame(main, bg=C_PANEL, width=SIDE_PANEL_W)
-        right.pack(side=tk.RIGHT, fill=tk.Y, padx=5, pady=5)
-        right.pack_propagate(False)
-
-        # 상단: 인식된 번호판
-        tk.Label(right, text="DETECTED PLATE", bg=C_PANEL, fg=C_DIM,
-                 font=("Segoe UI", 9)).pack(pady=(12, 4))
-
-        self.plate_text_var = tk.StringVar(value="---")
-        self.plate_frame = tk.Frame(right, bg=C_SURFACE, padx=12, pady=8)
-        self.plate_frame.pack(fill=tk.X, padx=8)
-        self.plate_label = tk.Label(
-            self.plate_frame, textvariable=self.plate_text_var,
-            bg=C_SURFACE, fg=C_GREEN,
-            font=("Malgun Gothic", 22, "bold"),
-            wraplength=SIDE_PANEL_W - 40,
-        )
-        self.plate_label.pack()
-
-        self.conf_var = tk.StringVar(value="")
-        tk.Label(right, textvariable=self.conf_var, bg=C_PANEL, fg=C_DIM,
-                 font=("Consolas", 9)).pack(pady=4)
-
-        # [통합1] 엔진 선택 드롭다운
-        tk.Label(right, text="엔진", bg=C_PANEL, fg=C_DIM, font=("Segoe UI", 9)).pack(pady=(8, 2))
-        self.engine_choice_var = tk.StringVar(value="Pro 엔진")
-        engine_combo = tk.OptionMenu(
-            right, self.engine_choice_var,
-            "Pro 엔진", "Fast 엔진", "자동(높은 confidence)"
-        )
-        engine_combo.config(bg=C_SURFACE, fg=C_TEXT, font=("Consolas", 9))
-        engine_combo.pack(fill=tk.X, padx=8, pady=2)
-
-        # [통합2] 멀티프레임 모드 토글
-        self.multiframe_var = tk.BooleanVar(value=False)
-        tk.Checkbutton(
-            right, text="멀티프레임 모드 (5프레임 합성)",
-            variable=self.multiframe_var, bg=C_PANEL, fg=C_TEXT,
-            selectcolor=C_SURFACE, activebackground=C_PANEL, activeforeground=C_TEXT,
-            font=("Segoe UI", 9),
-        ).pack(anchor=tk.W, padx=8, pady=4)
-
-        # [통합4] API 서버 시작 버튼
-        self.api_server_process = None
-        self.api_btn = tk.Button(
-            right, text="API 서버 시작 (8765)",
-            command=self._on_api_server_click,
-            bg=C_ACCENT, fg="white", font=("Segoe UI", 9), relief=tk.FLAT, padx=8, pady=4,
-        )
-        self.api_btn.pack(fill=tk.X, padx=8, pady=6)
-
-        # 구분선
-        tk.Frame(right, bg=C_BORDER, height=1).pack(fill=tk.X, padx=8, pady=8)
-
-        # 인식 기록
-        tk.Label(right, text="DETECTION LOG", bg=C_PANEL, fg=C_DIM,
-                 font=("Segoe UI", 9)).pack()
-
+        # ── 하단: 실시간 인식 결과 (Detection Log) ──
+        log_frame = tk.Frame(main, bg=C_PANEL, height=200)
+        log_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
+        log_frame.pack_propagate(False)
+        tk.Label(log_frame, text="Detection Log  —  인식된 번호판 (동영상 재생 시 즉시 표시)", bg=C_PANEL, fg=C_DIM,
+                 font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=8, pady=(8, 4))
+        # 테이블 헤더
+        header = tk.Frame(log_frame, bg=C_SURFACE)
+        header.pack(fill=tk.X, padx=8, pady=0)
+        tk.Label(header, text="시간", width=14, anchor=tk.W, bg=C_SURFACE, fg=C_DIM, font=("Consolas", 9)).pack(side=tk.LEFT, padx=4, pady=4)
+        tk.Label(header, text="번호판", width=18, anchor=tk.W, bg=C_SURFACE, fg=C_DIM, font=("Consolas", 9)).pack(side=tk.LEFT, padx=4, pady=4)
+        tk.Label(header, text="신뢰도", width=8, anchor=tk.W, bg=C_SURFACE, fg=C_DIM, font=("Consolas", 9)).pack(side=tk.LEFT, padx=4, pady=4)
         self.history_list = tk.Listbox(
-            right, bg=C_BG, fg=C_TEXT, selectbackground=C_ACCENT,
-            font=("Consolas", 9), borderwidth=0, highlightthickness=0,
-            activestyle="none",
+            log_frame, bg=C_BG, fg=C_TEXT, selectbackground=C_ACCENT,
+            font=("Consolas", 10), borderwidth=0, highlightthickness=0,
+            activestyle="none", height=8,
         )
-        self.history_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(4, 8))
+        self.history_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
 
-        # 하단: 상태바만 (버튼 없음)
-        bar = tk.Frame(self, bg=C_SURFACE, height=36)
-        bar.pack(side=tk.BOTTOM, fill=tk.X, before=main)
+        # 현재 강조 표시용 (상단에 최신 번호판 텍스트)
+        self.plate_text_var = tk.StringVar(value="---")
+        self.conf_var = tk.StringVar(value="")
+        self.engine_choice_var = tk.StringVar(value="Pro 엔진")
+        self.multiframe_var = tk.BooleanVar(value=False)
+        self.api_server_process = None
 
-        # 상태 텍스트
-        self.stats_var = tk.StringVar(value="Loading...")
+        # ── 맨 하단: 재생 컨트롤 + 상태 ──
+        bar = tk.Frame(self, bg=C_SURFACE, height=44)
+        bar.pack(side=tk.BOTTOM, fill=tk.X)
+
+        btn_frame = tk.Frame(bar, bg=C_SURFACE)
+        btn_frame.pack(side=tk.LEFT, padx=6, pady=6)
+        tk.Button(btn_frame, text="\u25b6 재생", command=self._on_play, bg=C_GREEN, fg="#000", font=("Segoe UI", 9), relief=tk.FLAT, padx=10, pady=4).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="\u23f8 일시정지", command=self._on_pause, bg=C_ORANGE, fg="#000", font=("Segoe UI", 9), relief=tk.FLAT, padx=10, pady=4).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="\u1f4c2 파일 열기", command=self._on_file_open, bg=C_ACCENT, fg="white", font=("Segoe UI", 9), relief=tk.FLAT, padx=10, pady=4).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="\u1f4be 저장", command=self._on_save_log, bg=C_PANEL, fg=C_TEXT, font=("Segoe UI", 9), relief=tk.FLAT, padx=10, pady=4).pack(side=tk.LEFT, padx=2)
+        self.api_btn = tk.Button(btn_frame, text="API 서버 (8765)", command=self._on_api_server_click, bg=C_BORDER, fg=C_TEXT, font=("Segoe UI", 9), relief=tk.FLAT, padx=8, pady=4)
+        self.api_btn.pack(side=tk.LEFT, padx=2)
+
+        self.stats_var = tk.StringVar(value="동영상 파일을 열어주세요.")
         tk.Label(bar, textvariable=self.stats_var, bg=C_SURFACE, fg=C_DIM,
-                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=8, pady=4, fill=tk.X, expand=True)
+                 font=("Consolas", 9)).pack(side=tk.LEFT, padx=12, pady=4, fill=tk.X, expand=True)
 
     def _bind_keys(self) -> None:
         self.bind("<q>", lambda e: self._on_close())
         self.bind("<Q>", lambda e: self._on_close())
         self.bind("<Escape>", lambda e: self._on_close())
+
+    def _on_play(self) -> None:
+        """재생: 프레임 루프 진행."""
+        self.playing_event.set()
+        if self.video_reader:
+            self.stats_var.set("재생 중")
+
+    def _on_pause(self) -> None:
+        """일시정지: 현재 프레임에서 멈춤 (번호판 결과 유지)."""
+        self.playing_event.clear()
+        self.stats_var.set("일시정지")
+
+    def _on_file_open(self) -> None:
+        """파일 열기: .mp4, .avi, .mov, .mkv 선택 후 동영상 열기 (지시서 v2)."""
+        path = filedialog.askopenfilename(
+            title="동영상 선택",
+            filetypes=[
+                ("동영상", "*.mp4 *.avi *.mov *.mkv"),
+                ("MP4", "*.mp4"),
+                ("AVI", "*.avi"),
+                ("MOV", "*.mov"),
+                ("MKV", "*.mkv"),
+                ("모든 파일", "*.*"),
+            ],
+        )
+        if path:
+            self._open_video(path)
+
+    def _on_save_log(self) -> None:
+        """현재까지 인식된 번호판 리스트를 JSON으로 저장."""
+        if not self._detection_history:
+            messagebox.showinfo("저장", "저장할 인식 기록이 없습니다.")
+            return
+        path = filedialog.asksaveasfilename(
+            title="인식 로그 저장",
+            defaultextension=".json",
+            initialdir=self._results_dir,
+            filetypes=[("JSON", "*.json"), ("모든 파일", "*.*")],
+        )
+        if not path:
+            return
+        try:
+            import json
+            out = []
+            for h in self._detection_history:
+                rec = {k: v for k, v in h.items() if k not in ("plate_image", "preprocessed_image", "plate_img", "preprocessed") and not isinstance(v, np.ndarray)}
+                out.append(rec)
+            with open(path, "w", encoding="utf-8") as f:
+                json.dump(out, f, ensure_ascii=False, indent=2)
+            messagebox.showinfo("저장 완료", f"{len(out)}건 저장: {path}")
+        except Exception as e:
+            messagebox.showerror("저장 오류", str(e))
 
     def _on_api_server_click(self) -> None:
         """[통합4] API 서버 백그라운드 실행 (포트 8765)"""
@@ -563,7 +582,7 @@ class PlateGUIApp(tk.Tk):
         self._video_h = self.video_reader.height
         self.video_reader.start()
 
-        self.title(f"Plate GUI - {os.path.basename(path)} ({self._video_w}x{self._video_h})")
+        self.title(f"YOLO26 번호판 인식 - {os.path.basename(path)} ({self._video_w}x{self._video_h})")
 
         # 자동 재생 시작
         self.playing_event.set()
@@ -585,11 +604,11 @@ class PlateGUIApp(tk.Tk):
                         self._det_fps_samples.append(1000.0 / data["process_ms"])
                         if len(self._det_fps_samples) > 10:
                             self._det_fps_samples.pop(0)
+                    ts = data.get("timestamp", 0)
                     for det in data["results"]:
                         text = det.get("text", "")
-                        # 2글자 이상이면 즉시 기록
                         if text and len(text) >= 2:
-                            self._add_to_history(det)
+                            self._add_to_history(det, ts)
             except (queue.Empty, AttributeError):
                 break
 
@@ -652,8 +671,8 @@ class PlateGUIApp(tk.Tk):
             if len(bbox) < 4:
                 continue
             x1, y1, x2, y2 = [int(v) for v in bbox]
-            text = det.get("text", "")
-            conf = det.get("ocr_confidence", 0)
+            text = det.get("text") or det.get("plate", "")
+            conf = det.get("ocr_confidence", det.get("confidence", 0))
             is_valid = det.get("is_valid_plate", False)
 
             # 색상: 유효=초록, 미확인=주황
@@ -684,35 +703,35 @@ class PlateGUIApp(tk.Tk):
 
     # ─── 정보 패널 업데이트 ───
 
-    def _add_to_history(self, det: dict) -> None:
-        """인식 기록에 추가 (중복 제거) + plate_results_v3/ 자동 저장."""
-        text = det.get("text", "").strip()
+    def _add_to_history(self, det: dict, timestamp: float = 0) -> None:
+        """인식 즉시 하단 Detection Log에 추가 (중복 시 기존 항목 시간만 갱신, 최신 위).
+        지시서 v2: text/plate, ocr_confidence/confidence 양쪽 키 지원."""
+        text = (det.get("text") or det.get("plate", "")).strip()
         if not text:
             return
+        conf = det.get("ocr_confidence", det.get("confidence", 0))
+        # GUI 내부는 항상 text, ocr_confidence로 통일
+        det_norm = dict(det)
+        det_norm["text"] = text
+        det_norm["ocr_confidence"] = conf
 
         for existing in self._detection_history:
-            if self._text_similar(existing["text"], text):
-                if det["ocr_confidence"] > existing["ocr_confidence"]:
-                    existing.update(det)
+            if self._text_similar(existing.get("text", ""), text):
+                if conf > existing.get("ocr_confidence", 0):
+                    existing.update(det_norm)
                 existing["count"] = existing.get("count", 1) + 1
+                existing["timestamp"] = timestamp
                 self._refresh_history_list()
                 return
 
-        entry = dict(det)
+        entry = dict(det_norm)
         entry["count"] = 1
+        entry["timestamp"] = timestamp
         self._detection_history.insert(0, entry)
         self._refresh_history_list()
-
-        # 자동 저장: plate crop → plate_results_v3/
-        self._auto_save_plate(det)
-
-        # 사이드 패널: score ≥ 0.40이면 즉시 표시 (바로 인식)
-        pattern_score = det.get("pattern_score", 0)
-        current_text = self.plate_text_var.get()
-        if pattern_score >= 0.40 and len(text) >= len(current_text.replace("---", "")):
-            self.plate_text_var.set(text)
-            method = det.get("detection_method", "?")
-            self.conf_var.set(f"Conf: {det['ocr_confidence']:.1%}  score:{pattern_score:.2f}")
+        self._auto_save_plate(entry)
+        self.plate_text_var.set(text)
+        self.conf_var.set(f"Conf: {conf:.1%}")
 
     def _auto_save_plate(self, det: dict) -> None:
         """번호판 crop 이미지 + JSON을 plate_results_v3/에 저장."""
@@ -779,10 +798,20 @@ class PlateGUIApp(tk.Tk):
         return self._levenshtein(t1, t2) <= 1
 
     def _refresh_history_list(self) -> None:
+        """하단 Detection Log: MM:SS.s | 번호판 | 신뢰도 (지시서 v2). 90%+ 🟢, 70~89% 🟡, 70%미만 회색."""
         self.history_list.delete(0, tk.END)
-        for i, h in enumerate(self._detection_history[:50]):
-            mark = "V" if h.get("is_valid_plate") else " "
-            line = f"[{mark}] {h['text']:<14} {h['ocr_confidence']:.0%}  x{h.get('count', 1)}"
+        for h in self._detection_history[:50]:
+            ts = h.get("timestamp", 0)
+            time_str = f"{int(ts) // 60:02d}:{ts % 60:04.1f}"  # "00:12.3"
+            plate = (h.get("text") or h.get("plate", "")).strip()
+            conf = h.get("ocr_confidence", h.get("confidence", 0))
+            if conf >= 0.90:
+                mark = "🟢"
+            elif conf >= 0.70:
+                mark = "🟡"
+            else:
+                mark = "🔴"
+            line = f"{mark} {time_str:<8} {plate:<16} {conf:.0%}"
             self.history_list.insert(tk.END, line)
 
     # ─── 상태 표시 ───
@@ -854,6 +883,8 @@ DEFAULT_VIDEO = os.path.join(
 def main() -> None:
     parser = argparse.ArgumentParser(description="Real-Time Plate Recognition GUI (Auto-Play)")
     parser.add_argument("video", nargs="?", default=None, help="Video file path")
+    parser.add_argument("--youtube", metavar="URL", default=None,
+                        help="YouTube URL (다운로드 후 재생, yt-dlp 필요)")
     parser.add_argument("--model-size", default="n", choices=["n", "s", "m", "l", "x"],
                         help="Plate model size (default: n)")
     parser.add_argument("--confidence", type=float, default=0.15,
@@ -864,8 +895,27 @@ def main() -> None:
                         help="Use 4k recognizer instead of Pro")
     args = parser.parse_args()
 
-    # 기본 영상 결정
-    video_path = args.video if args.video else DEFAULT_VIDEO
+    # 기본 영상 결정: --youtube 우선 → youtube_helper, 그 다음 video 인자, 없으면 DEFAULT_VIDEO
+    video_path = None
+    if args.youtube:
+        try:
+            from youtube_helper import download_youtube, check_ytdlp
+        except ImportError:
+            print("[오류] youtube_helper.py를 찾을 수 없습니다. 같은 폴더에 넣어주세요.", flush=True)
+            sys.exit(1)
+        if not check_ytdlp():
+            print("[오류] yt-dlp가 설치되지 않았습니다. 설치: pip install yt-dlp", flush=True)
+            sys.exit(1)
+        try:
+            video_path = download_youtube(args.youtube)
+            print(f"[YouTube] 로컬 파일로 재생: {video_path}", flush=True)
+        except Exception as e:
+            print(f"[오류] YouTube 다운로드 실패: {e}", flush=True)
+            sys.exit(1)
+    elif args.video:
+        video_path = args.video
+    else:
+        video_path = DEFAULT_VIDEO
 
     app = PlateGUIApp(args)
     app.after(200, lambda: app._open_video(video_path))

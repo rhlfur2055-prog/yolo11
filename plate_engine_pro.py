@@ -76,24 +76,30 @@ except ImportError:
 class PlateEngineConfig:
     """엔진 설정"""
     # ── 모델 경로 ──
-    YOLO_MODEL = "runs/plate_detect/yolo26_plate_v1/weights/best.pt"
+    YOLO_MODEL = "yolo11x_plate.pt"      # 번호판 전용 파인튜닝 (mAP@50=98.4%)
     YOLO_FALLBACK = "yolo26.pt"
 
     # ── 인식 임계값 (0.7 이상만 표시) ──
     DETECT_CONF = 0.45
     OCR_CONF = 0.70
 
-    # ── MareArts/한국 번호판 정규식 완전판 (패턴 매칭 안 되면 즉시 오인식 폐기) ──
+    # ── MareArts/한국 번호판 정규식 완전판 ──
     KR_PATTERNS = [
-        r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',   # 구형: 서울12가3456
-        r'^[0-9]{2,3}[가-힣][0-9]{4}$',            # 신형/전기차: 123가4567
-        r'^[가-힣]{2}[0-9]{2}[바사아자][0-9]{4}$', # 영업용
-        r'^[가-힣]{2}[0-9]{4}[가-힣]{1}$',         # 영업용 변형
+        r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',         # 구형: 서울12가3456 (8자)
+        r'^[0-9]{2,3}[가-힣][0-9]{4}$',                  # 신형: 123가4567
+        r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$',        # 구형지역포함: 서울70비9203 (9자)
+        r'^[가-힣]{2}[0-9]{2}[바사아자배비하][0-9]{4}$',  # 영업/버스
+        r'^[가-힣]{2,3}[0-9]{4}[가-힣]{1}$',             # 영업용 변형
         r'^외교[0-9]{3}-?[0-9]{3}$',
-        r'^[가-힣]{2}[0-9]{3}[가-힣]$',            # 이륜차
+        r'^[가-힣]{2}[0-9]{3}[가-힣]$',                  # 이륜차
+        r'^[가-힣]{2}[0-9]{1,2}[가-힣]{1,2}[0-9]{4}$',  # 혼합형
+        # ── 전기차/친환경 번호판 ──
+        r'^전기[0-9]{4}$',                               # 구형 전기차: 전기1234 (6자)
+        r'^[가-힣]{2}전기[0-9]{4}$',                     # 지역+전기차: 서울전기1234
+        r'^[0-9]{2}[가-힣][0-9]{4}$',                    # 신형 전기차 (2자리): 12가3456 (7자)
     ]
-    PLATE_MIN_LEN = 7
-    PLATE_MAX_LEN = 8
+    PLATE_MIN_LEN = 6    # 전기차 구형(전기1234=6자) 허용
+    PLATE_MAX_LEN = 10   # 구형 지역명 포함(서울70비9203=9자) 허용
     CONSECUTIVE_FRAMES_REQUIRED = 3
     # 환경변수로 오버라이드: set PLATE_CONSECUTIVE_FRAMES=1
     _cf = os.environ.get('PLATE_CONSECUTIVE_FRAMES', '')
@@ -323,13 +329,75 @@ class PlateValidator:
         self.min_len = PlateEngineConfig.PLATE_MIN_LEN
         self.max_len = PlateEngineConfig.PLATE_MAX_LEN
 
+    # 자주 혼동되는 한글 문자 쌍 (번호판 기준)
+    _KR_CONFUSION = {
+        "스": "소", "수": "소", "서": "소",  # 소 혼동
+        "오": "0",  "아": "아", "어": "어",
+        "르": "르", "프": "프",
+    }
+
+    def _try_patterns(self, text):
+        """패턴 매칭 시도 (정방향 + 역방향 + 한글교정)"""
+        candidates = [text, text[::-1]]  # 정방향, 역방향
+        # 한글 혼동 교정 버전
+        corrected = "".join(self._KR_CONFUSION.get(c, c) for c in text)
+        if corrected != text:
+            candidates.append(corrected)
+            candidates.append(corrected[::-1])
+
+        for candidate in candidates:
+            norm = self._normalize_for_validation(candidate)
+            if not (self.min_len <= len(norm) <= self.max_len):
+                continue
+            for pattern in self.patterns:
+                if pattern.match(norm):
+                    return True, norm
+        return False, text
+
+    # 구형 지역번호판에서만 나오는 상용차 계열 문자 (일반 신형 가나다 제외)
+    _COMMERCIAL_CHARS = set("비바사아자배하")
+
     def validate(self, text):
+        # ★ 4자리 숫자만 읽힌 경우 → 전기차 하단 잘림 처리
+        # 예: 8060 → 전기8060
+        _pure4 = re.match(r'^[0-9]{4}$', text.strip())
+        if _pure4:
+            candidate = "전기" + text.strip()
+            for pattern in self.patterns:
+                if pattern.match(candidate):
+                    return True, candidate
         clean = self._normalize_for_validation(text)
         if not (self.min_len <= len(clean) <= self.max_len):
+            rev = self._normalize_for_validation(text[::-1])
+            if self.min_len <= len(rev) <= self.max_len:
+                ok, result = self._try_patterns(rev)
+                if ok:
+                    return True, result
             return False, clean
+
+        # ★ 구형 지역번호판 우선 교정: 앞 1~2자리 숫자가 지역명 오인식
+        # 예) 376비7789 → 경기76비7789  (비/바/사/아/자 등 상용차 문자가 있을 때만)
+        # 일반 신형 123가4567에는 적용 안 함 (가/나/다 등은 _COMMERCIAL_CHARS 제외)
+        m_reg = re.match(r'^[0-9]{1,2}([0-9]{2}([가-힣])[0-9]{4})$', clean)
+        if m_reg and m_reg.group(2) in PlateValidator._COMMERCIAL_CHARS:
+            suffix = m_reg.group(1)
+            for region in PlateValidator._REGION_PREFIXES:
+                candidate = region + suffix
+                nc = self._normalize_for_validation(candidate)
+                for pattern in self.patterns:
+                    if pattern.match(nc):
+                        return True, nc
+
+        # 정방향 패턴 매칭
         for pattern in self.patterns:
             if pattern.match(clean):
                 return True, clean
+
+        # 역방향 / 혼동 교정 시도
+        ok, result = self._try_patterns(clean)
+        if ok:
+            return True, result
+
         return False, clean
 
     def _normalize_for_validation(self, text):
@@ -339,13 +407,20 @@ class PlateValidator:
         allowed = re.compile(r"[0-9가-힣바사아자외교]")
         return "".join(c for c in s if allowed.match(c))
 
+    # 한국 지역명 접두사 (구형 번호판: 서울, 경기 등)
+    _REGION_PREFIXES = [
+        "서울","부산","대구","인천","광주","대전","울산","세종",
+        "경기","강원","충북","충남","전북","전남","경북","경남","제주",
+    ]
+
     def clean_ocr_text(self, text):
-        """OCR 후처리: 글자 잘림 보정 + MareArts 혼동문자 보정 (0↔O, 1↔I, 8↔B, 6↔G)"""
+        """OCR 후처리: 특수문자 완전 제거 + 혼동문자 보정 + 두 줄 번호판 교정"""
         clean = text.strip()
-        clean = re.sub(r"^[\s\-\.\|\[\]\(\)]+|[\s\-\.\|\[\]\(\)]+$", "", clean)
-        replacements = getattr(
-            PlateEngineConfig, "OCR_CONFUSION_MAP", {}
-        ) or {
+        # ★ 핵심: 중간 특수문자도 모두 제거 (번호판에는 숫자·한글·영문만)
+        clean = re.sub(r"[^\w가-힣]", "", clean, flags=re.ASCII)
+        clean = re.sub(r"\s+", "", clean)
+
+        replacements = getattr(PlateEngineConfig, "OCR_CONFUSION_MAP", {}) or {
             "O": "0", "I": "1", "Z": "2", "S": "5",
             "B": "8", "D": "0", "Q": "0", "G": "6",
             "ㅇ": "0", "ㅣ": "1",
@@ -356,7 +431,12 @@ class PlateValidator:
                 result.append(replacements[ch])
             else:
                 result.append(ch)
-        return "".join(result)
+        cleaned = "".join(result)
+
+        # 두 줄 번호판 교정: 앞에 숫자가 오면 지역명이 잘렸을 가능성 → 패턴 매칭 시도
+        # 예: 376비7789 → 경기76비7789 (앞 숫자가 지역명+숫자로 잘린 것)
+        # 이 보정은 validate()에서 패턴 매칭이 실패할 때 별도로 처리
+        return cleaned
 
     def _should_be_digit(self, text, pos):
         if pos > 0 and text[pos - 1].isdigit():
@@ -366,7 +446,6 @@ class PlateValidator:
         return False
 
     def is_valid_length(self, text):
-        """길이 7~8자 아니면 버리기"""
         clean = self._normalize_for_validation(text)
         return self.min_len <= len(clean) <= self.max_len
 
@@ -376,7 +455,7 @@ class PlateDatabase:
 
     def __init__(self, db_path=None):
         db_path = db_path or PlateEngineConfig.DB_PATH
-        self.conn = sqlite3.connect(db_path)
+        self.conn = sqlite3.connect(db_path, check_same_thread=False)
         self._create_tables()
 
     def _create_tables(self):
@@ -510,26 +589,37 @@ class PlateEnginePro:
         stack = np.stack(resized, axis=0)
         return np.median(stack, axis=0).astype(np.uint8)
 
-    def process_frame(self, frame, camera_id="CAM01", use_multiframe=False):
+    def process_frame(self, frame, camera_id="CAM01", use_multiframe=False, full_frame=None):
+        """
+        frame: YOLO 추론용 (640px 등 축소 가능)
+        full_frame: OCR 크롭용 원본 고해상도 프레임 (None이면 frame에서 크롭)
+        """
         results = []
         self.stats["frames_processed"] += 1
         detections = self.model(frame, conf=self.config.DETECT_CONF, verbose=False)
 
-        # 이번 프레임에서 인식된 번호판 집합 (연속 카운트 갱신용)
+        crop_src = full_frame if full_frame is not None else frame
+        ch_full, cw_full = crop_src.shape[:2]
+        ch_det, cw_det = frame.shape[:2]
+        sx = cw_full / cw_det
+        sy = ch_full / ch_det
+
         seen_this_frame = set()
 
         for det in detections[0].boxes:
             x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
             conf = float(det.conf[0])
 
-            h, w = frame.shape[:2]
-            margin_x = int((x2 - x1) * 0.1)
-            margin_y = int((y2 - y1) * 0.15)
-            rx1 = max(0, x1 - margin_x)
-            ry1 = max(0, y1 - margin_y)
-            rx2 = min(w, x2 + margin_x)
-            ry2 = min(h, y2 + margin_y)
-            roi = frame[ry1:ry2, rx1:rx2]
+            ox1, oy1 = int(x1 * sx), int(y1 * sy)
+            ox2, oy2 = int(x2 * sx), int(y2 * sy)
+
+            margin_x = int((ox2 - ox1) * 0.1)
+            margin_y = int((oy2 - oy1) * 0.15)
+            rx1 = max(0, ox1 - margin_x)
+            ry1 = max(0, oy1 - margin_y)
+            rx2 = min(cw_full, ox2 + margin_x)
+            ry2 = min(ch_full, oy2 + margin_y)
+            roi = crop_src[ry1:ry2, rx1:rx2]
 
             if roi.size == 0:
                 continue
@@ -549,17 +639,30 @@ class PlateEnginePro:
             else:
                 if use_multiframe:
                     self.stats["singleframe_used"] = self.stats.get("singleframe_used", 0) + 1
-                # 번호판 영역 2배 업스케일 후 OCR (최소 200, 2x까지)
-                scale = 1.0
-                if roi_w < 400:
-                    scale = max(200 / roi_w, 2.0) if roi_w < 200 else 2.0
+                target_w = 300
+                if roi_w < target_w:
+                    scale = target_w / roi_w
+                else:
+                    scale = 1.0
+                if scale > 1.0:
                     roi_for_ocr = cv2.resize(
                         roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
                     )
+                    # 업스케일 후 선명화 적용
+                    kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+                    roi_for_ocr = cv2.filter2D(roi_for_ocr, -1, kernel)
                 else:
                     roi_for_ocr = roi
 
-            # ── 앙상블 투표: 19종 전처리 × N개 OCR → Counter 투표 ──
+            # ── 구형 두 줄 번호판 감지: 세로 비율이 높으면 상단/하단 분리 추가 ──
+            # (구형 번호판은 가로:세로 ≈ 2:1, 신형은 4:1)
+            extra_crops = []
+            if roi_h > roi_w * 0.45:   # 세로가 어느정도 있는 번호판
+                top_crop = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.5), :]
+                bot_crop = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.4):, :]
+                extra_crops = [("top", top_crop), ("bot", bot_crop)]
+
+            # ── 앙상블 투표: 전처리 × N개 OCR → Counter 투표 ──
             from collections import Counter
             all_candidates = []  # [(normalized_text, confidence), ...]
 
@@ -575,7 +678,7 @@ class PlateEnginePro:
 
                     for engine_name, engine in self.ocr_engines.items():
                         text, ocr_conf = self._run_ocr(engine_name, engine, processed)
-                        if not text or ocr_conf < 0.3:
+                        if not text or ocr_conf < 0.25:
                             continue
                         cleaned = self.validator.clean_ocr_text(text)
                         if not self.validator.is_valid_length(cleaned):
@@ -588,6 +691,33 @@ class PlateEnginePro:
                         all_candidates.append((final_text, ocr_conf))
                 except Exception:
                     continue
+
+            # 구형 번호판 상단+하단 결합 시도
+            if extra_crops:
+                top_texts, bot_texts = [], []
+                top_confs, bot_confs = [], []
+                for crop_name, crop_img in extra_crops:
+                    for eng_name, eng in self.ocr_engines.items():
+                        t, c = self._run_ocr(eng_name, eng, crop_img)
+                        if t and c > 0.2:
+                            cleaned_t = self.validator.clean_ocr_text(t)
+                            if crop_name == "top":
+                                top_texts.append(cleaned_t); top_confs.append(c)
+                            else:
+                                bot_texts.append(cleaned_t); bot_confs.append(c)
+                # 상단 + 하단 조합해서 유효 패턴 탐색
+                for tt in (top_texts or [""]):
+                    for bt in (bot_texts or [""]):
+                        combined = (tt + bt).strip()
+                        norm = self.validator._normalize_for_validation(combined)
+                        if self.validator.is_valid_length(norm):
+                            is_v, final = self.validator.validate(norm)
+                            if is_v:
+                                avg_c = float(np.mean((top_confs or [0.3]) + (bot_confs or [0.3])))
+                                # 지역명 포함 구형 번호판은 투표 가중치 6배 (full-crop 오인식 이김)
+                                weight = 6 if re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', final) else 2
+                                for _ in range(weight):
+                                    all_candidates.append((final, avg_c))
 
             # 투표: 최다 득표 번호판 선택, 평균 confidence 계산
             best_text = ""
@@ -609,17 +739,20 @@ class PlateEnginePro:
                 if plate_info["consecutive"] >= self.consecutive_required:
                     is_alert, alert_info = (0, None)
                     if plate_info["consecutive"] == self.consecutive_required:
-                        is_alert, alert_info = self.db.record_plate(
-                            best_text, best_conf, camera_id
-                        )
-                        if is_alert and alert_info:
-                            self._trigger_alert(best_text, alert_info)
+                        try:
+                            is_alert, alert_info = self.db.record_plate(
+                                best_text, best_conf, camera_id
+                            )
+                            if is_alert and alert_info:
+                                self._trigger_alert(best_text, alert_info)
+                        except Exception:
+                            pass
                     self.stats["plates_shown"] += 1
                     self.stats["confidences"].append(best_conf)
                     results.append({
                         "plate": best_text,
                         "confidence": best_conf,
-                        "bbox": [x1, y1, x2, y2],
+                        "bbox": [ox1, oy1, ox2, oy2],
                         "is_alert": bool(is_alert),
                         "alert_info": alert_info,
                     })
@@ -632,24 +765,39 @@ class PlateEnginePro:
         return results
 
     def _run_ocr(self, engine_name, engine, image):
+        """OCR 실행. 구형 두 줄 번호판 대응: y좌표 정렬 + 분할 읽기."""
         try:
             if engine_name == "paddleocr":
                 result = engine.ocr(image, cls=True)
                 if result and result[0]:
-                    texts = []
-                    confs = []
-                    for line in result[0]:
-                        text, conf = line[1]
-                        texts.append(text)
-                        confs.append(conf)
+                    # y좌표 기준 정렬 (상→하)
+                    lines = sorted(result[0], key=lambda l: l[0][0][1])
+                    texts = [l[1][0] for l in lines]
+                    confs = [l[1][1] for l in lines]
                     if texts:
                         return "".join(texts), float(np.mean(confs))
             elif engine_name == "easyocr":
-                result = engine.readtext(image)
+                result = engine.readtext(image, detail=1, paragraph=False)
                 if result:
-                    texts = [r[1] for r in result]
-                    confs = [r[2] for r in result]
-                    return "".join(texts), float(np.mean(confs))
+                    # y좌표 기준 정렬 (상→하: 지역명 먼저, 번호 나중)
+                    result_sorted = sorted(result, key=lambda r: r[0][0][1])
+                    texts = [r[1] for r in result_sorted]
+                    confs = [r[2] for r in result_sorted]
+                    combined = "".join(texts)
+                    avg_conf = float(np.mean(confs))
+
+                    # 결과가 너무 짧으면 (하단만 읽힌 경우) 상단 별도 시도
+                    h, w = image.shape[:2]
+                    if len(combined.replace(" ", "")) < 7 and h > w * 0.5:
+                        top_half = image[:int(h * 0.55), :]
+                        top_res = engine.readtext(top_half, detail=1, paragraph=False)
+                        if top_res:
+                            top_texts = [r[1] for r in sorted(top_res, key=lambda r: r[0][0][1])]
+                            top_confs = [r[2] for r in top_res]
+                            combined = "".join(top_texts) + combined
+                            avg_conf = float(np.mean(confs + top_confs))
+
+                    return combined, avg_conf
         except Exception:
             pass
         return "", 0.0

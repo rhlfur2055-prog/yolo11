@@ -141,14 +141,10 @@ def reassemble_plate(ocr_entries):
     entries_with_y = []
     for text, bbox, conf in ocr_entries:
         y_center = 0.0
-        if bbox is not None:
-            try:
-                if isinstance(bbox[0], (list, tuple)):
-                    y_center = sum(p[1] for p in bbox) / len(bbox)
-                elif len(bbox) >= 4:
-                    y_center = (bbox[1] + bbox[3]) / 2
-            except (IndexError, TypeError):
-                pass
+        try:
+            y_center = (bbox[1] + bbox[3]) / 2
+        except (IndexError, TypeError):
+            pass
         entries_with_y.append((text, bbox, conf, y_center))
 
     entries_with_y.sort(key=lambda x: x[3])
