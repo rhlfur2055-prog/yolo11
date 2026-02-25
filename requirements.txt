@@ -24,3 +24,6 @@ requests
 # [통합4] REST API 서버
 fastapi
 uvicorn[standard]
+
+# 발표 PDF 생성
+reportlab>=4.0.0

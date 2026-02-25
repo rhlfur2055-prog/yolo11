@@ -584,6 +584,15 @@ class PlateGUIApp(tk.Tk):
 
         self.title(f"YOLO26 번호판 인식 - {os.path.basename(path)} ({self._video_w}x{self._video_h})")
 
+        # 엔진 로딩 완료 대기 (최대 60초) → 로딩 완료 후 재생 시작
+        self.stats_var.set("엔진 로딩 중... 잠시 기다려주세요")
+        self.update()
+        if not self.detection_worker.ready.wait(timeout=60):
+            self.stats_var.set("엔진 로딩 타임아웃 - 재생 시작")
+        else:
+            self.stats_var.set("엔진 로딩 완료! 재생 시작")
+        self.update()
+
         # 자동 재생 시작
         self.playing_event.set()
         self.stats_var.set(f"Auto-playing {self._video_w}x{self._video_h} @ {self.video_reader.fps:.0f}fps")

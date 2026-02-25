@@ -16,7 +16,10 @@ if sys.platform == "win32":
 from ultralytics import YOLO
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+# dataset/data.yaml 없으면 dataset/yolo_format/data.yaml 사용
 DATA_YAML = os.path.join(SCRIPT_DIR, "dataset", "data.yaml")
+if not os.path.isfile(DATA_YAML):
+    DATA_YAML = os.path.join(SCRIPT_DIR, "dataset", "yolo_format", "data.yaml")
 BASE_MODEL = os.path.join(SCRIPT_DIR, "yolo26n.pt")
 
 print("=" * 60)

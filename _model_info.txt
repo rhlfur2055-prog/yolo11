@@ -1,0 +1,26 @@
+=== yolo11x_plate.pt (현재 사용 중 (메인 모델)) ===
+  클래스: {0: 'License_Plate'}
+  데이터셋: /content/drive/MyDrive/Colab Notebooks/Computer Vision Workshop/LPR Detection/License-Plate-Recognition-11/data.yaml
+  에폭: 300
+  이미지크기: 640
+  배치: 16
+  학습완료에폭: -1
+  최고성능: N/A
+
+=== runs/detect/yolo26_v2/weights/best.pt (학습 결과 모델) ===
+  클래스: {0: 'license_plate'}
+  데이터셋: ./dataset/data.yaml
+  에폭: 100
+  이미지크기: 640
+  배치: 8
+  학습완료에폭: -1
+  최고성능: N/A
+
+=== 학습 이미지/라벨 확인 ===
+  runs\detect\highway_plate\args.yaml
+  runs\detect\highway_plate2\args.yaml
+  runs\detect\highway_plate3\args.yaml
+  runs\detect\highway_plate4\args.yaml
+  runs\detect\highway_plate5\args.yaml
+  runs\detect\highway_plate6\args.yaml
+  runs\detect\yolo26_v2\args.yaml
