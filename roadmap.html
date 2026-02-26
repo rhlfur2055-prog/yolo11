@@ -1,0 +1,1352 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ANPR 구현 로드맵 — AI Hub → YOLO26급 시스템</title>
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Noto+Sans+KR:wght@300;400;500;600;700;900&display=swap" rel="stylesheet">
+<style>
+:root {
+  --bg: #06080d;
+  --surface: #0d1117;
+  --surface2: #161b22;
+  --surface3: #1c2333;
+  --border: #21262d;
+  --border-bright: #30363d;
+  --text: #e6edf3;
+  --text-dim: #7d8590;
+  --text-muted: #484f58;
+  --green: #3fb950;
+  --green-dim: rgba(63,185,80,0.15);
+  --blue: #58a6ff;
+  --blue-dim: rgba(88,166,255,0.12);
+  --purple: #bc8cff;
+  --purple-dim: rgba(188,140,255,0.12);
+  --orange: #f0883e;
+  --orange-dim: rgba(240,136,62,0.12);
+  --red: #f85149;
+  --red-dim: rgba(248,81,73,0.12);
+  --yellow: #d29922;
+  --yellow-dim: rgba(210,153,34,0.12);
+  --cyan: #39d2c0;
+  --cyan-dim: rgba(57,210,192,0.12);
+}
+* { margin: 0; padding: 0; box-sizing: border-box; }
+body {
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Noto Sans KR', -apple-system, sans-serif;
+  line-height: 1.6;
+  overflow-x: hidden;
+}
+.grain {
+  position: fixed; inset: 0; pointer-events: none; z-index: 9999;
+  background-image: url("data:image/svg+xml,%3Csvg viewBox='0 0 512 512' xmlns='http://www.w3.org/2000/svg'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.7' numOctaves='4' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.025'/%3E%3C/svg%3E");
+}
+
+/* ===== HEADER ===== */
+.hero {
+  position: relative;
+  padding: 56px 48px 40px;
+  border-bottom: 1px solid var(--border);
+  overflow: hidden;
+}
+.hero::before {
+  content: '';
+  position: absolute;
+  top: -100px; right: -100px;
+  width: 500px; height: 500px;
+  background: radial-gradient(circle, rgba(63,185,80,0.08) 0%, transparent 70%);
+  pointer-events: none;
+}
+.hero::after {
+  content: '';
+  position: absolute;
+  bottom: -150px; left: -50px;
+  width: 400px; height: 400px;
+  background: radial-gradient(circle, rgba(88,166,255,0.06) 0%, transparent 70%);
+  pointer-events: none;
+}
+.hero-badge {
+  display: inline-flex; align-items: center; gap: 8px;
+  background: var(--green-dim);
+  border: 1px solid rgba(63,185,80,0.3);
+  color: var(--green);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  padding: 5px 14px; border-radius: 20px;
+  letter-spacing: 0.5px;
+  margin-bottom: 16px;
+}
+.hero h1 {
+  font-size: 38px; font-weight: 900;
+  line-height: 1.2;
+  margin-bottom: 12px;
+}
+.hero h1 .gradient {
+  background: linear-gradient(135deg, var(--green), var(--blue));
+  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
+}
+.hero-sub {
+  color: var(--text-dim); font-size: 16px; font-weight: 300;
+  max-width: 700px;
+}
+
+/* ===== NAV TABS ===== */
+.nav-tabs {
+  display: flex; gap: 0;
+  border-bottom: 1px solid var(--border);
+  padding: 0 48px;
+  overflow-x: auto;
+  background: var(--surface);
+  position: sticky; top: 0; z-index: 100;
+}
+.nav-tab {
+  padding: 14px 24px;
+  font-size: 13px; font-weight: 500;
+  color: var(--text-dim);
+  cursor: pointer;
+  border-bottom: 2px solid transparent;
+  white-space: nowrap;
+  transition: all 0.2s;
+  display: flex; align-items: center; gap: 8px;
+}
+.nav-tab:hover { color: var(--text); }
+.nav-tab.active {
+  color: var(--text);
+  border-bottom-color: var(--green);
+}
+.nav-tab .step-num {
+  width: 20px; height: 20px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 10px; font-weight: 700;
+  background: var(--surface3);
+  color: var(--text-dim);
+}
+.nav-tab.active .step-num {
+  background: var(--green);
+  color: #000;
+}
+
+/* ===== PANELS ===== */
+.panel { display: none; padding: 40px 48px; }
+.panel.active { display: block; }
+
+.section-title {
+  font-size: 24px; font-weight: 800;
+  margin-bottom: 8px;
+  display: flex; align-items: center; gap: 12px;
+}
+.section-desc {
+  color: var(--text-dim); font-size: 14px;
+  margin-bottom: 28px;
+  max-width: 700px;
+}
+
+/* Cards */
+.card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(340px, 1fr));
+  gap: 16px;
+  margin-bottom: 32px;
+}
+.card {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 24px;
+  transition: all 0.3s;
+  position: relative;
+  overflow: hidden;
+}
+.card:hover {
+  border-color: var(--border-bright);
+  transform: translateY(-2px);
+  box-shadow: 0 8px 24px rgba(0,0,0,0.3);
+}
+.card-icon {
+  font-size: 28px; margin-bottom: 12px;
+}
+.card-title {
+  font-size: 16px; font-weight: 700;
+  margin-bottom: 6px;
+}
+.card-body {
+  font-size: 13px; color: var(--text-dim);
+  line-height: 1.7;
+}
+
+/* Code blocks */
+.code-wrap {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  margin: 16px 0;
+  overflow: hidden;
+}
+.code-header {
+  display: flex; align-items: center; justify-content: space-between;
+  padding: 10px 16px;
+  background: var(--surface2);
+  border-bottom: 1px solid var(--border);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px; color: var(--text-dim);
+}
+.code-header .lang-tag {
+  background: var(--surface3);
+  padding: 2px 8px; border-radius: 4px;
+  font-size: 10px;
+}
+.code-copy {
+  background: none; border: 1px solid var(--border);
+  color: var(--text-dim); padding: 4px 10px;
+  border-radius: 6px; cursor: pointer;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px;
+  transition: all 0.2s;
+}
+.code-copy:hover {
+  border-color: var(--green);
+  color: var(--green);
+}
+pre.code {
+  padding: 16px 20px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 13px;
+  line-height: 1.7;
+  overflow-x: auto;
+  color: var(--text);
+  white-space: pre;
+}
+.code .comment { color: var(--text-muted); }
+.code .keyword { color: var(--purple); }
+.code .string { color: var(--green); }
+.code .func { color: var(--blue); }
+.code .num { color: var(--orange); }
+.code .highlight-line {
+  background: var(--green-dim);
+  display: inline-block;
+  width: 100%;
+  margin: 0 -20px;
+  padding: 0 20px;
+}
+
+/* Info boxes */
+.info-box {
+  border-radius: 10px;
+  padding: 20px 24px;
+  margin: 16px 0;
+  display: flex;
+  gap: 14px;
+  align-items: flex-start;
+}
+.info-box.tip {
+  background: var(--green-dim);
+  border: 1px solid rgba(63,185,80,0.2);
+}
+.info-box.warn {
+  background: var(--yellow-dim);
+  border: 1px solid rgba(210,153,34,0.2);
+}
+.info-box.danger {
+  background: var(--red-dim);
+  border: 1px solid rgba(248,81,73,0.2);
+}
+.info-box.info {
+  background: var(--blue-dim);
+  border: 1px solid rgba(88,166,255,0.2);
+}
+.info-box .info-icon { font-size: 20px; flex-shrink: 0; margin-top: 2px; }
+.info-box .info-text { font-size: 13px; line-height: 1.7; }
+.info-box .info-text strong { color: var(--text); }
+
+/* Timeline */
+.timeline { position: relative; padding-left: 32px; }
+.timeline::before {
+  content: '';
+  position: absolute; left: 11px; top: 8px; bottom: 8px;
+  width: 2px;
+  background: var(--border);
+}
+.tl-item {
+  position: relative;
+  padding: 0 0 28px;
+}
+.tl-item:last-child { padding-bottom: 0; }
+.tl-dot {
+  position: absolute;
+  left: -32px; top: 6px;
+  width: 24px; height: 24px;
+  border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 12px;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  z-index: 1;
+}
+.tl-item.done .tl-dot {
+  background: var(--green-dim);
+  border-color: var(--green);
+}
+.tl-title {
+  font-size: 15px; font-weight: 600;
+  margin-bottom: 4px;
+}
+.tl-desc {
+  font-size: 13px; color: var(--text-dim);
+  line-height: 1.6;
+}
+
+/* Architecture diagram */
+.arch-flow {
+  display: flex; align-items: stretch; gap: 8px;
+  overflow-x: auto; padding: 20px 0;
+}
+.arch-node {
+  min-width: 150px; flex: 1;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 18px 14px;
+  text-align: center;
+  transition: all 0.3s;
+}
+.arch-node:hover {
+  border-color: var(--green);
+  box-shadow: 0 0 20px rgba(63,185,80,0.1);
+}
+.arch-node .a-icon { font-size: 24px; margin-bottom: 6px; }
+.arch-node .a-title {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 700;
+  margin-bottom: 4px;
+}
+.arch-node .a-desc {
+  font-size: 11px; color: var(--text-dim);
+  line-height: 1.4;
+}
+.arch-arrow {
+  display: flex; align-items: center;
+  color: var(--green); font-size: 18px;
+  flex-shrink: 0;
+}
+
+/* Data schema */
+.schema-block {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 20px;
+  margin: 12px 0;
+}
+.schema-key {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--blue);
+}
+.schema-val {
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: var(--text-dim);
+}
+
+/* Comparison table */
+.comp-table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 16px 0;
+  font-size: 13px;
+}
+.comp-table th {
+  background: var(--surface2);
+  padding: 12px 16px;
+  text-align: left;
+  font-weight: 600;
+  border-bottom: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-dim);
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+}
+.comp-table td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.comp-table tr:hover td {
+  background: var(--surface);
+}
+.comp-table .check { color: var(--green); }
+.comp-table .cross { color: var(--red); }
+
+/* Tags */
+.tag {
+  display: inline-block;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 11px; font-weight: 600;
+  padding: 3px 10px;
+  border-radius: 12px;
+  letter-spacing: 0.3px;
+}
+.tag-green { background: var(--green-dim); color: var(--green); }
+.tag-blue { background: var(--blue-dim); color: var(--blue); }
+.tag-purple { background: var(--purple-dim); color: var(--purple); }
+.tag-orange { background: var(--orange-dim); color: var(--orange); }
+.tag-cyan { background: var(--cyan-dim); color: var(--cyan); }
+
+/* Progress bar */
+.progress-wrap {
+  margin: 24px 0;
+}
+.progress-label {
+  display: flex; justify-content: space-between;
+  font-size: 12px; margin-bottom: 6px;
+}
+.progress-bar {
+  height: 6px;
+  background: var(--surface3);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.progress-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 1s ease;
+}
+
+/* Columns */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 20px;
+}
+
+@media (max-width: 800px) {
+  .hero, .panel { padding: 24px 20px; }
+  .nav-tabs { padding: 0 16px; }
+  .hero h1 { font-size: 26px; }
+  .card-grid { grid-template-columns: 1fr; }
+  .two-col { grid-template-columns: 1fr; }
+  .arch-flow { flex-wrap: wrap; }
+}
+</style>
+</head>
+<body>
+<div class="grain"></div>
+
+<div class="hero">
+  <div class="hero-badge">ANPR IMPLEMENTATION ROADMAP</div>
+  <h1>AI Hub CCTV 데이터로<br><span class="gradient">번호판 인식 시스템</span> 구축하기</h1>
+  <p class="hero-sub">yolo26 레포 수준의 ANPR 시스템을 처음부터 끝까지. AI Hub 데이터 다운로드 → YOLO 학습 → OCR 파이프라인 → GUI/서버까지.</p>
+</div>
+
+<div class="nav-tabs" id="navTabs">
+  <div class="nav-tab active" data-panel="p0">
+    <span class="step-num">0</span> 개요
+  </div>
+  <div class="nav-tab" data-panel="p1">
+    <span class="step-num">1</span> AI Hub 데이터
+  </div>
+  <div class="nav-tab" data-panel="p2">
+    <span class="step-num">2</span> 환경 구축
+  </div>
+  <div class="nav-tab" data-panel="p3">
+    <span class="step-num">3</span> YOLO 학습
+  </div>
+  <div class="nav-tab" data-panel="p4">
+    <span class="step-num">4</span> OCR 파이프라인
+  </div>
+  <div class="nav-tab" data-panel="p5">
+    <span class="step-num">5</span> 통합 & GUI
+  </div>
+  <div class="nav-tab" data-panel="p6">
+    <span class="step-num">6</span> 실전 코드
+  </div>
+</div>
+
+<!-- ==================== PANEL 0: OVERVIEW ==================== -->
+<div class="panel active" id="p0">
+  <div class="section-title">전체 로드맵</div>
+  <div class="section-desc">AI Hub CCTV 데이터를 활용해 yolo26급 번호판 인식 시스템을 구축하는 6단계 과정입니다.</div>
+
+  <div class="arch-flow">
+    <div class="arch-node">
+      <div class="a-icon">1</div>
+      <div class="a-title">1. AI Hub</div>
+      <div class="a-desc">CCTV 영상 + JSON 라벨 다운로드</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node">
+      <div class="a-icon">2</div>
+      <div class="a-title">2. 환경 구축</div>
+      <div class="a-desc">Python + CUDA + YOLO + OCR 설치</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node">
+      <div class="a-icon">3</div>
+      <div class="a-title">3. YOLO 학습</div>
+      <div class="a-desc">번호판 탐지 모델 Fine-tuning</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node">
+      <div class="a-icon">4</div>
+      <div class="a-title">4. OCR</div>
+      <div class="a-desc">PaddleOCR + EasyOCR + 전처리</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node">
+      <div class="a-icon">5</div>
+      <div class="a-title">5. 통합</div>
+      <div class="a-desc">GUI + 웹서버 + 배치처리</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node">
+      <div class="a-icon">6</div>
+      <div class="a-title">6. 배포</div>
+      <div class="a-desc">GitHub + Docker + 데모</div>
+    </div>
+  </div>
+
+  <div class="info-box tip">
+    <div class="info-icon">TIP</div>
+    <div class="info-text">
+      <strong>예상 소요 시간:</strong> GPU 있을 때 약 1~2주, 없으면 3~4주<br>
+      <strong>난이도:</strong> Python 기초 + 딥러닝 기본 개념 필요<br>
+      <strong>필수 장비:</strong> NVIDIA GPU (RTX 3060 이상 권장), RAM 16GB+, SSD 100GB+
+    </div>
+  </div>
+
+  <div class="section-title" style="margin-top:36px">yolo26 레포 vs 우리가 만들 것</div>
+  <table class="comp-table">
+    <tr>
+      <th>기능</th>
+      <th>yolo26 (기존)</th>
+      <th>우리 구현</th>
+    </tr>
+    <tr>
+      <td>YOLO 탐지</td>
+      <td class="check">yolo26.pt (커스텀)</td>
+      <td class="check">AI Hub 데이터로 직접 학습</td>
+    </tr>
+    <tr>
+      <td>OCR 엔진</td>
+      <td class="check">PaddleOCR + EasyOCR + Tesseract</td>
+      <td class="check">동일 구성</td>
+    </tr>
+    <tr>
+      <td>이미지 전처리</td>
+      <td class="check">7종</td>
+      <td class="check">7종 + 추가 최적화</td>
+    </tr>
+    <tr>
+      <td>한국 번호판</td>
+      <td class="check">지원</td>
+      <td class="check">AI Hub 한국 데이터 특화</td>
+    </tr>
+    <tr>
+      <td>4K 지원</td>
+      <td class="check">3840x2160</td>
+      <td class="check">AI Hub 4K CCTV</td>
+    </tr>
+    <tr>
+      <td>GUI</td>
+      <td class="check">Tkinter</td>
+      <td class="check">Tkinter or Streamlit</td>
+    </tr>
+    <tr>
+      <td>웹 서버</td>
+      <td class="check">HTTP 뷰어</td>
+      <td class="check">FastAPI + 대시보드</td>
+    </tr>
+    <tr>
+      <td>학습 데이터</td>
+      <td>불명확</td>
+      <td class="check">AI Hub 공인 데이터</td>
+    </tr>
+  </table>
+</div>
+
+<!-- ==================== PANEL 1: AI HUB DATA ==================== -->
+<div class="panel" id="p1">
+  <div class="section-title">Step 1. AI Hub 데이터셋 확보</div>
+  <div class="section-desc">번호판 인식에 사용할 수 있는 AI Hub 데이터셋 2개를 확인하세요.</div>
+
+  <div class="card-grid">
+    <div class="card">
+      <div class="card-icon">*</div>
+      <div class="card-title">CCTV 기반 차량정보 및 교통정보 계측 데이터 <span class="tag tag-green">추천!</span></div>
+      <div class="card-body">
+        <strong style="color:var(--text)">해상도:</strong> 3840x2160 (4K)<br>
+        <strong style="color:var(--text)">FPS:</strong> 30fps<br>
+        <strong style="color:var(--text)">장소:</strong> 비산사거리, 범계사거리 등 교차로/접근로/이면도로<br>
+        <strong style="color:var(--text)">라벨:</strong> 차종 bbox + 번호판 bbox + 문자별 bbox<br>
+        <strong style="color:var(--text)">URL:</strong> aihub.or.kr/aihubdata/data/view.do?dataSetSn=71573
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">VIDEO</div>
+      <div class="card-title">자동차 차종/연식/번호판 인식용 영상</div>
+      <div class="card-body">
+        <strong style="color:var(--text)">차량 이미지:</strong> 50만 장 + JSON 50만 개<br>
+        <strong style="color:var(--text)">번호판 이미지:</strong> 10만 장 + JSON 10만 개<br>
+        <strong style="color:var(--text)">장소:</strong> 시내도로, 주유소, 주차장<br>
+        <strong style="color:var(--text)">URL:</strong> aihub.or.kr/aidata/27727
+      </div>
+    </div>
+  </div>
+
+  <div class="section-title" style="font-size:18px">AI Hub JSON 라벨 구조 (핵심!)</div>
+  <div class="info-box info">
+    <div class="info-icon">KEY</div>
+    <div class="info-text">
+      <strong>이 JSON 구조를 정확히 이해해야</strong> YOLO 학습용 포맷으로 변환할 수 있어요. AI Hub 라벨은 <code>[x, y, width, height]</code> 형태이고, YOLO는 <code>[x_center, y_center, w, h]</code> (0~1 정규화) 형태입니다.
+    </div>
+  </div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>AI Hub 번호판 JSON 구조</span>
+      <span class="lang-tag">JSON</span>
+    </div>
+    <pre class="code">{
+  <span class="string">"Raw_Data_Info"</span>: {
+    <span class="string">"resolution"</span>: <span class="string">"3840, 2160"</span>,   <span class="comment">// 4K 해상도</span>
+    <span class="string">"fps"</span>: <span class="num">30</span>,
+    <span class="string">"location_name"</span>: <span class="string">"범계사거리"</span>,
+    <span class="string">"weather"</span>: <span class="string">"s"</span>,              <span class="comment">// s=맑음, r=비, c=흐림</span>
+    <span class="string">"season"</span>: <span class="string">"fa"</span>               <span class="comment">// sp/su/fa/wi</span>
+  },
+  <span class="string">"Learning_Data_Info"</span>: {
+    <span class="string">"annotations"</span>: [
+      {
+        <span class="string">"license_plate"</span>: [
+          {
+            <span class="string">"class_ID"</span>: <span class="string">"no_01"</span>,
+<span class="highlight-line">            <span class="string">"text"</span>: <span class="string">"90누"</span>,         <span class="comment">// &larr; 번호판 텍스트!</span></span>
+<span class="highlight-line">            <span class="string">"bbox"</span>: [<span class="num">1864</span>, <span class="num">1638</span>, <span class="num">85</span>, <span class="num">43</span>],  <span class="comment">// [x, y, w, h] 픽셀</span></span>
+            <span class="string">"index"</span>: <span class="num">1</span>
+          }
+        ],
+        <span class="string">"license_plate_number"</span>: [
+          {
+            <span class="string">"text"</span>: <span class="string">"9"</span>,          <span class="comment">// 개별 문자 단위!</span>
+            <span class="string">"bbox"</span>: [<span class="num">1869</span>, <span class="num">1653</span>, <span class="num">8</span>, <span class="num">17</span>]
+          }
+        ]
+      }
+    ]
+  }
+}</pre>
+  </div>
+
+  <div class="info-box warn">
+    <div class="info-icon">WARNING</div>
+    <div class="info-text">
+      <strong>다운로드 주의사항:</strong><br>
+      - 회원가입 후 <strong>다운로드 승인 신청</strong> 필요 (1~3일 소요)<br>
+      - 파일이 <strong>분할 압축</strong>되어 있어 리눅스에서 병합해야 함<br>
+      - 전체 용량이 매우 크므로 <strong>샘플 데이터</strong>부터 시작 권장<br>
+      - <code>find "폴더" -name "*.zip.part*" -print0 | sort -zt'.' -k2V | xargs -0 cat &gt; "파일.zip"</code>
+    </div>
+  </div>
+
+  <div class="section-title" style="font-size:18px; margin-top:28px">AI Hub &rarr; YOLO 포맷 변환</div>
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>convert_aihub_to_yolo.py</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <pre class="code"><span class="keyword">import</span> json, os, glob
+<span class="keyword">from</span> pathlib <span class="keyword">import</span> Path
+
+<span class="keyword">def</span> <span class="func">convert_aihub_to_yolo</span>(json_dir, output_dir, img_w=<span class="num">3840</span>, img_h=<span class="num">2160</span>):
+    <span class="string">"""AI Hub JSON &rarr; YOLO txt 변환
+
+    시간복잡도: O(n) -- JSON 파일 수에 비례
+
+    AI Hub bbox: [x, y, width, height] (픽셀)
+    YOLO bbox:   [x_center, y_center, w, h] (0~1 정규화)
+    """</span>
+    os.<span class="func">makedirs</span>(output_dir, exist_ok=<span class="keyword">True</span>)
+
+    json_files = glob.<span class="func">glob</span>(os.path.<span class="func">join</span>(json_dir, <span class="string">"*.json"</span>))
+    <span class="func">print</span>(<span class="string">f"변환할 JSON: {len(json_files)}개"</span>)
+
+    <span class="keyword">for</span> jf <span class="keyword">in</span> json_files:
+        <span class="keyword">with</span> <span class="func">open</span>(jf, <span class="string">'r'</span>, encoding=<span class="string">'utf-8'</span>) <span class="keyword">as</span> f:
+            data = json.<span class="func">load</span>(f)
+
+        <span class="comment"># 라벨 파일명 = JSON 파일명.txt</span>
+        txt_name = Path(jf).stem + <span class="string">".txt"</span>
+        txt_path = os.path.<span class="func">join</span>(output_dir, txt_name)
+
+        lines = []
+        annotations = data.get(<span class="string">"Learning_Data_Info"</span>, {}).get(<span class="string">"annotations"</span>, [])
+
+        <span class="keyword">for</span> ann <span class="keyword">in</span> annotations:
+            plates = ann.get(<span class="string">"license_plate"</span>, [])
+            <span class="keyword">for</span> plate <span class="keyword">in</span> plates:
+                bbox = plate.get(<span class="string">"bbox"</span>)
+                <span class="keyword">if not</span> bbox: <span class="keyword">continue</span>
+
+                x, y, w, h = bbox
+<span class="highlight-line">                <span class="comment"># 핵심 변환: 픽셀 &rarr; 정규화 중심좌표</span></span>
+<span class="highlight-line">                x_center = (x + w / <span class="num">2</span>) / img_w</span>
+<span class="highlight-line">                y_center = (y + h / <span class="num">2</span>) / img_h</span>
+<span class="highlight-line">                w_norm = w / img_w</span>
+<span class="highlight-line">                h_norm = h / img_h</span>
+
+                <span class="comment"># class 0 = license_plate</span>
+                lines.<span class="func">append</span>(<span class="string">f"0 {x_center:.6f} {y_center:.6f} {w_norm:.6f} {h_norm:.6f}"</span>)
+
+        <span class="keyword">with</span> <span class="func">open</span>(txt_path, <span class="string">'w'</span>) <span class="keyword">as</span> f:
+            f.<span class="func">write</span>(<span class="string">"\n"</span>.<span class="func">join</span>(lines))
+
+    <span class="func">print</span>(<span class="string">f"변환 완료: {output_dir}"</span>)
+
+<span class="comment"># 사용법</span>
+<span class="func">convert_aihub_to_yolo</span>(
+    json_dir=<span class="string">"./aihub_data/labels_json"</span>,
+    output_dir=<span class="string">"./dataset/labels/train"</span>
+)</pre>
+  </div>
+</div>
+
+<!-- ==================== PANEL 2: ENVIRONMENT ==================== -->
+<div class="panel" id="p2">
+  <div class="section-title">Step 2. 개발 환경 구축</div>
+  <div class="section-desc">번호판 인식 시스템에 필요한 모든 패키지를 설치합니다.</div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>requirements.txt</span>
+      <span class="lang-tag">pip</span>
+    </div>
+    <pre class="code"><span class="comment"># === 핵심 의존성 ===</span>
+ultralytics>=8.0.0       <span class="comment"># YOLO 모델 (탐지)</span>
+paddlepaddle-gpu          <span class="comment"># PaddleOCR GPU 백엔드</span>
+paddleocr>=2.7            <span class="comment"># 한글 OCR (최강)</span>
+easyocr>=1.7              <span class="comment"># 영문/한글 OCR (보조)</span>
+pytesseract>=0.3          <span class="comment"># Tesseract OCR (폴백)</span>
+
+<span class="comment"># === 영상 처리 ===</span>
+opencv-python>=4.8        <span class="comment"># 이미지/비디오 처리</span>
+numpy>=1.24               <span class="comment"># 수치 계산</span>
+Pillow>=10.0              <span class="comment"># 이미지 변환</span>
+
+<span class="comment"># === GUI / 서버 ===</span>
+fastapi>=0.100            <span class="comment"># 웹 API 서버</span>
+uvicorn>=0.23             <span class="comment"># ASGI 서버</span>
+streamlit>=1.28           <span class="comment"># 대시보드 (선택)</span>
+
+<span class="comment"># === 유틸 ===</span>
+yt-dlp>=2023.10           <span class="comment"># YouTube 다운로드</span>
+tqdm>=4.66                <span class="comment"># 진행바</span>
+pandas>=2.0               <span class="comment"># 결과 분석</span></pre>
+  </div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>환경 셋업 스크립트</span>
+      <span class="lang-tag">Bash</span>
+    </div>
+    <pre class="code"><span class="comment"># 1. 가상환경 생성</span>
+python -m venv anpr_env
+source anpr_env/bin/activate  <span class="comment"># Windows: anpr_env\Scripts\activate</span>
+
+<span class="comment"># 2. PyTorch + CUDA 설치 (GPU 가속)</span>
+pip install torch torchvision --index-url https://download.pytorch.org/whl/cu121
+
+<span class="comment"># 3. 패키지 설치</span>
+pip install -r requirements.txt
+
+<span class="comment"># 4. Tesseract OCR 시스템 설치</span>
+sudo apt install tesseract-ocr tesseract-ocr-kor  <span class="comment"># Ubuntu</span>
+<span class="comment"># brew install tesseract                          # macOS</span>
+
+<span class="comment"># 5. 설치 확인</span>
+python -c "from ultralytics import YOLO; print('YOLO OK')"
+python -c "from paddleocr import PaddleOCR; print('PaddleOCR OK')"
+python -c "import easyocr; print('EasyOCR OK')"</pre>
+  </div>
+
+  <div class="info-box danger">
+    <div class="info-icon">IMPORTANT</div>
+    <div class="info-text">
+      <strong>"이거 틀리면 99% 이 부분":</strong><br>
+      - <strong>CUDA 버전 불일치</strong> -- <code>nvidia-smi</code>로 CUDA 버전 확인 후 맞는 PyTorch 설치<br>
+      - <strong>PaddlePaddle GPU vs CPU</strong> -- GPU 없으면 <code>paddlepaddle</code> (CPU 버전) 설치<br>
+      - <strong>Tesseract 미설치</strong> -- pip만으론 안 됨, 시스템 패키지도 별도 설치 필요
+    </div>
+  </div>
+
+  <div class="section-title" style="font-size:18px; margin-top:28px">프로젝트 디렉토리 구조</div>
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>디렉토리 구조</span>
+      <span class="lang-tag">Tree</span>
+    </div>
+    <pre class="code">anpr-system/
+├── dataset/                    <span class="comment"># AI Hub 데이터 (YOLO 포맷)</span>
+│   ├── images/
+│   │   ├── train/              <span class="comment"># 학습용 이미지 (80%)</span>
+│   │   └── val/                <span class="comment"># 검증용 이미지 (20%)</span>
+│   ├── labels/
+│   │   ├── train/              <span class="comment"># YOLO 라벨 txt</span>
+│   │   └── val/
+│   └── data.yaml               <span class="comment"># YOLO 데이터 설정</span>
+│
+├── models/                     <span class="comment"># 학습된 모델</span>
+│   └── best.pt                 <span class="comment"># = yolo26의 yolo26.pt</span>
+│
+├── src/                        <span class="comment"># 소스코드</span>
+│   ├── plate_detector.py       <span class="comment"># YOLO 번호판 탐지</span>
+│   ├── ocr_pipeline.py         <span class="comment"># 멀티 OCR 엔진</span>
+│   ├── preprocessor.py         <span class="comment"># 7종 이미지 전처리</span>
+│   ├── plate_recognizer.py     <span class="comment"># 통합 파이프라인</span>
+│   └── validator.py            <span class="comment"># 번호판 포맷 검증</span>
+│
+├── app/                        <span class="comment"># 인터페이스</span>
+│   ├── gui.py                  <span class="comment"># Tkinter GUI</span>
+│   └── server.py               <span class="comment"># FastAPI 웹서버</span>
+│
+├── tools/                      <span class="comment"># 유틸리티</span>
+│   ├── convert_aihub.py        <span class="comment"># AI Hub&rarr;YOLO 변환</span>
+│   ├── benchmark.py            <span class="comment"># 성능 벤치마크</span>
+│   └── debug_ocr.py            <span class="comment"># OCR 디버깅</span>
+│
+├── results/                    <span class="comment"># 인식 결과 저장</span>
+├── requirements.txt
+└── README.md</pre>
+  </div>
+</div>
+
+<!-- ==================== PANEL 3: YOLO TRAINING ==================== -->
+<div class="panel" id="p3">
+  <div class="section-title">Step 3. YOLO 모델 학습</div>
+  <div class="section-desc">AI Hub 데이터로 번호판 전용 YOLO 모델을 Fine-tuning 합니다. 이것이 yolo26의 yolo26.pt에 해당합니다.</div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>dataset/data.yaml -- YOLO 데이터 설정</span>
+      <span class="lang-tag">YAML</span>
+    </div>
+    <pre class="code"><span class="comment"># YOLO 학습 데이터 설정 파일</span>
+<span class="keyword">path</span>: ./dataset
+<span class="keyword">train</span>: images/train
+<span class="keyword">val</span>: images/val
+
+<span class="comment"># 클래스 (번호판 1개만)</span>
+<span class="keyword">nc</span>: <span class="num">1</span>
+<span class="keyword">names</span>: [<span class="string">'license_plate'</span>]</pre>
+  </div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>train.py -- YOLO 학습 스크립트</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <pre class="code"><span class="keyword">from</span> ultralytics <span class="keyword">import</span> YOLO
+
+<span class="comment"># ===== 모델 선택 가이드 =====</span>
+<span class="comment"># yolo11n.pt -> 가장 빠름 (5.4MB), 정확도 낮음</span>
+<span class="comment"># yolo11s.pt -> 균형형 (18.5MB) &lt;- 추천!</span>
+<span class="comment"># yolo11m.pt -> 정확도 높음 (38.8MB)</span>
+<span class="comment"># yolo11l.pt -> 최고 정확도 (49.0MB), 느림</span>
+
+<span class="comment"># 1. 사전학습 모델 로드 (COCO pretrained)</span>
+model = YOLO(<span class="string">"yolo11s.pt"</span>)  <span class="comment"># s = small, 균형 좋음</span>
+
+<span class="comment"># 2. Fine-tuning 시작!</span>
+results = model.<span class="func">train</span>(
+    data=<span class="string">"dataset/data.yaml"</span>,
+
+    <span class="comment"># === 학습 설정 ===</span>
+<span class="highlight-line">    epochs=<span class="num">100</span>,            <span class="comment"># 에포크 (50~150 권장)</span></span>
+<span class="highlight-line">    imgsz=<span class="num">640</span>,             <span class="comment"># 입력 크기 (640 기본)</span></span>
+<span class="highlight-line">    batch=<span class="num">16</span>,              <span class="comment"># 배치 크기 (GPU 메모리에 맞게)</span></span>
+
+    <span class="comment"># === 최적화 ===</span>
+    optimizer=<span class="string">"AdamW"</span>,
+    lr0=<span class="num">0.001</span>,             <span class="comment"># 초기 학습률</span>
+    lrf=<span class="num">0.01</span>,              <span class="comment"># 최종 학습률 비율</span>
+    warmup_epochs=<span class="num">3</span>,       <span class="comment"># 워밍업</span>
+
+    <span class="comment"># === 증강 (Augmentation) ===</span>
+    hsv_h=<span class="num">0.015</span>,           <span class="comment"># 색조 변화</span>
+    hsv_s=<span class="num">0.7</span>,             <span class="comment"># 채도 변화</span>
+    hsv_v=<span class="num">0.4</span>,             <span class="comment"># 명도 변화</span>
+    mosaic=<span class="num">1.0</span>,            <span class="comment"># 모자이크 증강</span>
+    flipud=<span class="num">0.0</span>,            <span class="comment"># 상하 반전 OFF (번호판은 뒤집으면 안됨!)</span>
+    fliplr=<span class="num">0.0</span>,            <span class="comment"># 좌우 반전 OFF (번호판 좌우 반전 X)</span>
+
+    <span class="comment"># === 저장 ===</span>
+    project=<span class="string">"runs/train"</span>,
+    name=<span class="string">"anpr_v1"</span>,
+    save=<span class="keyword">True</span>,
+    plots=<span class="keyword">True</span>,
+)
+
+<span class="comment"># 3. 최고 성능 모델 확인</span>
+<span class="func">print</span>(<span class="string">f"Best model: runs/train/anpr_v1/weights/best.pt"</span>)
+<span class="func">print</span>(<span class="string">f"mAP50: {results.results_dict['metrics/mAP50(B)']:.4f}"</span>)</pre>
+  </div>
+
+  <div class="info-box danger">
+    <div class="info-icon">IMPORTANT</div>
+    <div class="info-text">
+      <strong>"이거 틀리면 99% 이 부분" -- YOLO 학습 5대 실수:</strong><br>
+      1. <strong>flipud/fliplr=1.0</strong> &rarr; 번호판 뒤집으면 OCR 망가짐. 반드시 <strong>0.0</strong>으로!<br>
+      2. <strong>이미지-라벨 파일명 불일치</strong> &rarr; img001.jpg &harr; img001.txt 1:1 매칭 필수<br>
+      3. <strong>bbox 좌표 1 초과</strong> &rarr; YOLO 정규화값은 0~1 사이여야 함<br>
+      4. <strong>batch 너무 큼</strong> &rarr; CUDA OOM 에러 &rarr; batch 줄이기 (16&rarr;8&rarr;4)<br>
+      5. <strong>data.yaml 경로 오류</strong> &rarr; 절대경로 or 실행 디렉토리 기준 상대경로 확인
+    </div>
+  </div>
+
+  <div class="two-col" style="margin-top:24px">
+    <div class="card">
+      <div class="card-icon">METRICS</div>
+      <div class="card-title">좋은 학습 결과 지표</div>
+      <div class="card-body">
+        <strong style="color:var(--green)">mAP50 &gt; 0.90</strong> -- 우수<br>
+        <strong style="color:var(--yellow)">mAP50 &gt; 0.80</strong> -- 양호<br>
+        <strong style="color:var(--red)">mAP50 &lt; 0.70</strong> -- 데이터/설정 점검 필요<br><br>
+        loss가 계속 줄면 OK, 올라가면 과적합!
+      </div>
+    </div>
+    <div class="card">
+      <div class="card-icon">GPU</div>
+      <div class="card-title">GPU별 권장 설정</div>
+      <div class="card-body">
+        <strong style="color:var(--text)">RTX 3060 (12GB):</strong> batch=16, imgsz=640<br>
+        <strong style="color:var(--text)">RTX 3080 (10GB):</strong> batch=16, imgsz=640<br>
+        <strong style="color:var(--text)">RTX 4090 (24GB):</strong> batch=32, imgsz=960<br>
+        <strong style="color:var(--text)">Google Colab (T4):</strong> batch=8, imgsz=640
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PANEL 4: OCR ==================== -->
+<div class="panel" id="p4">
+  <div class="section-title">Step 4. OCR 파이프라인</div>
+  <div class="section-desc">YOLO가 번호판 위치를 찾으면, OCR이 텍스트를 읽습니다. 3종 OCR 엔진 + 7종 전처리로 정확도를 극대화합니다.</div>
+
+  <div class="arch-flow">
+    <div class="arch-node" style="border-color: var(--orange)">
+      <div class="a-icon">IMG</div>
+      <div class="a-title">번호판 crop</div>
+      <div class="a-desc">YOLO bbox로 잘라낸 이미지</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node" style="border-color: var(--purple)">
+      <div class="a-icon">PROC</div>
+      <div class="a-title">7종 전처리</div>
+      <div class="a-desc">각각 다른 방식으로 이미지 개선</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node" style="border-color: var(--blue)">
+      <div class="a-icon">OCR</div>
+      <div class="a-title">3종 OCR</div>
+      <div class="a-desc">PaddleOCR &rarr; EasyOCR &rarr; Tesseract</div>
+    </div>
+    <div class="arch-arrow">&rarr;</div>
+    <div class="arch-node" style="border-color: var(--green)">
+      <div class="a-icon">OK</div>
+      <div class="a-title">투표 / 검증</div>
+      <div class="a-desc">confidence 기반 최적 결과 선택</div>
+    </div>
+  </div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>src/preprocessor.py -- 7종 이미지 전처리</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <pre class="code"><span class="keyword">import</span> cv2
+<span class="keyword">import</span> numpy <span class="keyword">as</span> np
+
+<span class="keyword">class</span> <span class="func">PlatePreprocessor</span>:
+    <span class="string">"""번호판 이미지 전처리 7종 세트
+
+    비유: 사진관에서 증명사진 보정하듯이,
+    번호판 이미지도 OCR이 잘 읽을 수 있도록
+    여러 가지 방법으로 "보정"하는 것!
+
+    시간복잡도: O(w*h) -- 이미지 픽셀 수에 비례
+    """</span>
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">deblur</span>(img):
+        <span class="string">"""1. 샤프닝 (흐릿한 이미지 선명하게)"""</span>
+        kernel = np.<span class="func">array</span>([[-<span class="num">1</span>,-<span class="num">1</span>,-<span class="num">1</span>],
+                          [-<span class="num">1</span>, <span class="num">9</span>,-<span class="num">1</span>],
+                          [-<span class="num">1</span>,-<span class="num">1</span>,-<span class="num">1</span>]])
+        <span class="keyword">return</span> cv2.<span class="func">filter2D</span>(img, -<span class="num">1</span>, kernel)
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">gamma_correct</span>(img, gamma=<span class="num">1.5</span>):
+        <span class="string">"""2. 감마 보정 (어두운 이미지 밝게)"""</span>
+        table = np.<span class="func">array</span>([
+            ((<span class="num">i</span> / <span class="num">255.0</span>) ** (<span class="num">1.0</span> / gamma)) * <span class="num">255</span>
+            <span class="keyword">for</span> i <span class="keyword">in</span> <span class="func">range</span>(<span class="num">256</span>)
+        ]).astype(<span class="string">"uint8"</span>)
+        <span class="keyword">return</span> cv2.<span class="func">LUT</span>(img, table)
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">contrast_stretch</span>(img):
+        <span class="string">"""3. 히스토그램 스트레칭 (대비 극대화)"""</span>
+        lab = cv2.<span class="func">cvtColor</span>(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.<span class="func">split</span>(lab)
+        l = cv2.<span class="func">normalize</span>(l, <span class="keyword">None</span>, <span class="num">0</span>, <span class="num">255</span>, cv2.NORM_MINMAX)
+        <span class="keyword">return</span> cv2.<span class="func">cvtColor</span>(cv2.<span class="func">merge</span>([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">clahe</span>(img):
+        <span class="string">"""4. CLAHE (지역 적응형 히스토그램 평활화)"""</span>
+        lab = cv2.<span class="func">cvtColor</span>(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.<span class="func">split</span>(lab)
+        clahe = cv2.<span class="func">createCLAHE</span>(clipLimit=<span class="num">3.0</span>, tileGridSize=(<span class="num">8</span>, <span class="num">8</span>))
+        l = clahe.<span class="func">apply</span>(l)
+        <span class="keyword">return</span> cv2.<span class="func">cvtColor</span>(cv2.<span class="func">merge</span>([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">bilateral_filter</span>(img):
+        <span class="string">"""5. 양방향 필터 (노이즈 제거 + 엣지 보존)"""</span>
+        <span class="keyword">return</span> cv2.<span class="func">bilateralFilter</span>(img, <span class="num">9</span>, <span class="num">75</span>, <span class="num">75</span>)
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">morphology</span>(img):
+        <span class="string">"""6. 모폴로지 연산 (문자 윤곽 강화)"""</span>
+        gray = cv2.<span class="func">cvtColor</span>(img, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.<span class="func">getStructuringElement</span>(cv2.MORPH_RECT, (<span class="num">3</span>, <span class="num">3</span>))
+        <span class="keyword">return</span> cv2.<span class="func">morphologyEx</span>(gray, cv2.MORPH_CLOSE, kernel)
+
+    @staticmethod
+    <span class="keyword">def</span> <span class="func">adaptive_threshold</span>(img):
+        <span class="string">"""7. 적응형 이진화 (배경/글자 완전 분리)"""</span>
+        gray = cv2.<span class="func">cvtColor</span>(img, cv2.COLOR_BGR2GRAY)
+        <span class="keyword">return</span> cv2.<span class="func">adaptiveThreshold</span>(
+            gray, <span class="num">255</span>, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, <span class="num">11</span>, <span class="num">2</span>
+        )
+
+    <span class="keyword">def</span> <span class="func">get_all_versions</span>(self, img):
+        <span class="string">"""7종 전처리 결과를 모두 반환"""</span>
+        <span class="keyword">return</span> {
+            <span class="string">"original"</span>: img,
+            <span class="string">"deblur"</span>: self.<span class="func">deblur</span>(img),
+            <span class="string">"gamma"</span>: self.<span class="func">gamma_correct</span>(img),
+            <span class="string">"stretch"</span>: self.<span class="func">contrast_stretch</span>(img),
+            <span class="string">"clahe"</span>: self.<span class="func">clahe</span>(img),
+            <span class="string">"bilateral"</span>: self.<span class="func">bilateral_filter</span>(img),
+            <span class="string">"morph"</span>: self.<span class="func">morphology</span>(img),
+            <span class="string">"threshold"</span>: self.<span class="func">adaptive_threshold</span>(img),
+        }</pre>
+  </div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>src/ocr_pipeline.py -- 멀티 OCR 엔진</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <pre class="code"><span class="keyword">from</span> paddleocr <span class="keyword">import</span> PaddleOCR
+<span class="keyword">import</span> easyocr
+<span class="keyword">import</span> pytesseract
+<span class="keyword">import</span> re
+
+<span class="keyword">class</span> <span class="func">MultiOCR</span>:
+    <span class="string">"""3종 OCR 엔진 체이닝
+
+    비유: 3명의 전문가에게 같은 사진을 보여주고
+    가장 자신있는 답을 채택하는 것!
+
+    PaddleOCR: 한글에 강함 (1순위)
+    EasyOCR:   영문+한글 (2순위)
+    Tesseract: 범용 폴백 (3순위)
+    """</span>
+
+    <span class="keyword">def</span> <span class="func">__init__</span>(self):
+        self.paddle = PaddleOCR(
+            lang=<span class="string">"korean"</span>,
+            use_angle_cls=<span class="keyword">True</span>,
+            show_log=<span class="keyword">False</span>
+        )
+        self.easy = easyocr.<span class="func">Reader</span>([<span class="string">'ko'</span>, <span class="string">'en'</span>], gpu=<span class="keyword">True</span>)
+
+    <span class="keyword">def</span> <span class="func">_clean_plate_text</span>(self, text):
+        <span class="string">"""한국 번호판 포맷 정리
+        예: '12가 3456' &rarr; '12가3456'
+        """</span>
+        text = re.<span class="func">sub</span>(<span class="string">r'[\s\-\.]'</span>, <span class="string">''</span>, text)
+        text = text.<span class="func">strip</span>()
+        <span class="keyword">return</span> text
+
+    <span class="keyword">def</span> <span class="func">_validate_korean_plate</span>(self, text):
+        <span class="string">"""한국 번호판 패턴 검증
+
+        신규: 123가4567 (3자리+한글+4자리)
+        기존: 12가3456  (2자리+한글+4자리)
+        """</span>
+        patterns = [
+            r'^\d{2,3}[가-힣]\d{4}$',   <span class="comment"># 기본</span>
+            r'^[가-힣]{2}\d{2}[가-힣]\d{4}$',  <span class="comment"># 지역명 포함</span>
+        ]
+        <span class="keyword">return</span> <span class="func">any</span>(re.<span class="func">match</span>(p, text) <span class="keyword">for</span> p <span class="keyword">in</span> patterns)
+
+    <span class="keyword">def</span> <span class="func">recognize</span>(self, images_dict):
+        <span class="string">"""전처리된 이미지들로 OCR 실행
+
+        Args:
+            images_dict: preprocessor.get_all_versions() 결과
+        Returns:
+            (text, confidence, engine) 최적 결과
+        """</span>
+        results = []
+
+        <span class="keyword">for</span> name, img <span class="keyword">in</span> images_dict.<span class="func">items</span>():
+            <span class="comment"># PaddleOCR (1순위)</span>
+            <span class="keyword">try</span>:
+                paddle_res = self.paddle.<span class="func">ocr</span>(img, cls=<span class="keyword">True</span>)
+                <span class="keyword">if</span> paddle_res <span class="keyword">and</span> paddle_res[<span class="num">0</span>]:
+                    <span class="keyword">for</span> line <span class="keyword">in</span> paddle_res[<span class="num">0</span>]:
+                        text = self.<span class="func">_clean_plate_text</span>(line[<span class="num">1</span>][<span class="num">0</span>])
+                        conf = line[<span class="num">1</span>][<span class="num">1</span>]
+                        results.<span class="func">append</span>((text, conf, <span class="string">"paddle"</span>, name))
+            <span class="keyword">except</span>: <span class="keyword">pass</span>
+
+            <span class="comment"># EasyOCR (2순위)</span>
+            <span class="keyword">try</span>:
+                easy_res = self.easy.<span class="func">readtext</span>(img)
+                <span class="keyword">for</span> (_, text, conf) <span class="keyword">in</span> easy_res:
+                    text = self.<span class="func">_clean_plate_text</span>(text)
+                    results.<span class="func">append</span>((text, conf, <span class="string">"easyocr"</span>, name))
+            <span class="keyword">except</span>: <span class="keyword">pass</span>
+
+        <span class="comment"># 검증된 결과 우선, 그 다음 confidence 순</span>
+        valid = [r <span class="keyword">for</span> r <span class="keyword">in</span> results <span class="keyword">if</span> self.<span class="func">_validate_korean_plate</span>(r[<span class="num">0</span>])]
+
+        <span class="keyword">if</span> valid:
+            best = <span class="func">max</span>(valid, key=<span class="keyword">lambda</span> x: x[<span class="num">1</span>])
+        <span class="keyword">elif</span> results:
+            best = <span class="func">max</span>(results, key=<span class="keyword">lambda</span> x: x[<span class="num">1</span>])
+        <span class="keyword">else</span>:
+            best = (<span class="string">""</span>, <span class="num">0.0</span>, <span class="string">"none"</span>, <span class="string">"none"</span>)
+
+        <span class="keyword">return</span> {
+            <span class="string">"text"</span>: best[<span class="num">0</span>],
+            <span class="string">"confidence"</span>: best[<span class="num">1</span>],
+            <span class="string">"engine"</span>: best[<span class="num">2</span>],
+            <span class="string">"preprocess"</span>: best[<span class="num">3</span>],
+            <span class="string">"is_valid"</span>: self.<span class="func">_validate_korean_plate</span>(best[<span class="num">0</span>])
+        }</pre>
+  </div>
+</div>
+
+<!-- ==================== PANEL 5: INTEGRATION ==================== -->
+<div class="panel" id="p5">
+  <div class="section-title">Step 5. 통합 파이프라인 &amp; GUI</div>
+  <div class="section-desc">탐지 + 전처리 + OCR을 하나로 합치고, GUI/웹서버를 붙입니다.</div>
+
+  <div class="code-wrap">
+    <div class="code-header">
+      <span>src/plate_recognizer.py -- 통합 엔진</span>
+      <span class="lang-tag">Python</span>
+    </div>
+    <pre class="code"><span class="keyword">from</span> ultralytics <span class="keyword">import</span> YOLO
+<span class="keyword">from</span> src.preprocessor <span class="keyword">import</span> PlatePreprocessor
+<span class="keyword">from</span> src.ocr_pipeline <span class="keyword">import</span> MultiOCR
+<span class="keyword">import</span> cv2, json, os
+<span class="keyword">from</span> datetime <span class="keyword">import</span> datetime
+
+<span class="keyword">class</span> <span class="func">PlateRecognizer</span>:
+    <span class="string">"""완전한 번호판 인식 파이프라인
+
+    비유: 택배 분류 센터와 같음
+    1. YOLO = 컨베이어벨트에서 택배 찾기
+    2. 전처리 = 라벨 닦아서 깨끗하게
+    3. OCR = 바코드 스캔해서 텍스트 읽기
+    4. 검증 = 올바른 주소인지 확인
+    """</span>
+
+    <span class="keyword">def</span> <span class="func">__init__</span>(self, model_path=<span class="string">"models/best.pt"</span>):
+        self.detector = YOLO(model_path)
+        self.preprocessor = PlatePreprocessor()
+        self.ocr = MultiOCR()
+        self.results = []
+
+    <span class="keyword">def</span> <span class="func">process_frame</span>(self, frame, conf_threshold=<span class="num">0.5</span>):
+        <span class="string">"""단일 프레임 처리 -- 시간복잡도: O(n*w*h)
+        n = 탐지된 번호판 수, w*h = 이미지 크기
+        """</span>
+        detections = self.detector(frame, conf=conf_threshold)[<span class="num">0</span>]
+        frame_results = []
+
+        <span class="keyword">for</span> box <span class="keyword">in</span> detections.boxes:
+            x1, y1, x2, y2 = <span class="func">map</span>(<span class="func">int</span>, box.xyxy[<span class="num">0</span>])
+            conf = <span class="func">float</span>(box.conf[<span class="num">0</span>])
+
+            <span class="comment"># 번호판 영역 crop</span>
+            plate_img = frame[y1:y2, x1:x2]
+            <span class="keyword">if</span> plate_img.size == <span class="num">0</span>: <span class="keyword">continue</span>
+
+            <span class="comment"># 7종 전처리 적용</span>
+            versions = self.preprocessor.<span class="func">get_all_versions</span>(plate_img)
+
+            <span class="comment"># 멀티 OCR로 텍스트 인식</span>
+            ocr_result = self.ocr.<span class="func">recognize</span>(versions)
+
+            frame_results.<span class="func">append</span>({
+                <span class="string">"bbox"</span>: [x1, y1, x2, y2],
+                <span class="string">"det_conf"</span>: conf,
+                <span class="string">"plate_text"</span>: ocr_result[<span class="string">"text"</span>],
+                <span class="string">"ocr_conf"</span>: ocr_result[<span class="string">"confidence"</span>],
+                <span class="string">"engine"</span>: ocr_result[<span class="string">"engine"</span>],
+                <span class="string">"is_valid"</span>: ocr_result[<span class="string">"is_valid"</span>],
+                <span class="string">"timestamp"</span>: datetime.<span class="func">now</span>().<span class="func">isoformat</span>()
+            })
+
+        <span class="keyword">return</span> frame_results
+
+    <span class="keyword">def</span> <span class="func">process_video</span>(self, video_path, save_dir=<span class="string">"results"</span>):
+        <span class="string">"""비디오 전체 처리"""</span>
+        os.<span class="func">makedirs</span>(save_dir, exist_ok=<span class="keyword">True</span>)
+        cap = cv2.<span class="func">VideoCapture</span>(video_path)
+        fps = cap.<span class="func">get</span>(cv2.CAP_PROP_FPS)
+        frame_count = <span class="num">0</span>
+        all_results = []
+
+        <span class="keyword">while</span> cap.<span class="func">isOpened</span>():
+            ret, frame = cap.<span class="func">read</span>()
+            <span class="keyword">if not</span> ret: <span class="keyword">break</span>
+
+            <span class="comment"># 매 5프레임마다 처리 (속도 최적화)</span>
+            <span class="keyword">if</span> frame_count % <span class="num">5</span> == <span class="num">0</span>:
+                results = self.<span class="func">process_frame</span>(frame)
+                <span class="keyword">for</span> r <span class="keyword">in</span> results:
+                    r[<span class="string">"frame"</span>] = frame_count
+                    r[<span class="string">"time"</span>] = frame_count / fps
+                    all_results.<span class="func">append</span>(r)
+                    <span class="func">print</span>(<span class="string">f"[{r['time']:.1f}s] {r['plate_text']} "</span>
+                          <span class="string">f"(conf: {r['ocr_conf']:.2f}, {r['engine']})"</span>)
+
+            frame_count += <span class="num">1</span>
+
+        cap.<span class="func">release</span>()
+
+        <span class="comment"># 결과 저장</span>
+        <span class="keyword">with</span> <span class="func">open</span>(f<span class="string">"{save_dir}/results.json"</span>, <span class="string">"w"</span>) <span class="keyword">as</span> f:
+            json.<span class="func">dump</span>(all_results, f, ensure_ascii=<span class="keyword">False</span>, indent=<span class="num">2</span>)
+
+        <span class="func">print</span>(<span class="string">f"\n총 {len(all_results)}개 번호판 인식 완료"</span>)
+        <span class="keyword">return</span> all_results</pre>
+  </div>
+
+  <div class="info-box tip">
+    <div class="info-icon">TIP</div>
+    <div class="info-text">
+      <strong>실행 방법:</strong><br>
+      <code>python -c "from src.plate_recognizer import PlateRecognizer; pr = PlateRecognizer(); pr.process_video('cctv.mp4')"</code><br><br>
+      또는 GUI: <code>python app/gui.py</code><br>
+      또는 서버: <code>python app/server.py</code> &rarr; http://localhost:8000
+    </div>
+  </div>
+</div>
+
+<!-- ==================== PANEL 6: FULL CODE ==================== -->
+<div class="panel" id="p6">
+  <div class="section-title">Step 6. 실전 -- 지금 바로 시작하기</div>
+  <div class="section-desc">아래 순서대로 진행하면 yolo26급 시스템이 완성됩니다.</div>
+
+  <div class="timeline">
+    <div class="tl-item done">
+      <div class="tl-dot">1</div>
+      <div class="tl-title">AI Hub 가입 &amp; 데이터 신청</div>
+      <div class="tl-desc">
+        aihub.or.kr 가입 &rarr; "CCTV 기반 차량정보 및 교통정보 계측 데이터" 검색 &rarr; 다운로드 승인 신청 (1~3일).<br>
+        <span class="tag tag-orange">팁</span> 샘플 데이터가 있다면 먼저 다운로드해서 구조 파악!
+      </div>
+    </div>
+    <div class="tl-item done">
+      <div class="tl-dot">2</div>
+      <div class="tl-title">데이터 변환 (AI Hub &rarr; YOLO)</div>
+      <div class="tl-desc">
+        convert_aihub_to_yolo.py 실행 &rarr; images/ + labels/ 디렉토리 생성.<br>
+        <span class="tag tag-green">검증</span> 변환 후 YOLO 라벨 시각화해서 bbox 위치 확인!
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot">3</div>
+      <div class="tl-title">YOLO Fine-tuning (1~6시간)</div>
+      <div class="tl-desc">
+        train.py 실행 &rarr; runs/train/anpr_v1/weights/best.pt 생성.<br>
+        <span class="tag tag-purple">GPU</span> Colab 무료 T4로도 충분 (50 epochs ~ 2시간)
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot">4</div>
+      <div class="tl-title">OCR 파이프라인 테스트</div>
+      <div class="tl-desc">
+        debug_ocr.py로 전처리별 OCR 결과 비교.<br>
+        어떤 전처리+OCR 조합이 가장 좋은지 확인.
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot">5</div>
+      <div class="tl-title">통합 &amp; CCTV 영상 테스트</div>
+      <div class="tl-desc">
+        PlateRecognizer로 AI Hub CCTV 영상 실행.<br>
+        <span class="tag tag-cyan">목표</span> 정확도 90%+ 달성시 다음 단계!
+      </div>
+    </div>
+    <div class="tl-item">
+      <div class="tl-dot">6</div>
+      <div class="tl-title">GUI + 서버 + GitHub Push</div>
+      <div class="tl-desc">
+        GUI/웹서버 추가 &rarr; README 작성 &rarr; GitHub 푸시.<br>
+        (OAuth 만료 시 <code>/login</code> 먼저!)
+      </div>
+    </div>
+  </div>
+
+  <div class="info-box info" style="margin-top:28px">
+    <div class="info-icon">TARGET</div>
+    <div class="info-text">
+      <strong>다음 단계에서 도와줄 수 있는 것:</strong><br>
+      - AI Hub 데이터 다운로드 후 &rarr; 변환 스크립트 바로 실행<br>
+      - YOLO 학습 코드 전체 파일로 생성<br>
+      - OCR 파이프라인 완성 코드 제공<br>
+      - GUI (Tkinter or Streamlit) 풀 코드<br>
+      - FastAPI 웹서버 + 대시보드<br>
+      - GitHub 레포 구조 자동 생성<br><br>
+      <strong>데이터를 다운받으면, 각 단계별 실행 가능한 코드를 만들어드릴게요!</strong>
+    </div>
+  </div>
+</div>
+
+<script>
+// Tab navigation
+document.querySelectorAll('.nav-tab').forEach(tab => {
+  tab.addEventListener('click', () => {
+    document.querySelectorAll('.nav-tab').forEach(t => t.classList.remove('active'));
+    document.querySelectorAll('.panel').forEach(p => p.classList.remove('active'));
+    tab.classList.add('active');
+    document.getElementById(tab.dataset.panel).classList.add('active');
+  });
+});
+
+// Copy code
+document.querySelectorAll('.code-copy').forEach(btn => {
+  btn.addEventListener('click', () => {
+    const code = btn.closest('.code-wrap').querySelector('pre').textContent;
+    navigator.clipboard.writeText(code);
+    btn.textContent = 'Copied!';
+    setTimeout(() => btn.textContent = 'Copy', 2000);
+  });
+});
+</script>
+</body>
+</html>

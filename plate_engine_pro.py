@@ -359,6 +359,33 @@ class PlateValidator:
         "대": "다", "태": "타", "내": "나",
         "래": "라", "매": "마", "새": "사",
         "재": "자", "채": "차", "해": "하",
+        # ★ 추가: 테스트 결과 발견된 혼동 쌍
+        "니": "나", "두": "다", "버": "바",
+        "누": "나", "배": "바",
+    }
+
+    # ★ 지역명 OCR 오인식 교정 맵 (2글자 단위)
+    _REGION_CONFUSION_MAP = {
+        "얼리": "경기", "잘리": "경기", "결리": "경기", "열리": "경기",
+        "건것": "경기", "견기": "경기", "경거": "경기", "결기": "경기",
+        "경리": "경기", "갱기": "경기", "겸기": "경기",
+        "서올": "서울", "서을": "서울", "시울": "서울", "사울": "서울",
+        "서룰": "서울", "셔울": "서울",
+        "부선": "부산", "부잔": "부산", "부진": "부산",
+        "대귀": "대구", "대고": "대구", "데구": "대구",
+        "인첨": "인천", "인전": "인천", "인견": "인천",
+        "광쥬": "광주", "광지": "광주", "강주": "광주",
+        "대젼": "대전", "대진": "대전", "데전": "대전",
+        "울잔": "울산", "울선": "울산", "을산": "울산",
+        "세졍": "세종", "세정": "세종", "새종": "세종",
+        "간원": "강원", "깅원": "강원",
+        "충복": "충북", "총북": "충북", "층북": "충북",
+        "충넘": "충남", "총남": "충남", "층남": "충남",
+        "전복": "전북", "전볶": "전북", "잔북": "전북",
+        "전넘": "전남", "잔남": "전남", "젼남": "전남",
+        "경복": "경북", "겸북": "경북", "경뵉": "경북",
+        "경넘": "경남", "겸남": "경남", "경냄": "경남",
+        "재주": "제주", "제쥬": "제주", "재쥬": "제주",
     }
 
     def _try_patterns(self, text):
@@ -403,6 +430,9 @@ class PlateValidator:
         # ★ 한글 유효성 교정: 패턴은 맞지만 한글이 유효하지 않으면 자동 교정
         clean = self._fix_invalid_hangul(clean)
 
+        # ★ 지역명 OCR 오인식 교정 (얼리→경기, 건것→경기 등)
+        clean = self._fix_region_name(clean)
+
         # 정방향 패턴 매칭 (먼저 시도 - 이미 유효하면 지역 추측 불필요)
         for pattern in self.patterns:
             if pattern.match(clean):
@@ -428,6 +458,35 @@ class PlateValidator:
             return True, result
 
         return False, clean
+
+    def _fix_region_name(self, text):
+        """지역명 OCR 오인식 교정: 앞 2~3 한글이 유효 지역이 아니면 _REGION_CONFUSION_MAP으로 교정"""
+        # 구형 번호판 패턴: 한글2~3자 + 숫자 + 한글 + 숫자
+        m = re.match(r'^([가-힣]{2,3})(\d{1,2}[가-힣]\d{4})$', text)
+        if not m:
+            return text
+        region = m.group(1)
+        suffix = m.group(2)
+        _valid = set(self._REGION_PREFIXES)
+        if region in _valid:
+            return text  # 이미 유효한 지역
+        # _REGION_CONFUSION_MAP에서 교정 시도
+        corrected = self._REGION_CONFUSION_MAP.get(region)
+        if corrected:
+            return corrected + suffix
+        # 편집거리 1~2인 유효 지역 찾기
+        best_region = None
+        best_dist = 999
+        for vr in _valid:
+            if len(vr) != len(region):
+                continue
+            dist = sum(1 for a, b in zip(region, vr) if a != b)
+            if dist < best_dist:
+                best_dist = dist
+                best_region = vr
+        if best_region and best_dist <= 1:
+            return best_region + suffix
+        return text
 
     def _normalize_for_validation(self, text):
         """공백/특수문자 제거, OCR 글자 잘림 보정용 정규화"""
@@ -535,6 +594,121 @@ class PlateValidator:
     def is_valid_length(self, text):
         clean = self._normalize_for_validation(text)
         return self.min_len <= len(clean) <= self.max_len
+
+
+class HangulClassifier:
+    """번호판 한글 전용 분류기 — 초성 교차검증 방식
+
+    OCR 앙상블 투표에서 결정된 한글의 초성이 혼동 쌍(ㅅ↔ㅈ, ㅁ↔ㅂ)에
+    해당하면, PaddleOCR 인식 모델(det=False)을 한글 크롭에 직접 적용하여
+    초성을 교차검증한다.
+
+    원리:
+    - 전체 번호판 OCR: 맥락은 좋지만 미세 구조(ㅈ 가로획 등) 누락 가능
+    - 한글 크롭 OCR: 맥락(모음)은 틀리지만 자음 구조를 더 정확히 감지
+    - 예: 투표="서"(ㅅ+ㅓ) + 크롭="지"(ㅈ+ㅣ) → 초성 ㅈ + 모음 ㅓ = "저"
+    """
+
+    # 교정 방향: 단순 초성 → 복잡 초성 (역방향은 안전하지 않음)
+    _INITIAL_OVERRIDE = {
+        9: 12,   # ㅅ(9) → ㅈ(12): ㅈ의 가로획이 크롭에서 감지되면 교정
+        6: 7,    # ㅁ(6) → ㅂ(7): ㅂ의 하단 세로획이 감지되면 교정
+    }
+    # ㅈ 계열 초성 (가로획 보유) — 크롭에서 이 그룹이 검출되면 ㅈ로 교정
+    _JIEUT_GROUP = {12, 13, 14}   # ㅈ, ㅉ, ㅊ
+    _SIOT_GROUP = {9, 10}          # ㅅ, ㅆ
+    # ㅂ 계열
+    _BIEUP_GROUP = {7, 8}         # ㅂ, ㅃ
+
+    def __init__(self):
+        self._ready = True
+
+    @staticmethod
+    def _decompose(ch):
+        """한글 음절 → (초성, 중성, 종성) 인덱스"""
+        code = ord(ch) - 0xAC00
+        if code < 0 or code > 11171:
+            return None
+        return code // (21 * 28), (code // 28) % 21, code % 28
+
+    @staticmethod
+    def _compose(ini, med, fin=0):
+        """(초성, 중성, 종성) → 한글 음절"""
+        return chr(0xAC00 + ini * 21 * 28 + med * 28 + fin)
+
+    def check_override(self, voted_hg, crop_bgr, paddle_engine):
+        """투표 결과 한글의 초성을 PaddleOCR 크롭 인식으로 교차검증.
+
+        Returns: (corrected_hangul, changed: bool)
+        """
+        if crop_bgr is None or crop_bgr.size < 100:
+            return voted_hg, False
+
+        vd = self._decompose(voted_hg)
+        if not vd or vd[0] not in self._INITIAL_OVERRIDE:
+            return voted_hg, False
+
+        # 다중 전처리 변형 생성
+        variants = [crop_bgr]
+        try:  # CLAHE
+            cl = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
+            lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
+            lab[:, :, 0] = cl.apply(lab[:, :, 0])
+            variants.append(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR))
+        except Exception:
+            pass
+        try:  # Sharpen
+            k = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+            variants.append(cv2.filter2D(crop_bgr, -1, k))
+        except Exception:
+            pass
+        variants.append(cv2.bitwise_not(crop_bgr))  # Inverted
+        # 업스케일 버전 추가
+        big = cv2.resize(crop_bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
+        variants.append(big)
+        try:
+            lab2 = cv2.cvtColor(big, cv2.COLOR_BGR2LAB)
+            lab2[:, :, 0] = cl.apply(lab2[:, :, 0])
+            variants.append(cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR))
+        except Exception:
+            pass
+
+        # PaddleOCR det=False로 각 변형 인식 → 초성 수집
+        crop_initials = []
+        for v in variants:
+            try:
+                res = paddle_engine.ocr(v, det=False, cls=True)
+                if res and res[0]:
+                    for text, conf in res[0]:
+                        for ch in str(text):
+                            d = self._decompose(ch)
+                            if d:
+                                crop_initials.append(d[0])
+            except Exception:
+                pass
+
+        if not crop_initials:
+            return voted_hg, False
+
+        # 초성 증거 판정
+        target_ini = self._INITIAL_OVERRIDE[vd[0]]
+
+        if vd[0] == 9:  # ㅅ → ㅈ 교정 여부
+            evidence = sum(1 for i in crop_initials if i in self._JIEUT_GROUP)
+            counter = sum(1 for i in crop_initials if i in self._SIOT_GROUP)
+        elif vd[0] == 6:  # ㅁ → ㅂ 교정 여부
+            evidence = sum(1 for i in crop_initials if i in self._BIEUP_GROUP)
+            counter = sum(1 for i in crop_initials if i == 6)
+        else:
+            return voted_hg, False
+
+        # 과반 + 최소 2건 이상 증거 시 교정
+        if evidence > counter and evidence >= 2:
+            new_hg = self._compose(target_ini, vd[1], vd[2])
+            if new_hg in PlateValidator._VALID_PLATE_HANGUL:
+                return new_hg, True
+
+        return voted_hg, False
 
 
 class PlateDatabase:
@@ -710,6 +884,9 @@ class PlateEnginePro:
         )
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
 
+        # ★ 한글 전용 분류기 (템플릿 매칭 방식)
+        self._hangul_clf = HangulClassifier()
+
         self.recent_plates = defaultdict(lambda: {"count": 0, "last_seen": 0, "consecutive": 0})
         self.DUPLICATE_THRESHOLD = 3.0
         # 연속 N프레임 감지 시 표시 (이미지 슬라이드 영상은 PLATE_CONSECUTIVE_FRAMES=1 로 설정)
@@ -735,6 +912,14 @@ class PlateEnginePro:
             "multiframe_used": 0,
             "singleframe_used": 0,
         }
+
+    def reset_state(self):
+        """내부 캐시 초기화 — 이미지 단독 테스트 시 이전 결과 오염 방지"""
+        self.recent_plates.clear()
+        self._pos_trackers.clear()
+        self._multiframe_buffer.clear()
+        self.stats["frames_processed"] = 0
+        self.stats["plates_shown"] = 0
 
     def _composite_multiframe(self, crops):
         """5프레임 크롭을 하나로 합성 (median → 노이즈 감소)."""
@@ -808,6 +993,7 @@ class PlateEnginePro:
                 continue
 
             roi_h, roi_w = roi.shape[:2]
+            _clf_scale, _clf_pad = 1.0, 0  # 한글 분류기용 스케일/패딩 (나중에 사용)
             # 멀티프레임: 번호판 픽셀 너비 < 80 이면 5프레임 합성 후 OCR
             roi_for_ocr = roi
             if use_multiframe and roi_w < PlateEngineConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD:
@@ -848,6 +1034,16 @@ class PlateEnginePro:
                     roi_for_ocr, pad, pad, pad, pad,
                     cv2.BORDER_CONSTANT, value=(255, 255, 255)
                 )
+                _clf_scale, _clf_pad = scale, pad  # 한글 분류기용 저장
+
+            # ★ 녹색 번호판 감지 (HSV 분석) — extra_crops 및 OCR 루프 전에 판정
+            _is_green_plate = False
+            try:
+                _hsv_det = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                _green_mask = cv2.inRange(_hsv_det, (35, 40, 40), (85, 255, 255))
+                _is_green_plate = (np.sum(_green_mask > 0) / _green_mask.size) > 0.20
+            except Exception:
+                pass
 
             # ── 구형 두 줄 번호판 감지: 세로 비율이 높으면 상단/하단 분리 추가 ──
             # (구형 번호판은 가로:세로 ≈ 2:1, 신형은 4:1)
@@ -885,6 +1081,31 @@ class PlateEnginePro:
                     ("top", top_val_bgr), ("top", top_sharp800),
                     ("bot", bot_crop),
                 ]
+                # ★ 녹색 번호판: 추가 전처리 (반전+강화CLAHE, 녹색채널 이진화)
+                if _is_green_plate:
+                    # 반전 + 강화 CLAHE (clipLimit 8.0)
+                    _inv_lab = cv2.cvtColor(top_inv, cv2.COLOR_BGR2LAB)
+                    _l, _a, _b = cv2.split(_inv_lab)
+                    _clahe_s = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4))
+                    _l = _clahe_s.apply(_l)
+                    _inv_clahe = cv2.cvtColor(cv2.merge([_l, _a, _b]), cv2.COLOR_LAB2BGR)
+                    extra_crops.append(("top", _inv_clahe))
+                    # 반전 + Otsu 이진화
+                    _inv_gray = cv2.cvtColor(top_inv, cv2.COLOR_BGR2GRAY)
+                    _clahe_g = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
+                    _inv_enh = _clahe_g.apply(_inv_gray)
+                    _, _inv_bin = cv2.threshold(_inv_enh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    extra_crops.append(("top", cv2.cvtColor(_inv_bin, cv2.COLOR_GRAY2BGR)))
+                    # 녹색 채널 추출 → 반전 → Otsu
+                    _g_ch = top_crop[:, :, 1]  # BGR의 G채널
+                    _g_inv = cv2.bitwise_not(_g_ch)
+                    _, _g_bin = cv2.threshold(_g_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                    extra_crops.append(("top", cv2.cvtColor(_g_bin, cv2.COLOR_GRAY2BGR)))
+                    # V채널 낮은 임계값 (녹색판 전용, 기본 150→100)
+                    _, _v_low = cv2.threshold(top_v, 100, 255, cv2.THRESH_BINARY)
+                    extra_crops.append(("top", cv2.cvtColor(_v_low, cv2.COLOR_GRAY2BGR)))
+                    # 하단도 반전 추가
+                    extra_crops.append(("bot", cv2.bitwise_not(bot_crop)))
 
             # [평가기준 20점] CLAHE 등 전처리: PREPROCESS_METHODS에 "clahe" 포함, 기울기보정(deskew). Homography 원근보정은 exam_realtime_plate.apply_homography 참고.
             # ── 앙상블 투표: 전처리 × N개 OCR → Counter 투표 ──
@@ -927,6 +1148,36 @@ class PlateEnginePro:
                 except Exception:
                     continue
 
+            # ★ 녹색 번호판: full-plate 반전+강화 추가 전처리
+            if _is_green_plate:
+                _green_extras = []
+                # 반전 + 강화 CLAHE
+                _fi_lab = cv2.cvtColor(roi_inv, cv2.COLOR_BGR2LAB)
+                _fi_l, _fi_a, _fi_b = cv2.split(_fi_lab)
+                _fi_clahe = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4))
+                _fi_l = _fi_clahe.apply(_fi_l)
+                _green_extras.append(cv2.cvtColor(cv2.merge([_fi_l, _fi_a, _fi_b]), cv2.COLOR_LAB2BGR))
+                # 반전 + Otsu 이진화
+                _fi_gray = cv2.cvtColor(roi_inv, cv2.COLOR_BGR2GRAY)
+                _fi_c2 = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
+                _fi_enh = _fi_c2.apply(_fi_gray)
+                _, _fi_bin = cv2.threshold(_fi_enh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+                _green_extras.append(cv2.cvtColor(_fi_bin, cv2.COLOR_GRAY2BGR))
+                for _ge in _green_extras:
+                    for engine_name, engine in self.ocr_engines.items():
+                        try:
+                            text, ocr_conf = self._run_ocr(engine_name, engine, _ge)
+                            if text and ocr_conf > 0.15:
+                                cleaned = self.validator.clean_ocr_text(text)
+                                if self.validator.is_valid_length(cleaned):
+                                    is_valid, final_text = self.validator.validate(cleaned)
+                                    if is_valid:
+                                        _v2r = bool(re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', cleaned))
+                                        w = 4 if _v2r else 1
+                                        for _ in range(w):
+                                            all_candidates.append((final_text, ocr_conf))
+                        except Exception:
+                            continue
 
             # 구형 번호판 상단+하단 결합 시도 (전처리 포함)
             if extra_crops:
@@ -1036,8 +1287,30 @@ class PlateEnginePro:
                         hangul_confs[hg].append(c)
                         suffix_confs[sfx].append(c)
                     best_pfx = prefix_counter.most_common(1)[0][0]
-                    # hangul: confidence-sum 가중 투표 (단순 카운트는 한글 오인식 유발)
+                    # hangul: confidence-sum 가중 투표
                     best_hg = max(hangul_confs.keys(), key=lambda k: sum(hangul_confs[k]))
+                    # ★ 한글 초성 교차검증 (PaddleOCR det=False 크롭 인식)
+                    if self._hangul_clf._ready and 'paddleocr' in self.ocr_engines and _clf_scale >= 1.0:
+                        try:
+                            _sc, _pd = _clf_scale, _clf_pad
+                            _px1 = _pd + (ox1 - rx1) * _sc
+                            _py1 = _pd + (oy1 - ry1) * _sc
+                            _pw  = (ox2 - ox1) * _sc
+                            _ph  = (oy2 - oy1) * _sc
+                            _rh, _rw = roi_for_ocr.shape[:2]
+                            _hx1 = max(0, int(_px1 + _pw * 0.26))
+                            _hx2 = min(_rw, int(_px1 + _pw * 0.52))
+                            _hy1 = max(0, int(_py1 + _ph * 0.20))
+                            _hy2 = min(_rh, int(_py1 + _ph * 0.80))
+                            if _hx2 > _hx1 + 10 and _hy2 > _hy1 + 10:
+                                _hcrop = roi_for_ocr[_hy1:_hy2, _hx1:_hx2]
+                                _new_hg, _changed = self._hangul_clf.check_override(
+                                    best_hg, _hcrop, self.ocr_engines['paddleocr']
+                                )
+                                if _changed:
+                                    best_hg = _new_hg
+                        except Exception:
+                            pass
                     best_sfx = suffix_counter.most_common(1)[0][0]
                     # 합성 결과가 유효한지 검증
                     synth = best_pfx + best_hg + best_sfx
