@@ -5,12 +5,12 @@
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
 
-# 모델 우선순위 (위에서부터 먼저 찾으면 사용)
+# 모델 우선순위 (번호판 전용 모델 최우선)
 _MODEL_PRIORITY = [
-    "yolo26n.pt",          # ★ YOLO26n - 최신 경량 (번호판 전용 fine-tune 필요)
-    "yolo26s.pt",          # ★ YOLO26s - 소형
-    "yolo11x_plate.pt",    # YOLOv11x fine-tuned (mAP@50=98.4%)
-    "yolo11n_plate.pt",    # YOLOv11n 경량
+    "yolo11x_plate.pt",    # ★ YOLOv11x fine-tuned (mAP@50=98.4%) - 최우선
+    "yolo11n_plate.pt",    # YOLOv11n 경량 번호판 전용
+    "yolo26n.pt",          # YOLO26n - 최신 경량
+    "yolo26s.pt",          # YOLO26s - 소형
     "yolo26.pt",           # 기존 프로젝트 모델
     "yolo11n.pt",          # COCO fallback
     "yolov8n.pt",         # 최후 fallback
@@ -69,25 +69,25 @@ except ImportError:
 try:
     import easyocr
     HAS_EASYOCR = True
-except ImportError:
+except Exception:
     HAS_EASYOCR = False
 
 try:
     from paddleocr import PaddleOCR
     HAS_PADDLEOCR = True
-except ImportError:
+except Exception:
     HAS_PADDLEOCR = False
 
 try:
     import pytesseract
     HAS_TESSERACT = True
-except ImportError:
+except Exception:
     HAS_TESSERACT = False
 
 try:
     import fast_alpr  # pip install fast-alpr[onnx-gpu]
     HAS_FAST_ALPR = True
-except ImportError:
+except Exception:
     fast_alpr = None
     HAS_FAST_ALPR = False
 
@@ -99,8 +99,8 @@ class PlateEngineConfig:
     YOLO_FALLBACK = "yolo26.pt"
 
     # ── 인식 임계값 ──
-    DETECT_CONF = 0.30          # YOLO 감지 임계값 (고속도로 원거리용 0.30)
-    OCR_CONF = 0.70
+    DETECT_CONF = 0.25          # YOLO 감지 임계값 (원거리/소형 번호판 재현율 향상)
+    OCR_CONF = 0.40             # OCR 최소 신뢰도 (0.70→0.40, 부분인식 후보 유지)
 
     # ── MareArts/한국 번호판 정규식 완전판 ──
     KR_PATTERNS = [
@@ -147,6 +147,16 @@ class PlateEngineConfig:
         "denoise",
         "otsu_inv",
         "gamma_bright",
+        "deskew",
+        "bilateral",
+        "morphology",
+        "median_blur",
+        "adaptive_mean",
+        "deskew_otsu",
+        "brightness_boost",
+        "hist_equalize",
+        "gamma_dark",
+        "deblur",
     ]
 
 
@@ -601,6 +611,9 @@ def _resolve_plate_model(config: "PlateEngineConfig") -> Path:
     """프로젝트(스크립트) 폴더 기준으로 번호판용 YOLO 모델 경로를 찾는다. 없으면 None."""
     script_dir = Path(__file__).resolve().parent
     candidates = [
+        script_dir / "runs" / "detect" / "plate_korean_3k_v2" / "weights" / "best.pt",
+        script_dir / "runs" / "detect" / "plate_korean_3k3" / "weights" / "best.pt",
+        script_dir / "best.pt",
         script_dir / "runs" / "detect" / "highway_plate" / "weights" / "best.pt",
         script_dir / config.YOLO_MODEL,
         script_dir / config.YOLO_FALLBACK,
@@ -630,30 +643,71 @@ class PlateEnginePro:
         self.db = PlateDatabase()
 
         model_path = _resolve_plate_model(self.config)
+        self._is_plate_model = False  # 번호판 전용 모델 여부 플래그
         if model_path is not None:
             self.model = YOLO(str(model_path))
-            print(f"[엔진] YOLO 모델 로드: {model_path}")
+            # 모델 클래스 이름으로 번호판 전용인지 자동 판별
+            _names = self.model.names or {}
+            _name_vals = [str(v).lower() for v in _names.values()]
+            self._is_plate_model = any(
+                kw in n for n in _name_vals
+                for kw in ("plate", "license", "번호판")
+            ) or "plate" in str(model_path).lower()
+            _mtype = "번호판 전용" if self._is_plate_model else "범용(COCO)"
+            print(f"[엔진] YOLO 모델 로드: {model_path} ({_mtype})")
         else:
-            # 번호판 전용 가중치가 없으면 _load_best_model() 사용 (yolo26n.pt 자동 다운로드 등)
-            # ※ yolo26n 기본 가중치는 COCO용이라 번호판 인식률이 낮을 수 있음 → train.py로 학습 권장
             self.model = _load_best_model()
             print("[엔진] 번호판 전용 .pt가 없어 기본 모델 사용. 인식이 안 되면 train.py로 학습 후 runs/.../best.pt를 두세요.")
+        # COCO 모델에서 차량 클래스 ID (car=2, motorcycle=3, bus=5, truck=7)
+        self._vehicle_class_ids = {2, 3, 5, 7}
 
         self.ocr_engines = {}
         if HAS_PADDLEOCR:
-            paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False)
+            paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False, use_gpu=False)
             # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
-            _paddle_model_root = Path("C:/tools/paddleocr_models")
-            if _paddle_model_root.exists():
-                paddle_kwargs["det_model_dir"] = str(_paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer")
-                paddle_kwargs["rec_model_dir"] = str(_paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer")
-                paddle_kwargs["cls_model_dir"] = str(_paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer")
+            _paddle_model_root = None
+            for _pdir in [
+                Path("C:/paddle_models/.paddleocr/whl"),
+                Path("C:/tools/paddleocr_models"),
+            ]:
+                if _pdir.exists():
+                    _paddle_model_root = _pdir
+                    break
+            if _paddle_model_root is not None:
+                _det = _paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer"
+                _rec = _paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer"
+                _cls = _paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer"
+                if _det.exists():
+                    paddle_kwargs["det_model_dir"] = str(_det)
+                if _rec.exists():
+                    paddle_kwargs["rec_model_dir"] = str(_rec)
+                if _cls.exists():
+                    paddle_kwargs["cls_model_dir"] = str(_cls)
             try:
                 self.ocr_engines["paddleocr"] = PaddleOCR(**paddle_kwargs)
+            except TypeError:
+                # show_log 파라미터 호환성 처리
+                paddle_kwargs.pop("show_log", None)
+                try:
+                    self.ocr_engines["paddleocr"] = PaddleOCR(**paddle_kwargs)
+                except Exception as e:
+                    print(f"[엔진] PaddleOCR 초기화 실패: {e}")
             except Exception as e:
                 print(f"[엔진] PaddleOCR 초기화 실패: {e}")
         if HAS_EASYOCR:
             self.ocr_engines["easyocr"] = easyocr.Reader(["ko", "en"], gpu=True)
+        # 한국 번호판 허용 문자 (EasyOCR allowlist)
+        self._kr_allowlist = (
+            "0123456789"
+            "가나다라마바사아자차카타파하"
+            "거너더러머버서어저처커터퍼허"
+            "고노도로모보소오조호"
+            "구누두루무부수우주"
+            "배육"
+            "서울부산대구인천광주대전울산세종"
+            "경기강원충북충남전북전남경북경남제주"
+            "전기외교"
+        )
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
 
         self.recent_plates = defaultdict(lambda: {"count": 0, "last_seen": 0, "consecutive": 0})
@@ -702,7 +756,17 @@ class PlateEnginePro:
         """
         results = []
         self.stats["frames_processed"] += 1
-        detections = self.model(frame, conf=self.config.DETECT_CONF, imgsz=1280, verbose=False)
+        # ★ 해상도에 따라 imgsz 동적 조정 (고해상도 영상에서 소형 번호판 탐지 향상)
+        _fh, _fw = frame.shape[:2]
+        if _fw >= 3840:      # 4K
+            _imgsz = 1920
+        elif _fw >= 1920:    # FHD
+            _imgsz = 1280
+        elif _fw >= 1280:    # HD
+            _imgsz = 960
+        else:
+            _imgsz = 640
+        detections = self.model(frame, conf=self.config.DETECT_CONF, imgsz=_imgsz, verbose=False)
 
         crop_src = full_frame if full_frame is not None else frame
         ch_full, cw_full = crop_src.shape[:2]
@@ -716,12 +780,24 @@ class PlateEnginePro:
             x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
             conf = float(det.conf[0])
 
+            # ★ COCO 모델일 때 차량 클래스만 허용 (비차량 오탐 방지)
+            if not self._is_plate_model:
+                cls_id = int(det.cls[0]) if hasattr(det, 'cls') and det.cls is not None else -1
+                if cls_id not in self._vehicle_class_ids:
+                    continue
+
             ox1, oy1 = int(x1 * sx), int(y1 * sy)
             ox2, oy2 = int(x2 * sx), int(y2 * sy)
 
+            # ★ 최소 크기 필터 (너무 작은 탐지는 노이즈)
+            det_w = ox2 - ox1
+            det_h = oy2 - oy1
+            if det_w < 15 or det_h < 8:
+                continue
+
             # [평가기준 20점] ROI (Region of Interest) + CROP: 번호판 영역 좌표로 관심영역 설정 후 크롭
-            margin_x = int((ox2 - ox1) * 0.25)  # ★ 좌우 마진 확대 (0.1→0.25)
-            margin_y = int((oy2 - oy1) * 0.30)  # ★ 상하 마진 확대 (0.15→0.30, 2줄 번호판 캡처)
+            margin_x = int((ox2 - ox1) * 0.35)  # ★ 좌우 마진 확대 (0.25→0.35, 가장자리 문자 보존)
+            margin_y = int((oy2 - oy1) * 0.40)  # ★ 상하 마진 확대 (0.30→0.40, 2줄 번호판+지역명 캡처)
             rx1 = max(0, ox1 - margin_x)
             ry1 = max(0, oy1 - margin_y)
             rx2 = min(cw_full, ox2 + margin_x)
@@ -746,20 +822,32 @@ class PlateEnginePro:
             else:
                 if use_multiframe:
                     self.stats["singleframe_used"] = self.stats.get("singleframe_used", 0) + 1
-                target_w = 300
+                # ★ 업스케일 목표 500px (300→500, 소형 번호판 인식률 대폭 향상)
+                target_w = 500
                 if roi_w < target_w:
                     scale = target_w / roi_w
+                    # 극소 번호판(60px 이하)은 6배까지 확대
+                    if roi_w < 60:
+                        scale = max(scale, 6.0)
+                    elif roi_w < 120:
+                        scale = max(scale, 4.0)
                 else:
                     scale = 1.0
                 if scale > 1.0:
                     roi_for_ocr = cv2.resize(
                         roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
                     )
-                    # 업스케일 후 선명화 적용
+                    # 업스케일 후 선명화 적용 (언샤프 마스크)
                     kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
                     roi_for_ocr = cv2.filter2D(roi_for_ocr, -1, kernel)
                 else:
                     roi_for_ocr = roi
+                # ★ 흰색 테두리 패딩 추가 (OCR 엔진이 가장자리 문자를 더 잘 읽음)
+                pad = max(10, int(roi_for_ocr.shape[0] * 0.15))
+                roi_for_ocr = cv2.copyMakeBorder(
+                    roi_for_ocr, pad, pad, pad, pad,
+                    cv2.BORDER_CONSTANT, value=(255, 255, 255)
+                )
 
             # ── 구형 두 줄 번호판 감지: 세로 비율이 높으면 상단/하단 분리 추가 ──
             # (구형 번호판은 가로:세로 ≈ 2:1, 신형은 4:1)
@@ -767,7 +855,7 @@ class PlateEnginePro:
             if roi_h > roi_w * 0.45:   # 세로가 어느정도 있는 번호판
                 top_crop = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.5), :]
                 bot_crop = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.4):, :]
-                # ★ 상단 크롭 강화: 500px 확대 + 색상반전 + CLAHE (한글/지역명 인식률 향상)
+                # ★ 상단 크롭 강화: 500px 확대 + 다양한 전처리 (한글/지역명 인식률 향상)
                 top_h, top_w = top_crop.shape[:2]
                 if top_w < 500:
                     sc_top = 500 / top_w
@@ -779,8 +867,22 @@ class PlateEnginePro:
                 clahe_obj = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
                 top_clahe = clahe_obj.apply(top_gray)
                 top_clahe_bgr = cv2.cvtColor(top_clahe, cv2.COLOR_GRAY2BGR)
+                # ★ HSV V-channel 이진화: 녹색 번호판의 얇은 숫자("1") 인식률 대폭 향상
+                top_hsv = cv2.cvtColor(top_crop, cv2.COLOR_BGR2HSV)
+                _, _, top_v = cv2.split(top_hsv)
+                _, top_val_mask = cv2.threshold(top_v, 150, 255, cv2.THRESH_BINARY)
+                top_val_bgr = cv2.cvtColor(top_val_mask, cv2.COLOR_GRAY2BGR)
+                # ★ 선명화 800px 버전: 얇은 획 강조
+                sc_800 = 800 / top_crop.shape[1] if top_crop.shape[1] < 800 else 1.0
+                if sc_800 > 1.0:
+                    top_800 = cv2.resize(top_inv, None, fx=sc_800, fy=sc_800, interpolation=cv2.INTER_CUBIC)
+                    sharp_k = np.array([[-1,-1,-1],[-1,9,-1],[-1,-1,-1]], dtype=np.float32)
+                    top_sharp800 = cv2.filter2D(top_800, -1, sharp_k)
+                else:
+                    top_sharp800 = top_inv
                 extra_crops = [
                     ("top", top_crop), ("top", top_inv), ("top", top_clahe_bgr),
+                    ("top", top_val_bgr), ("top", top_sharp800),
                     ("bot", bot_crop),
                 ]
 
@@ -789,10 +891,15 @@ class PlateEnginePro:
             from collections import Counter
             all_candidates = []  # [(normalized_text, confidence), ...]
 
-            for method in self.config.PREPROCESS_METHODS:
+            # ★ 반전 이미지 추가 (녹색/어두운 번호판 대응)
+            roi_inv = cv2.bitwise_not(roi_for_ocr)
+
+            for method in self.config.PREPROCESS_METHODS + ["_inverted"]:
                 try:
                     if method == "original":
                         processed = roi_for_ocr.copy()
+                    elif method == "_inverted":
+                        processed = roi_inv.copy()
                     else:
                         proc_func = getattr(self.preprocessor, method, None)
                         if proc_func is None:
@@ -801,7 +908,7 @@ class PlateEnginePro:
 
                     for engine_name, engine in self.ocr_engines.items():
                         text, ocr_conf = self._run_ocr(engine_name, engine, processed)
-                        if not text or ocr_conf < 0.25:
+                        if not text or ocr_conf < 0.15:
                             continue
                         cleaned = self.validator.clean_ocr_text(text)
                         if not self.validator.is_valid_length(cleaned):
@@ -860,7 +967,7 @@ class PlateEnginePro:
                                 fixed_chars = []
                                 for ch in cleaned_t:
                                     if '가' <= ch <= '힣':
-                                        fixed_chars.append(self._KR_CONFUSION.get(ch, ch))
+                                        fixed_chars.append(self.validator._KR_CONFUSION.get(ch, ch))
                                     else:
                                         fixed_chars.append(ch)
                                 cleaned_t = ''.join(fixed_chars)
@@ -1137,7 +1244,7 @@ class PlateEnginePro:
         return inter / union if union > 0 else 0
 
     def _run_ocr(self, engine_name, engine, image):
-        """OCR 실행. 구형 두 줄 번호판 대응: y좌표 정렬 + 분할 읽기."""
+        """OCR 실행. 구형 두 줄 번호판 대응: y좌표 정렬 + 분할 읽기 + allowlist."""
         try:
             if engine_name == "paddleocr":
                 result = engine.ocr(image, cls=True)
@@ -1149,7 +1256,12 @@ class PlateEnginePro:
                     if texts:
                         return "".join(texts), float(np.mean(confs))
             elif engine_name == "easyocr":
-                result = engine.readtext(image, detail=1, paragraph=False)
+                # ★ allowlist 적용: 번호판에 나올 수 있는 문자만 인식
+                kr_allow = getattr(self, '_kr_allowlist', None)
+                ocr_kwargs = dict(detail=1, paragraph=False)
+                if kr_allow:
+                    ocr_kwargs["allowlist"] = kr_allow
+                result = engine.readtext(image, **ocr_kwargs)
                 if result:
                     # y좌표 기준 정렬 (상→하: 지역명 먼저, 번호 나중)
                     result_sorted = sorted(result, key=lambda r: r[0][0][1])
@@ -1162,12 +1274,22 @@ class PlateEnginePro:
                     h, w = image.shape[:2]
                     if len(combined.replace(" ", "")) < 7 and h > w * 0.5:
                         top_half = image[:int(h * 0.55), :]
-                        top_res = engine.readtext(top_half, detail=1, paragraph=False)
+                        top_res = engine.readtext(top_half, **ocr_kwargs)
                         if top_res:
                             top_texts = [r[1] for r in sorted(top_res, key=lambda r: r[0][0][1])]
                             top_confs = [r[2] for r in top_res]
                             combined = "".join(top_texts) + combined
                             avg_conf = float(np.mean(confs + top_confs))
+
+                    # ★ allowlist 없이도 한번 더 시도 (allowlist가 인식을 제한할 수 있음)
+                    if not combined.strip() and kr_allow:
+                        result2 = engine.readtext(image, detail=1, paragraph=False)
+                        if result2:
+                            result_sorted2 = sorted(result2, key=lambda r: r[0][0][1])
+                            texts2 = [r[1] for r in result_sorted2]
+                            confs2 = [r[2] for r in result_sorted2]
+                            combined = "".join(texts2)
+                            avg_conf = float(np.mean(confs2))
 
                     return combined, avg_conf
         except Exception:
@@ -1199,9 +1321,11 @@ class PlateEnginePro:
             writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
 
         frame_count = 0
+        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         total_plates = 0
+        recognized_plates = {}  # {plate_text: max_conf}
         start_time = time.time()
-        print(f"[시작] 영상 처리: {source} ({w}x{h} @ {fps}fps)")
+        print(f"[시작] 영상 처리: {source} ({w}x{h} @ {fps}fps, {total_frames}프레임)", flush=True)
 
         while cap.isOpened():
             ret, frame = cap.read()
@@ -1222,6 +1346,11 @@ class PlateEnginePro:
                 if r["is_alert"]:
                     cv2.putText(frame, "!! ALERT !!", (x1, y2 + 25),
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
+                # 인식된 번호판 기록
+                pt = r["plate"]
+                if pt not in recognized_plates or r["confidence"] > recognized_plates[pt]:
+                    recognized_plates[pt] = r["confidence"]
+                print(f"  [frame {frame_count}] {r['plate']} ({r['confidence']:.0%})", flush=True)
 
             elapsed = time.time() - start_time
             current_fps = frame_count / elapsed if elapsed > 0 else 0
@@ -1235,12 +1364,21 @@ class PlateEnginePro:
                 if cv2.waitKey(1) & 0xFF == ord("q"):
                     break
 
+            # 진행률 출력 (100프레임마다)
+            if frame_count % 100 == 0:
+                pct = (frame_count / total_frames * 100) if total_frames else 0
+                print(f"  ... {frame_count}/{total_frames} ({pct:.0f}%) | {current_fps:.1f} FPS | 인식: {len(recognized_plates)}대", flush=True)
+
         cap.release()
         if writer:
             writer.release()
         cv2.destroyAllWindows()
         elapsed = time.time() - start_time
-        print(f"\n[완료] {frame_count}프레임, {total_plates}대 인식, 평균 {frame_count/elapsed:.1f} FPS")
+        print(f"\n[완료] {frame_count}프레임, {total_plates}회 인식, 고유 {len(recognized_plates)}대, 평균 {frame_count/elapsed:.1f} FPS", flush=True)
+        if recognized_plates:
+            print(f"[인식결과]", flush=True)
+            for plate, conf in sorted(recognized_plates.items(), key=lambda x: -x[1]):
+                print(f"  {plate} (최대 신뢰도: {conf:.0%})", flush=True)
 
 
 # ============================================
@@ -1368,6 +1506,9 @@ def process_frame_unified(
 # 실행
 # ============================================
 if __name__ == "__main__":
+    import multiprocessing
+    multiprocessing.freeze_support()
+
     import argparse
 
     parser = argparse.ArgumentParser(description="ANPR Pro Engine")

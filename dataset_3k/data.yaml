@@ -1,0 +1,8 @@
+# 한국 번호판 인식 YOLO 학습 데이터셋
+# 생성: train_korean_plate_3000.py
+path: C:/tool/yolo26-main/dataset_3k
+train: images/train
+val: images/val
+
+nc: 1
+names: ['plate']
