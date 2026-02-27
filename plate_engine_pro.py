@@ -2378,9 +2378,7 @@ class PlateEnginePro:
                         _frame_bonus = 0
                     _adj_conf = min(top_conf + _frame_bonus, 1.0)
                     _conf_level = self.validator.get_confidence_level(_adj_conf)
-                    # ★ 영상 모드: frame_count < MIN_FRAME_COUNT(2) → 노이즈 차단
-                    if self.consecutive_required > 1 and _frame_count < self.config.MIN_FRAME_COUNT:
-                        continue  # 1프레임짜리는 출력하지 않음
+                    # ★ 영상 모드: frame_count 1회도 출력 허용 (엔진 consecutive로 이미 필터됨)
                     if _is_small_plate:
                         _conf_level += "(원거리)"
 

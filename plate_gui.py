@@ -1023,9 +1023,8 @@ class PlateGUIApp(tk.Tk):
                         text = det.get("text", "")
                         conf = det.get("ocr_confidence", det.get("confidence", 0))
                         is_valid = det.get("is_valid_plate", False)
-                        # ★ 로그 표시 조건: 확정 + 신뢰도 0.75+ + frame_count 2+
-                        _fc = det.get("frame_count", 1)
-                        if is_valid and text and len(text) >= 2 and conf >= 0.75 and _fc >= 2:
+                        # ★ 로그 표시 조건: 화면 표시(Phase 2)와 동일 — is_valid + text
+                        if is_valid and text and len(text) >= 2:
                             self._add_to_history(det, ts)
             except (queue.Empty, AttributeError):
                 break
