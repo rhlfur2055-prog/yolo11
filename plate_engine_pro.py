@@ -1191,9 +1191,17 @@ class PlateTracker:
         """
         best_iou = 0
         best_trk = None
+        _new_cx = (bbox[0] + bbox[2]) / 2
+        _new_cy = (bbox[1] + bbox[3]) / 2
         for trk in self.tracks:
             iou = self._bbox_iou(bbox, trk["bbox"])
             if iou > best_iou:
+                # ★ 중심 거리 200px 이상이면 다른 차량으로 판단
+                _trk_cx = (trk["bbox"][0] + trk["bbox"][2]) / 2
+                _trk_cy = (trk["bbox"][1] + trk["bbox"][3]) / 2
+                _cdist = ((_new_cx - _trk_cx) ** 2 + (_new_cy - _trk_cy) ** 2) ** 0.5
+                if _cdist >= 200:
+                    continue
                 best_iou = iou
                 best_trk = trk
 
@@ -2270,13 +2278,23 @@ class PlateEnginePro:
 
                 # ★ 텍스트 기반 트랙 병합: IoU로 새 트랙이 됐지만 같은 텍스트의 기존 트랙이 있으면 병합
                 # → 차량 이동으로 IoU < 0.30 → 새 트랙 생성 → 동일 번호판 텍스트로 기존 트랙과 연결
+                # ★ 중심 거리 200px 이상이면 다른 차량으로 판단 → 병합 거부
                 if is_new_track and best_text:
+                    _new_cx = (cur_bbox[0] + cur_bbox[2]) / 2
+                    _new_cy = (cur_bbox[1] + cur_bbox[3]) / 2
                     for _exist_trk in self._tracker.tracks:
                         if _exist_trk is matched_trk:
                             continue
                         if _exist_trk["texts"]:
                             _exist_top = max(_exist_trk["texts"], key=_exist_trk["texts"].get)
                             if _exist_top == best_text:
+                                # ★ 중심 거리 체크: 200px 이상이면 다른 차량
+                                _e_bbox = _exist_trk["bbox"]
+                                _exist_cx = (_e_bbox[0] + _e_bbox[2]) / 2
+                                _exist_cy = (_e_bbox[1] + _e_bbox[3]) / 2
+                                _cdist = (((_new_cx - _exist_cx) ** 2) + ((_new_cy - _exist_cy) ** 2)) ** 0.5
+                                if _cdist >= 200:
+                                    continue  # 거리 200px+ → 같은 텍스트라도 다른 차량
                                 # 기존 트랙 데이터를 새 트랙으로 이전
                                 matched_trk["texts"] = _exist_trk["texts"]
                                 matched_trk["best_conf"] = max(matched_trk["best_conf"], _exist_trk["best_conf"])
@@ -2360,9 +2378,9 @@ class PlateEnginePro:
                         _frame_bonus = 0
                     _adj_conf = min(top_conf + _frame_bonus, 1.0)
                     _conf_level = self.validator.get_confidence_level(_adj_conf)
-                    # ★ 영상 모드: 1회만 등장 또는 소형 번호판 시 "미확정" 표시
+                    # ★ 영상 모드: frame_count < MIN_FRAME_COUNT(2) → 노이즈 차단
                     if self.consecutive_required > 1 and _frame_count < self.config.MIN_FRAME_COUNT:
-                        _conf_level += "(미확정)"
+                        continue  # 1프레임짜리는 출력하지 않음
                     if _is_small_plate:
                         _conf_level += "(원거리)"
 
