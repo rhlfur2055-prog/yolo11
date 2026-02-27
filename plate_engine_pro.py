@@ -1785,28 +1785,9 @@ class PlateEnginePro:
                     if _t1_cnt >= 2 and float(np.mean(_t1_confs)) > 0.6:
                         _tier1_consensus = True
 
-            # ★ Tier 1 합의 시 EasyOCR 교차검증 (단일 엔진 합의 → 다중 엔진 보강)
-            # PaddleOCR만으로 합의 → EasyOCR 1회 추가로 교차 확인 (~200ms 추가)
-            if _tier1_consensus and 'easyocr' in self.ocr_engines:
-                try:
-                    _t_ocr = time.time()
-                    _easy_text, _easy_conf = self._run_ocr(
-                        "easyocr", self.ocr_engines["easyocr"], roi_for_ocr)
-                    _ocr_time_by_engine["easyocr"] += time.time() - _t_ocr
-                    _ocr_count_by_engine["easyocr"] += 1
-                    if _easy_text and _easy_conf > 0.20:
-                        _easy_cleaned = self.validator.clean_ocr_text(_easy_text)
-                        if self.validator.is_valid_length(_easy_cleaned):
-                            _easy_valid, _easy_final = self.validator.validate(_easy_cleaned)
-                            if _easy_valid:
-                                _ew = _ENGINE_WEIGHT.get("easyocr", 0.85)
-                                _v2r = bool(re.match(
-                                    r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', _easy_cleaned))
-                                _w = 4 if _v2r else 1
-                                for _ in range(_w):
-                                    all_candidates.append((_easy_final, _easy_conf * _ew))
-                except Exception:
-                    pass
+            # ★ Tier 1 합의 시 EasyOCR 교차검증 제거 (속도 최적화)
+            # PaddleOCR 3회 합의(2+표, conf>0.6)면 충분 → EasyOCR ~200ms 절약
+            # 불일치 시에만 Tier2에서 EasyOCR 사용
 
             # ── Tier 2: PaddleOCR + EasyOCR 교차검증 (순차 실행, Tesseract 제거) ──
             # ★ 메서드 수 축소 (4→2) + 매 메서드 후 조기종료로 속도 최적화
@@ -2272,8 +2253,14 @@ class PlateEnginePro:
                     _floor = 0.70 if not _is_small_plate else 0.60
                 best_conf = max(best_conf, _floor)
 
-                # ★ 신뢰도 최종 필터: 소형 0.50 미만, 일반 0.60 미만 → 폐기
-                _conf_threshold = 0.50 if _is_small_plate else 0.60
+                # ★ 신뢰도 최종 필터: 소형 0.50, 일반 0.60, 대형(가까운 차) 0.55
+                _is_large_plate = det_w >= 150
+                if _is_small_plate:
+                    _conf_threshold = 0.50
+                elif _is_large_plate:
+                    _conf_threshold = 0.55
+                else:
+                    _conf_threshold = 0.60
                 if best_conf < _conf_threshold:
                     self.stats["filtered_by_confidence"] = self.stats.get("filtered_by_confidence", 0) + 1
                     continue
@@ -2473,27 +2460,8 @@ class PlateEnginePro:
                     combined = "".join(texts)
                     avg_conf = float(np.mean(confs))
 
-                    # 결과가 너무 짧으면 (하단만 읽힌 경우) 상단 별도 시도
-                    h, w = image.shape[:2]
-                    if len(combined.replace(" ", "")) < 7 and h > w * 0.5:
-                        top_half = image[:int(h * 0.55), :]
-                        top_res = engine.readtext(top_half, **ocr_kwargs)
-                        if top_res:
-                            top_texts = [r[1] for r in sorted(top_res, key=lambda r: r[0][0][1])]
-                            top_confs = [r[2] for r in top_res]
-                            combined = "".join(top_texts) + combined
-                            avg_conf = float(np.mean(confs + top_confs))
-
-                    # ★ allowlist 없이도 한번 더 시도 (allowlist가 인식을 제한할 수 있음)
-                    if not combined.strip() and kr_allow:
-                        result2 = engine.readtext(image, detail=1, paragraph=False)
-                        if result2:
-                            result_sorted2 = sorted(result2, key=lambda r: r[0][0][1])
-                            texts2 = [r[1] for r in result_sorted2]
-                            confs2 = [r[2] for r in result_sorted2]
-                            combined = "".join(texts2)
-                            avg_conf = float(np.mean(confs2))
-
+                    # ★ EasyOCR 내부 재호출 제거 (속도 최적화)
+                    # 상단 분리/allowlist 재시도는 PaddleOCR + extra_crops에서 이미 처리
                     return combined, avg_conf
             elif engine_name == "tesseract":
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
