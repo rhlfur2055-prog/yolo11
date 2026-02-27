@@ -931,6 +931,9 @@ class PlateGUIApp(tk.Tk):
         self._latest_detections = []
         self._detection_history = []
         self._plate_tracker.reset()
+        # ★ 엔진 내부 트래커도 리셋 (이전 영상 트랙 잔존 방지)
+        if self.detection_worker and hasattr(self.detection_worker, 'pro_engine') and self.detection_worker.pro_engine:
+            self.detection_worker.pro_engine.reset_state()
         self.history_list.delete(0, tk.END)
         self.plate_text_var.set("---")
         self.conf_var.set("")
