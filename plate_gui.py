@@ -127,6 +127,9 @@ class PlateTracker:
     AREA_RATIO_MIN = 0.5
     AREA_RATIO_MAX = 2.0
 
+    # bbox 중심이 대각선 길이의 이 비율 이상 이동하면 다른 차량으로 판단
+    CENTER_JUMP_RATIO = 0.5
+
     def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 15):
         self.iou_threshold = iou_threshold
         self.max_ttl = max_ttl
@@ -200,10 +203,23 @@ class PlateTracker:
                     track["det_data"] = {}
 
                 # ★ bbox 면적 비율 체크: 크기가 급변하면 다른 차량
-                old_area = max(1, (track["bbox"][2] - track["bbox"][0]) * (track["bbox"][3] - track["bbox"][1]))
+                old_bbox = track["bbox"]
+                old_area = max(1, (old_bbox[2] - old_bbox[0]) * (old_bbox[3] - old_bbox[1]))
                 new_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
                 area_ratio = new_area / old_area
                 if not (self.AREA_RATIO_MIN <= area_ratio <= self.AREA_RATIO_MAX):
+                    track["plate_text"] = ""
+                    track["confidence"] = 0
+                    track["det_data"] = {}
+
+                # ★ bbox 중심 이동 거리 체크: 중심이 크게 점프하면 다른 차량
+                old_cx = (old_bbox[0] + old_bbox[2]) / 2
+                old_cy = (old_bbox[1] + old_bbox[3]) / 2
+                new_cx = (bbox[0] + bbox[2]) / 2
+                new_cy = (bbox[1] + bbox[3]) / 2
+                old_diag = max(1, ((old_bbox[2] - old_bbox[0])**2 + (old_bbox[3] - old_bbox[1])**2) ** 0.5)
+                center_dist = ((new_cx - old_cx)**2 + (new_cy - old_cy)**2) ** 0.5
+                if center_dist > old_diag * self.CENTER_JUMP_RATIO and track.get("plate_text"):
                     track["plate_text"] = ""
                     track["confidence"] = 0
                     track["det_data"] = {}
