@@ -827,9 +827,13 @@ def ensemble_vote_v2(ocr_results_list):
 
     final_conf = min(best_conf, 1.0)
 
-    # 신뢰도 75% 미만은 저신뢰 결과로 판단하여 반환하지 않음
-    if final_conf < 0.75:
+    # 신뢰도 65% 미만은 저신뢰 결과로 차단
+    # 65~75% 구간은 번호판 정규식 통과 시에만 허용
+    if final_conf < 0.65:
         return {'plate': '', 'conf': 0.0, 'method': 'low_confidence'}
+    if final_conf < 0.75:
+        if _plate_score(best) < 10:
+            return {'plate': '', 'conf': 0.0, 'method': 'low_confidence'}
 
     return {
         'plate': best,
