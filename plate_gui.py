@@ -92,13 +92,16 @@ def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
     if y1 < frame_h * 0.05 or y2 > frame_h * 0.95:
         return False
 
-    # bbox 크기별 신뢰도 차등 적용 (작을수록 OCR 부정확 → 엄격)
+    # bbox 크기별 신뢰도 차등 적용
+    # ★ PlateEnginePro의 앙상블 투표 신뢰도는 0.5~0.85 범위가 정상
+    #   (다중 OCR 엔진 합산 → 단일 OCR보다 낮은 개별 점수)
+    #   오탐지 필터는 YOLO confidence 기반이므로 임계값을 엔진 스케일에 맞춤
     if w >= 100:
-        min_conf = 0.70
+        min_conf = 0.45
     elif w >= 60:
-        min_conf = 0.85
+        min_conf = 0.50
     else:
-        min_conf = 0.92
+        min_conf = 0.60
     if confidence < min_conf:
         return False
 
@@ -121,7 +124,8 @@ class PlateTracker:
 
     # 트랙에 OCR 결과가 있을 때, 마지막 OCR 이후 이 프레임 수 이상 지나면
     # 다른 차량이 같은 위치에 들어온 것으로 판단하고 OCR 결과를 지운다.
-    STALE_FRAME_GAP = 5
+    # ★ OCR 처리 500ms+ → 30fps에서 15~20프레임 간격 발생하므로 여유 있게 설정
+    STALE_FRAME_GAP = 45
 
     # bbox 면적 비율이 이 범위를 벗어나면 다른 차량으로 판단
     AREA_RATIO_MIN = 0.5
@@ -130,10 +134,20 @@ class PlateTracker:
     # bbox 중심이 대각선 길이의 이 비율 이상 이동하면 다른 차량으로 판단
     CENTER_JUMP_RATIO = 0.5
 
-    # OCR 결과가 연속 N프레임 확인되어야 표시 (노이즈 1회성 제거)
-    CONSECUTIVE_REQUIRED = 2
+    # OCR 결과 확인 횟수 (PlateEnginePro가 이미 consecutive=3을 요구하므로
+    # GUI에서는 1회 수신 즉시 표시 — 이중 지연 방지)
+    CONSECUTIVE_REQUIRED = 1
 
-    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 15):
+    # ── 안정화 파라미터 ──
+    # bbox EMA 평활화 계수 (0=이전 유지, 1=새 값 즉시 적용)
+    BBOX_SMOOTH_ALPHA = 0.4
+    # OCR 확인된 트랙의 표시 유지 프레임 수 (OCR 미수신 시에도 초록 박스 유지)
+    # ★ engine regression 대응: OCR 결과 간격이 길어져도 확정 텍스트 유지
+    DISPLAY_HOLD_FRAMES = 30
+    # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
+    GAP_TOLERANCE = 5
+
+    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 25):
         self.iou_threshold = iou_threshold
         self.max_ttl = max_ttl
         self.tracks: dict[int, dict] = {}  # track_id → track 정보
@@ -197,10 +211,11 @@ class PlateTracker:
                 # ── IoU 매칭됨: 같은 위치의 차량 ──
                 track = self.tracks[best_tid]
 
-                # ★ 프레임 갭 체크: 1프레임이라도 미감지 후 재매칭 → 다른 차량 가능성
-                #   이전 OCR 결과 즉시 폐기하여 Ghost 방지
+                # ★ 프레임 갭 체크: GAP_TOLERANCE 프레임 이상 미감지 후 재매칭 → 다른 차량 가능성
+                #   OCR 처리 지연(500ms+)으로 detection 간격이 벌어질 수 있으므로 여유 부여
                 last_matched = track.get("last_matched_frame", track["frame_idx"])
-                if frame_idx - last_matched > 1 and track.get("plate_text"):
+                gap = frame_idx - last_matched
+                if gap > self.GAP_TOLERANCE and track.get("plate_text"):
                     track["plate_text"] = ""
                     track["confidence"] = 0
                     track["ocr_count"] = 0
@@ -243,7 +258,15 @@ class PlateTracker:
                     track["ocr_count"] = 0
                     track["det_data"] = {}
 
-                track["bbox"] = bbox
+                # ★ bbox EMA 평활화: 좌표 떨림 방지
+                alpha = self.BBOX_SMOOTH_ALPHA
+                old_b = track["bbox"]
+                track["bbox"] = [
+                    old_b[0] * (1 - alpha) + bbox[0] * alpha,
+                    old_b[1] * (1 - alpha) + bbox[1] * alpha,
+                    old_b[2] * (1 - alpha) + bbox[2] * alpha,
+                    old_b[3] * (1 - alpha) + bbox[3] * alpha,
+                ]
                 track["ttl"] = self.max_ttl
                 track["frame_idx"] = frame_idx
                 track["last_matched_frame"] = frame_idx
@@ -255,7 +278,12 @@ class PlateTracker:
                     if det_text == track.get("plate_text", ""):
                         track["ocr_count"] = track.get("ocr_count", 0) + 1
                     else:
-                        track["ocr_count"] = 1
+                        # ★ 유사 텍스트면 OCR 노이즈로 간주 (리셋 방지)
+                        _old_text = track.get("plate_text", "")
+                        if _old_text and self._text_similar_quick(_old_text, det_text):
+                            track["ocr_count"] = track.get("ocr_count", 0) + 1
+                        else:
+                            track["ocr_count"] = 1
                     if det_conf >= track.get("confidence", 0):
                         track["plate_text"] = det_text
                         track["confidence"] = det_conf
@@ -263,16 +291,18 @@ class PlateTracker:
                     # 연속 감지 횟수 미달이면 Phase 1로 표시
                     if track.get("ocr_count", 0) >= self.CONSECUTIVE_REQUIRED:
                         result_det = dict(track.get("det_data", det))
-                        result_det["bbox"] = bbox
+                        result_det["bbox"] = track["bbox"]  # 평활화된 bbox 사용
                     else:
                         result_det = det
                         result_det["is_valid_plate"] = False
                 else:
-                    # Phase 1 (OCR 미완료): 이전 결과가 살아있으면 유지
-                    # (stale 체크를 이미 위에서 했으므로 안전)
-                    if track.get("plate_text") and track.get("ocr_count", 0) >= self.CONSECUTIVE_REQUIRED:
+                    # Phase 1 (OCR 미완료): 이전 확인 결과를 DISPLAY_HOLD_FRAMES 동안 유지
+                    # → OCR 주기 사이에도 초록 박스 유지하여 떨림 방지
+                    _last_ocr = track.get("last_ocr_frame", 0)
+                    _hold_ok = (frame_idx - _last_ocr) <= self.DISPLAY_HOLD_FRAMES
+                    if track.get("plate_text") and track.get("ocr_count", 0) >= self.CONSECUTIVE_REQUIRED and _hold_ok:
                         result_det = dict(track.get("det_data", {}))
-                        result_det["bbox"] = bbox
+                        result_det["bbox"] = track["bbox"]  # 평활화된 bbox 사용
                     else:
                         result_det = det
 
@@ -316,7 +346,66 @@ class PlateTracker:
         for tid in expired:
             del self.tracks[tid]
 
+        # 3단계: 출력 중복 bbox NMS — 같은 영역에 Phase 1 + Phase 2가 동시에 있으면 Phase 2만 유지
+        output = self._nms_output(output)
+
         return output
+
+    @staticmethod
+    def _text_similar_quick(t1: str, t2: str) -> bool:
+        """빠른 유사도 판별: 2글자 이하 차이면 같은 번호판으로 간주.
+        engine OCR 노이즈(한글 오인식, 숫자 1↔7 등)에 대한 내성 확보."""
+        t1 = t1.replace(" ", "")
+        t2 = t2.replace(" ", "")
+        if t1 == t2:
+            return True
+        if not t1 or not t2:
+            return False
+        if abs(len(t1) - len(t2)) > 2:
+            return False
+        # 같은 길이: hamming 비교
+        if len(t1) == len(t2):
+            diff = sum(1 for a, b in zip(t1, t2) if a != b)
+            return diff <= 2
+        # 길이 차이 1~2: 짧은 쪽이 긴 쪽에 포함되면 유사
+        short, long = (t1, t2) if len(t1) < len(t2) else (t2, t1)
+        if short in long:
+            return True
+        # 숫자 부분만 비교 (한글 오인식 흡수)
+        d1 = "".join(c for c in t1 if c.isdigit())
+        d2 = "".join(c for c in t2 if c.isdigit())
+        if d1 and d2 and d1 == d2:
+            return True
+        return False
+
+    def _nms_output(self, output: list[dict]) -> list[dict]:
+        """출력 리스트에서 겹치는 bbox 중복 제거.
+        같은 영역에 Phase 2 (is_valid_plate=True)와 Phase 1이 동시에 있으면
+        Phase 2만 유지하여 깜빡임 방지."""
+        if len(output) <= 1:
+            return output
+        # Phase 2 (확정) 우선 정렬
+        output.sort(key=lambda d: (d.get("is_valid_plate", False), d.get("ocr_confidence", 0)), reverse=True)
+        keep = []
+        suppressed = set()
+        for i, det_i in enumerate(output):
+            if i in suppressed:
+                continue
+            keep.append(det_i)
+            bbox_i = det_i.get("bbox", [])
+            if len(bbox_i) < 4:
+                continue
+            for j in range(i + 1, len(output)):
+                if j in suppressed:
+                    continue
+                bbox_j = output[j].get("bbox", [])
+                if len(bbox_j) < 4:
+                    continue
+                iou = self.calculate_iou(bbox_i, bbox_j)
+                if iou >= 0.3:
+                    # 겹치는 bbox → 낮은 우선순위(Phase 1) 억제
+                    suppressed.add(j)
+        return keep
 
     def reset(self) -> None:
         """모든 track을 초기화한다 (영상 변경 시)."""
@@ -914,6 +1003,31 @@ class PlateGUIApp(tk.Tk):
 
                     # ── PlateTracker: Ghost Detection 방지 ──
                     tracked = self._plate_tracker.update(validated, frame_idx)
+
+                    # ★ 기존 확정 텍스트 보호 — engine regression/빈 결과 대응
+                    # 조건: 기존에 Phase 2 확정 결과가 있고, 새 결과에 Phase 2가 없을 때
+                    #   → engine이 일시적으로 인식 실패해도 확정 텍스트 유지
+                    _existing_valid = [d for d in self._latest_detections
+                                       if d.get("is_valid_plate") and d.get("text")]
+                    _new_has_valid = any(d.get("is_valid_plate") for d in tracked)
+                    if _existing_valid and not _new_has_valid:
+                        # 기존 확정 결과 유지 (새 bbox 위치만 반영)
+                        tracked = self._latest_detections
+                    elif _existing_valid and _new_has_valid:
+                        # 양쪽 다 Phase 2: 새 결과에 없는 기존 확정 트랙 보존
+                        _new_bboxes = [d.get("bbox", []) for d in tracked
+                                       if d.get("is_valid_plate")]
+                        for _ev in _existing_valid:
+                            _ev_bbox = _ev.get("bbox", [])
+                            if len(_ev_bbox) < 4:
+                                continue
+                            # 새 결과와 겹치지 않는 기존 확정 → 병합 유지
+                            _overlaps = any(
+                                self._plate_tracker.calculate_iou(_ev_bbox, nb) >= 0.3
+                                for nb in _new_bboxes if len(nb) >= 4
+                            )
+                            if not _overlaps:
+                                tracked.append(_ev)
                     self._latest_detections = tracked
 
                     if data["process_ms"] > 0:
@@ -927,8 +1041,9 @@ class PlateGUIApp(tk.Tk):
                     for det in tracked:
                         text = det.get("text", "")
                         conf = det.get("ocr_confidence", det.get("confidence", 0))
-                        # 70% 미만 저신뢰 결과는 Detection Log에 추가하지 않음
-                        if text and len(text) >= 2 and conf >= 0.70:
+                        is_valid = det.get("is_valid_plate", False)
+                        # ★ is_valid_plate=True (연속 확인 완료)만 로그에 추가
+                        if is_valid and text and len(text) >= 2 and conf >= 0.70:
                             self._add_to_history(det, ts)
             except (queue.Empty, AttributeError):
                 break
@@ -1044,7 +1159,11 @@ class PlateGUIApp(tk.Tk):
         for existing in self._detection_history:
             if self._text_similar(existing.get("text", ""), text):
                 if conf > existing.get("ocr_confidence", 0):
+                    # ★ is_valid_plate=True 보존 (False로 덮어쓰기 방지)
+                    was_valid = existing.get("is_valid_plate", False)
                     existing.update(det_norm)
+                    if was_valid:
+                        existing["is_valid_plate"] = True
                 existing["count"] = existing.get("count", 1) + 1
                 existing["timestamp"] = timestamp
                 self._refresh_history_list()
