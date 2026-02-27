@@ -66,6 +66,225 @@ C_ORANGE = "#ff9800"
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# bbox 검증 — YOLO 오탐지 필터링
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
+    """YOLO bbox가 번호판으로 유효한지 검증.
+    엠블럼, 그릴, 프레임 가장자리 등 오탐지를 필터링한다."""
+    if len(bbox) < 4:
+        return False
+    x1, y1, x2, y2 = bbox[:4]
+    w = x2 - x1
+    h = y2 - y1
+
+    # 가로세로 비율 검증 (다양한 번호판 형태 대응: 0.5~6.0)
+    aspect_ratio = w / max(h, 1)
+    if not (0.5 <= aspect_ratio <= 6.0):
+        return False
+
+    # 최소 크기
+    if w < 45 or h < 15:
+        return False
+
+    # 위치 필터 — 상단 5%, 하단 5% 제외 (CCTV 각도 대응)
+    frame_h = frame_shape[0]
+    if y1 < frame_h * 0.05 or y2 > frame_h * 0.95:
+        return False
+
+    # bbox 크기별 신뢰도 차등 적용 (작을수록 OCR 부정확 → 엄격)
+    if w >= 100:
+        min_conf = 0.70
+    elif w >= 60:
+        min_conf = 0.80
+    else:
+        min_conf = 0.90
+    if confidence < min_conf:
+        return False
+
+    return True
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PlateTracker — IoU 기반 차량 추적 (Ghost Detection 방지)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+
+class PlateTracker:
+    """IoU 기반으로 동일 차량을 추적하고, 새 차량 진입 시 이전 결과를 초기화한다.
+
+    동작 원리:
+      1. 현재 프레임 detection과 기존 track의 IoU 계산
+      2. IoU >= threshold → 같은 차량 → OCR 결과 유지/업데이트
+      3. IoU < threshold → 새 차량 → 이전 OCR 결과 완전 초기화
+      4. TTL 초과 track → 삭제 (화면에서 사라진 차량)
+    """
+
+    # 트랙에 OCR 결과가 있을 때, 마지막 OCR 이후 이 프레임 수 이상 지나면
+    # 다른 차량이 같은 위치에 들어온 것으로 판단하고 OCR 결과를 지운다.
+    STALE_FRAME_GAP = 5
+
+    # bbox 면적 비율이 이 범위를 벗어나면 다른 차량으로 판단
+    AREA_RATIO_MIN = 0.5
+    AREA_RATIO_MAX = 2.0
+
+    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 15):
+        self.iou_threshold = iou_threshold
+        self.max_ttl = max_ttl
+        self.tracks: dict[int, dict] = {}  # track_id → track 정보
+        self._next_id = 0
+
+    @staticmethod
+    def calculate_iou(box1: list, box2: list) -> float:
+        """두 bbox [x1,y1,x2,y2]의 IoU를 계산한다."""
+        x1 = max(box1[0], box2[0])
+        y1 = max(box1[1], box2[1])
+        x2 = min(box1[2], box2[2])
+        y2 = min(box1[3], box2[3])
+
+        inter_w = max(0, x2 - x1)
+        inter_h = max(0, y2 - y1)
+        inter_area = inter_w * inter_h
+
+        area1 = max(0, box1[2] - box1[0]) * max(0, box1[3] - box1[1])
+        area2 = max(0, box2[2] - box2[0]) * max(0, box2[3] - box2[1])
+        union_area = area1 + area2 - inter_area
+
+        if union_area <= 0:
+            return 0.0
+        return inter_area / union_area
+
+    def update(self, detections: list[dict], frame_idx: int) -> list[dict]:
+        """현재 프레임의 detection 리스트로 tracker를 업데이트하고,
+        추적 결과가 반영된 detection 리스트를 반환한다.
+
+        - 같은 차량: 이전 OCR 결과를 유지 (새 OCR가 더 좋으면 교체)
+        - 새 차량: 깨끗한 상태로 시작 (Ghost 결과 제거)
+        """
+        # 매칭되지 않은 detection / track 추적용
+        matched_track_ids = set()
+        matched_det_indices = set()
+        output = []
+
+        # 1단계: 각 detection에 대해 가장 높은 IoU를 가진 기존 track 찾기
+        det_track_pairs = []
+        for d_idx, det in enumerate(detections):
+            bbox = det.get("bbox", [])
+            if len(bbox) < 4:
+                continue
+            best_iou = 0.0
+            best_tid = -1
+            for tid, track in self.tracks.items():
+                iou = self.calculate_iou(bbox, track["bbox"])
+                if iou > best_iou:
+                    best_iou = iou
+                    best_tid = tid
+            det_track_pairs.append((d_idx, best_tid, best_iou))
+
+        # IoU 높은 순으로 정렬하여 greedy 매칭
+        det_track_pairs.sort(key=lambda x: x[2], reverse=True)
+
+        for d_idx, best_tid, best_iou in det_track_pairs:
+            det = detections[d_idx]
+            bbox = det.get("bbox", [])
+
+            if best_iou >= self.iou_threshold and best_tid >= 0 and best_tid not in matched_track_ids:
+                # ── IoU 매칭됨: 같은 위치의 차량 ──
+                track = self.tracks[best_tid]
+
+                # ★ 프레임 갭 체크: 1프레임이라도 미감지 후 재매칭 → 다른 차량 가능성
+                #   이전 OCR 결과 즉시 폐기하여 Ghost 방지
+                last_matched = track.get("last_matched_frame", track["frame_idx"])
+                if frame_idx - last_matched > 1 and track.get("plate_text"):
+                    track["plate_text"] = ""
+                    track["confidence"] = 0
+                    track["det_data"] = {}
+
+                # ★ bbox 면적 비율 체크: 크기가 급변하면 다른 차량
+                old_area = max(1, (track["bbox"][2] - track["bbox"][0]) * (track["bbox"][3] - track["bbox"][1]))
+                new_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
+                area_ratio = new_area / old_area
+                if not (self.AREA_RATIO_MIN <= area_ratio <= self.AREA_RATIO_MAX):
+                    track["plate_text"] = ""
+                    track["confidence"] = 0
+                    track["det_data"] = {}
+
+                det_text = det.get("text", "")
+                det_conf = det.get("ocr_confidence", det.get("confidence", 0))
+                det_valid = det.get("is_valid_plate", False)
+
+                # ★ 마지막 OCR 이후 프레임 간격이 크면 이전 OCR 결과 폐기
+                last_ocr_frame = track.get("last_ocr_frame", track["frame_idx"])
+                ocr_gap = frame_idx - last_ocr_frame
+                if ocr_gap > self.STALE_FRAME_GAP and track.get("plate_text"):
+                    track["plate_text"] = ""
+                    track["confidence"] = 0
+                    track["det_data"] = {}
+
+                track["bbox"] = bbox
+                track["ttl"] = self.max_ttl
+                track["frame_idx"] = frame_idx
+                track["last_matched_frame"] = frame_idx
+
+                if det_valid and det_text:
+                    # 새 OCR 결과가 있으면: 신뢰도 비교 후 교체
+                    track["last_ocr_frame"] = frame_idx
+                    if det_conf >= track.get("confidence", 0):
+                        track["plate_text"] = det_text
+                        track["confidence"] = det_conf
+                        track["det_data"] = det
+                    result_det = dict(track.get("det_data", det))
+                    result_det["bbox"] = bbox
+                else:
+                    # Phase 1 (OCR 미완료): 이전 결과가 살아있으면 유지
+                    # (stale 체크를 이미 위에서 했으므로 안전)
+                    if track.get("plate_text"):
+                        result_det = dict(track.get("det_data", {}))
+                        result_det["bbox"] = bbox
+                    else:
+                        result_det = det
+
+                output.append(result_det)
+                matched_track_ids.add(best_tid)
+                matched_det_indices.add(d_idx)
+            elif d_idx not in matched_det_indices:
+                # ── 새 차량: 깨끗한 상태로 track 생성 ──
+                new_id = self._next_id
+                self._next_id += 1
+                det_text = det.get("text", "")
+                det_conf = det.get("ocr_confidence", det.get("confidence", 0))
+                has_ocr = det.get("is_valid_plate", False) and det_text
+                self.tracks[new_id] = {
+                    "bbox": bbox,
+                    "plate_text": det_text if has_ocr else "",
+                    "confidence": det_conf if has_ocr else 0,
+                    "ttl": self.max_ttl,
+                    "frame_idx": frame_idx,
+                    "last_matched_frame": frame_idx,
+                    "last_ocr_frame": frame_idx if has_ocr else 0,
+                    "det_data": det if has_ocr else {},
+                }
+                output.append(det)
+                matched_det_indices.add(d_idx)
+
+        # 2단계: TTL 감소 + 만료된 track 삭제
+        expired = []
+        for tid, track in self.tracks.items():
+            if tid not in matched_track_ids:
+                track["ttl"] -= 1
+                if track["ttl"] <= 0:
+                    expired.append(tid)
+        for tid in expired:
+            del self.tracks[tid]
+
+        return output
+
+    def reset(self) -> None:
+        """모든 track을 초기화한다 (영상 변경 시)."""
+        self.tracks.clear()
+        self._next_id = 0
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 한글 텍스트 오버레이 (PIL 기반)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -216,9 +435,14 @@ def _pro_engine_results_to_gui(pro_results: list, frame: np.ndarray) -> list:
             "text": r.get("plate", ""),
             "ocr_confidence": r.get("confidence", 0),
             "bbox": r.get("bbox", []),
-            "is_valid_plate": True,
+            "is_valid_plate": bool(r.get("plate", "")),
             "plate_image": plate_img,
             "pattern_score": r.get("confidence", 0),
+            # ── 강화 필드 (PlateEnginePro 출력 → GUI 전달) ──
+            "confidence_level": r.get("confidence_level", ""),
+            "plate_type": r.get("plate_type", ""),
+            "vehicle_type": r.get("vehicle_type", ""),
+            "frame_count": r.get("frame_count", 1),
         })
     return out
 
@@ -399,6 +623,7 @@ class PlateGUIApp(tk.Tk):
         self._latest_detections: list[dict] = []
         self._detection_lock = threading.Lock()
         self._detection_history: list[dict] = []
+        self._plate_tracker = PlateTracker(iou_threshold=0.35, max_ttl=15)
         self._process_ms = 0.0
         self._process_ms_pro = 0.0
         self._process_ms_fast = 0.0
@@ -572,6 +797,7 @@ class PlateGUIApp(tk.Tk):
         self._stop_threads()
         self._latest_detections = []
         self._detection_history = []
+        self._plate_tracker.reset()
         self.history_list.delete(0, tk.END)
         self.plate_text_var.set("---")
         self.conf_var.set("")
@@ -629,12 +855,27 @@ class PlateGUIApp(tk.Tk):
     # ─── 디스플레이 루프 (30 FPS) ───
 
     def _refresh_display(self) -> None:
-        # 1) 인식 결과 수신
+        # 1) 인식 결과 수신 (validate_bbox + PlateTracker 적용)
         while self.results_queue is not None:
             try:
                 data = self.results_queue.get_nowait()
                 with self._detection_lock:
-                    self._latest_detections = data["results"]
+                    raw_results = data["results"]
+                    frame_idx = data.get("frame_idx", 0)
+
+                    # ── bbox 검증: 오탐지 필터링 ──
+                    validated = []
+                    for det in raw_results:
+                        bbox = det.get("bbox", [])
+                        conf = det.get("ocr_confidence", det.get("confidence", 0))
+                        frame_shape = (self._video_h, self._video_w)
+                        if validate_bbox(bbox, frame_shape, conf):
+                            validated.append(det)
+
+                    # ── PlateTracker: Ghost Detection 방지 ──
+                    tracked = self._plate_tracker.update(validated, frame_idx)
+                    self._latest_detections = tracked
+
                     if data["process_ms"] > 0:
                         self._process_ms = data["process_ms"]
                         self._process_ms_pro = data.get("process_ms_pro", 0)
@@ -643,9 +884,11 @@ class PlateGUIApp(tk.Tk):
                         if len(self._det_fps_samples) > 10:
                             self._det_fps_samples.pop(0)
                     ts = data.get("timestamp", 0)
-                    for det in data["results"]:
+                    for det in tracked:
                         text = det.get("text", "")
-                        if text and len(text) >= 2:
+                        conf = det.get("ocr_confidence", det.get("confidence", 0))
+                        # 70% 미만 저신뢰 결과는 Detection Log에 추가하지 않음
+                        if text and len(text) >= 2 and conf >= 0.70:
                             self._add_to_history(det, ts)
             except (queue.Empty, AttributeError):
                 break
@@ -712,12 +955,20 @@ class PlateGUIApp(tk.Tk):
             is_valid = det.get("is_valid_plate", False)
 
             if is_valid and text:
-                # ── Phase 2: OCR 완료 → 초록 박스 + 번호판 텍스트 ──
-                color = (0, 230, 70)
+                # ── Phase 2: OCR 완료 → 신뢰도 등급별 색상 박스 + 번호판 텍스트 ──
+                _clevel = det.get("confidence_level", "")
+                if _clevel.startswith("HIGH"):
+                    color = (0, 230, 70)    # 초록 (HIGH)
+                elif _clevel.startswith("MEDIUM"):
+                    color = (0, 200, 255)   # 주황/노랑 (MEDIUM)
+                else:
+                    color = (0, 230, 70)    # 기본 초록
                 thickness = 3
                 cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
-                label = f"{text} ({conf:.0%})"
+                # 신뢰도 등급 표시 포함
+                _level_tag = f" [{_clevel}]" if _clevel else ""
+                label = f"{text} ({conf:.0%}){_level_tag}"
                 font_sz = max(20, min(32, (x2 - x1) // 3))
                 result = draw_korean_text(result, label, (x1, max(0, y1 - font_sz - 8)),
                                           font_size=font_sz, color=color)
@@ -813,15 +1064,16 @@ class PlateGUIApp(tk.Tk):
         return prev[-1]
 
     def _text_similar(self, t1: str, t2: str) -> bool:
+        """같은 차량의 유사 인식 결과인지 판단 (levenshtein ≤ 2)."""
         t1 = t1.replace(" ", "")
         t2 = t2.replace(" ", "")
         if t1 == t2:
             return True
         if not t1 or not t2:
             return False
-        if abs(len(t1) - len(t2)) > 1:
+        if abs(len(t1) - len(t2)) > 2:
             return False
-        return self._levenshtein(t1, t2) <= 1
+        return self._levenshtein(t1, t2) <= 2
 
     def _refresh_history_list(self) -> None:
         self.history_list.delete(0, tk.END)
@@ -830,13 +1082,25 @@ class PlateGUIApp(tk.Tk):
             time_str = f"{int(ts) // 60:02d}:{ts % 60:04.1f}"
             plate = (h.get("text") or h.get("plate", "")).strip()
             conf = h.get("ocr_confidence", h.get("confidence", 0))
-            if conf >= 0.90:
+            clevel = h.get("confidence_level", "")
+            vtype = h.get("vehicle_type", "")
+            if clevel.startswith("HIGH"):
+                mark = "\U0001f7e2"   # Green circle
+            elif clevel.startswith("MEDIUM"):
+                mark = "\U0001f7e1"   # Yellow circle
+            elif conf >= 0.90:
                 mark = "\U0001f7e2"
             elif conf >= 0.70:
                 mark = "\U0001f7e1"
             else:
-                mark = "\U0001f534"
-            line = f"{mark} {time_str:<8} {plate:<16} {conf:.0%}"
+                mark = "\U0001f534"   # Red circle
+            # 차량 유형 약어
+            _vt = ""
+            if vtype == "영업용":
+                _vt = " [영]"
+            elif vtype == "렌터카":
+                _vt = " [렌]"
+            line = f"{mark} {time_str:<8} {plate:<14} {conf:.0%}{_vt}"
             self.history_list.insert(tk.END, line)
 
     # ─── 상태 표시 ───
