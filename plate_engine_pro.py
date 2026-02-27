@@ -206,7 +206,7 @@ class PlateEngineConfig:
     MIN_BBOX_HEIGHT = 15        # 최소 bbox 세로 px
     MIN_FRAME_COUNT = 2         # 확정 최소 프레임 수 (영상 모드)
     TRACKER_IOU_THRESHOLD = 0.30  # IoU 기준 (미만 → 다른 차량)
-    TRACKER_TTL_FRAMES = 30       # 미감지 후 트랙 만료 프레임 수
+    TRACKER_TTL_FRAMES = 15       # 미감지 후 트랙 만료 프레임 수
 
     # ── MareArts/한국 번호판 정규식 완전판 ──
     KR_PATTERNS = [
@@ -263,6 +263,8 @@ class PlateEngineConfig:
         "hist_equalize",
         "gamma_dark",
         "deblur",
+        "unsharp_mask",
+        "auto_contrast",
     ]
 
 
@@ -336,9 +338,8 @@ class ImagePreprocessor:
 
     @staticmethod
     def denoise(img):
-        """노이즈 제거 (hqdn3d 스타일 가우시안 + bilateral)"""
-        blurred = cv2.bilateralFilter(img, 9, 75, 75)
-        return cv2.GaussianBlur(blurred, (3, 3), 0.5)
+        """노이즈 제거 (bilateral 필터 — 가장자리·획 보존, 이중 블러 제거)"""
+        return cv2.bilateralFilter(img, 7, 50, 50)
 
     @staticmethod
     def deblur(img):
@@ -442,6 +443,30 @@ class ImagePreprocessor:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         result = _deskew_and_otsu(gray)
         return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def unsharp_mask(img):
+        """⑯ 언샤프 마스크 (선명도 향상 + 가장자리 보존)"""
+        blurred = cv2.GaussianBlur(img, (0, 0), 3.0)
+        return cv2.addWeighted(img, 1.5, blurred, -0.5, 0)
+
+    @staticmethod
+    def auto_contrast(img):
+        """⑰ 자동 대비 보정 (밝기 분석 후 적응적 CLAHE)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        mean_val = np.mean(gray)
+        # 어두운 이미지: 높은 clipLimit, 밝은 이미지: 낮은 clipLimit
+        if mean_val < 100:
+            clip = 6.0
+        elif mean_val > 180:
+            clip = 2.0
+        else:
+            clip = 4.0
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
 
 class PlateValidator:
@@ -1710,8 +1735,8 @@ class PlateEnginePro:
             #   Tier 2: 추가 전처리 + EasyOCR/Tesseract → 불일치 시만
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             _ENGINE_WEIGHT = {'paddleocr': 1.0, 'easyocr': 0.85, 'tesseract': 0.6}
-            _TIER1_METHODS = ["original", "clahe"]
-            _TIER2_METHODS = ["_inverted"]  # ★ 4→1 축소 (속도 최적화: 반전이 가장 범용)
+            _TIER1_METHODS = ["original", "clahe", "sharpen"]  # ★ 2→3 확장 (합의 안정성 향상)
+            _TIER2_METHODS = ["_inverted", "bilateral", "auto_contrast"]  # ★ 1→3 확장 (다양성 확보)
             from collections import Counter
             all_candidates = []  # [(normalized_text, weighted_confidence), ...]
             _ocr_time_by_engine = defaultdict(float)
@@ -1736,7 +1761,7 @@ class PlateEnginePro:
                         text, ocr_conf = self._run_ocr("paddleocr", _paddle_engine, processed)
                         _ocr_time_by_engine["paddleocr"] += time.time() - _t_ocr
                         _ocr_count_by_engine["paddleocr"] += 1
-                        if not text or ocr_conf < 0.15:
+                        if not text or ocr_conf < 0.20:
                             continue
                         cleaned = self.validator.clean_ocr_text(text)
                         if not self.validator.is_valid_length(cleaned):
@@ -1759,6 +1784,29 @@ class PlateEnginePro:
                     _t1_confs = [c for t, c in all_candidates if t == _t1_top]
                     if _t1_cnt >= 2 and float(np.mean(_t1_confs)) > 0.6:
                         _tier1_consensus = True
+
+            # ★ Tier 1 합의 시 EasyOCR 교차검증 (단일 엔진 합의 → 다중 엔진 보강)
+            # PaddleOCR만으로 합의 → EasyOCR 1회 추가로 교차 확인 (~200ms 추가)
+            if _tier1_consensus and 'easyocr' in self.ocr_engines:
+                try:
+                    _t_ocr = time.time()
+                    _easy_text, _easy_conf = self._run_ocr(
+                        "easyocr", self.ocr_engines["easyocr"], roi_for_ocr)
+                    _ocr_time_by_engine["easyocr"] += time.time() - _t_ocr
+                    _ocr_count_by_engine["easyocr"] += 1
+                    if _easy_text and _easy_conf > 0.20:
+                        _easy_cleaned = self.validator.clean_ocr_text(_easy_text)
+                        if self.validator.is_valid_length(_easy_cleaned):
+                            _easy_valid, _easy_final = self.validator.validate(_easy_cleaned)
+                            if _easy_valid:
+                                _ew = _ENGINE_WEIGHT.get("easyocr", 0.85)
+                                _v2r = bool(re.match(
+                                    r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', _easy_cleaned))
+                                _w = 4 if _v2r else 1
+                                for _ in range(_w):
+                                    all_candidates.append((_easy_final, _easy_conf * _ew))
+                except Exception:
+                    pass
 
             # ── Tier 2: PaddleOCR + EasyOCR 교차검증 (순차 실행, Tesseract 제거) ──
             # ★ 메서드 수 축소 (4→2) + 매 메서드 후 조기종료로 속도 최적화
@@ -1786,7 +1834,7 @@ class PlateEnginePro:
                             text, ocr_conf = self._run_ocr(engine_name, engine, processed)
                             _ocr_time_by_engine[engine_name] += time.time() - _t_ocr
                             _ocr_count_by_engine[engine_name] += 1
-                            if not text or ocr_conf < 0.15:
+                            if not text or ocr_conf < 0.20:
                                 continue
                             cleaned = self.validator.clean_ocr_text(text)
                             if not self.validator.is_valid_length(cleaned):
@@ -1846,7 +1894,7 @@ class PlateEnginePro:
                         if _paddle_engine:
                             try:
                                 text, ocr_conf = self._run_ocr("paddleocr", _paddle_engine, _ge)
-                                if text and ocr_conf > 0.15:
+                                if text and ocr_conf > 0.20:
                                     cleaned = self.validator.clean_ocr_text(text)
                                     if self.validator.is_valid_length(cleaned):
                                         is_valid, final_text = self.validator.validate(cleaned)
@@ -1866,7 +1914,7 @@ class PlateEnginePro:
                                     continue
                                 try:
                                     text, ocr_conf = self._run_ocr(engine_name, engine, _ge)
-                                    if text and ocr_conf > 0.15:
+                                    if text and ocr_conf > 0.20:
                                         cleaned = self.validator.clean_ocr_text(text)
                                         if self.validator.is_valid_length(cleaned):
                                             is_valid, final_text = self.validator.validate(cleaned)
@@ -1903,7 +1951,7 @@ class PlateEnginePro:
                         _crop_engines = [("paddleocr", _paddle_engine)] if _paddle_engine else []
                         for eng_name, eng in _crop_engines:
                             t, c = self._run_ocr(eng_name, eng, proc_crop)
-                            if t and c > 0.15:
+                            if t and c > 0.20:
                                 # ★ 크롭 조각은 clean_ocr_text 사용 안 함
                                 # (짧은 "01나", "8060" 등이 패턴 검증에서 버려지므로)
                                 # 대신 최소한의 정리만: 특수문자 제거 + 숫자/한글만 유지
@@ -1962,11 +2010,14 @@ class PlateEnginePro:
                             # 뒷 4자리 숫자 일치 확인 (가장 안정적인 부분)
                             if _crnn_digits[-4:] == _oc_digits[-4:]:
                                 _digit_matches += 1
-                    # 숫자 합의율이 20% 이상이면 CRNN 신뢰 → 고가중
+                    # 숫자 합의율 기반 적응적 CRNN 가중치
+                    # 후보 풀이 작은 2자리 번호판: 높은 가중치 유지 (CRNN 기여도 보존)
+                    # 후보 풀이 큰 3자리/지역명 번호판: 낮은 가중치 (OCR 합의 우선)
+                    _pool_small = len(all_candidates) < 15
                     if _digit_matches > len(all_candidates) * 0.2:
-                        _crnn_weight = 40  # 학습 데이터와 OCR 합의 → 최우선
+                        _crnn_weight = 35 if _pool_small else 25
                     elif _digit_matches > 0:
-                        _crnn_weight = 10  # 부분 합의
+                        _crnn_weight = 10 if _pool_small else 8
                 for _ in range(_crnn_weight):
                     all_candidates.append((ct, cc))
 
@@ -2101,10 +2152,29 @@ class PlateEnginePro:
                     # 분리 투표 합성 결과가 전체 투표 1위와 다르면 → 분리투표 우선
                     # (한글만 다르고 숫자 동일한 경우 분리투표가 더 정확)
                     best_text = combined_best
-                    best_conf = combined_conf
+                    # ★ 최대값 가중 평균: max×0.6 + mean×0.4 (저신뢰 변형이 평균을 희석하는 문제 방지)
+                    # 실제 당선 텍스트의 confidence만 사용 (new_parts/old_parts 혼동 방지)
+                    _bt_confs = [c for t, c in all_candidates if t == combined_best]
+                    if _bt_confs:
+                        _c_max = max(_bt_confs)
+                        _c_mean = sum(_bt_confs) / len(_bt_confs)
+                        best_conf = _c_max * 0.6 + _c_mean * 0.4
+                    else:
+                        best_conf = combined_conf
                 else:
                     best_text = whole_best
-                    best_conf = whole_conf
+                    # ★ 전체 투표도 최대값 가중 평균 적용
+                    _w_max = max(whole_confs)
+                    best_conf = _w_max * 0.6 + whole_conf * 0.4
+
+                # ★ 합의 강도 보너스: 1위 득표율이 높을수록 신뢰도 보강
+                _total_votes = sum(counter_all.values())
+                if _total_votes > 0:
+                    _top_ratio = whole_count / _total_votes
+                    if _top_ratio >= 0.80 and whole_count >= 3:
+                        best_conf = min(best_conf * 1.15, 1.0)  # 80%+ 합의(3표+) → +15%
+                    elif _top_ratio >= 0.60 and whole_count >= 2:
+                        best_conf = min(best_conf * 1.08, 1.0)  # 60%+ 합의(2표+) → +8%
 
                 # ★ 지역명 교정: 유효한 지역명을 가진 후보가 있으면 우선 사용
                 _re_withregion = re.compile(r'^([가-힣]{2,3})(\d{2}[가-힣]\d{4})$')
@@ -2172,14 +2242,35 @@ class PlateEnginePro:
                             _num_range_penalty = 0.70  # 30% 감점
                     # 2자리(구형)는 01~99 모두 정상 → 페널티 없음
 
+                # ★ OCR 신뢰도 기반 bbox 페널티 완화
+                # OCR이 강한 합의를 달성하면 bbox 크기 불확실성이 해소됨
+                # → 소형 번호판이라도 OCR 정확하면 페널티 감면
+                if best_conf >= 0.90:
+                    _bbox_relief = 0.6   # 고신뢰: 페널티 60% 감면
+                elif best_conf >= 0.80:
+                    _bbox_relief = 0.4   # 중신뢰: 40% 감면
+                elif best_conf >= 0.70:
+                    _bbox_relief = 0.2   # 저신뢰: 20% 감면
+                else:
+                    _bbox_relief = 0.0   # 불확실: 감면 없음
+                _bbox_conf_penalty += (1.0 - _bbox_conf_penalty) * _bbox_relief
+
                 # ★ bbox 크기 + 색상 + 번호범위 기반 신뢰도 페널티 적용
                 best_conf *= _bbox_conf_penalty * _color_conf_penalty * _num_range_penalty
 
-                # ★ 소형 번호판 (bbox < 70px): 신뢰도 floor 없이 페널티 그대로 적용
-                # → 근거리에서 재인식 시 높은 신뢰도로 자동 대체됨
-                if not _is_small_plate:
-                    # 일반 크기: 패턴 검증 통과한 결과는 최소 신뢰도 0.65 보장
-                    best_conf = max(best_conf, 0.65)
+                # ★ 패턴 검증 통과 + OCR 합의 강도에 따른 적응형 신뢰도 floor
+                # OCR 원본 conf(페널티 적용 전)가 높을수록 floor도 높게 설정
+                # → bbox가 작아도 OCR이 확신하면 높은 최종 신뢰도 보장
+                _raw_conf_before_penalty = best_conf / max(_bbox_conf_penalty * _color_conf_penalty * _num_range_penalty, 0.01)
+                if _raw_conf_before_penalty >= 0.95:
+                    _floor = 0.92 if not _is_small_plate else 0.90
+                elif _raw_conf_before_penalty >= 0.85:
+                    _floor = 0.85 if not _is_small_plate else 0.80
+                elif _raw_conf_before_penalty >= 0.75:
+                    _floor = 0.78 if not _is_small_plate else 0.72
+                else:
+                    _floor = 0.70 if not _is_small_plate else 0.60
+                best_conf = max(best_conf, _floor)
 
                 # ★ 신뢰도 최종 필터: 소형 0.50 미만, 일반 0.60 미만 → 폐기
                 _conf_threshold = 0.50 if _is_small_plate else 0.60

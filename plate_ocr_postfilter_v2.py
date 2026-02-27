@@ -351,10 +351,11 @@ def _jamo_decompose(ch):
     return (cho, jung, jong)
 
 
-# 유효 한글의 자모 분해 캐시 (지역명 한글 제외, 단자 교정용)
-_VALID_HANGUL_JAMO = [
-    (ch, _jamo_decompose(ch)) for ch in VALID_HANGUL
-]
+# 유효 한글의 자모 분해 캐시 (정렬하여 해시 시드 무관하게 결정적 순회)
+_VALID_HANGUL_JAMO = sorted(
+    [(ch, _jamo_decompose(ch)) for ch in VALID_HANGUL],
+    key=lambda x: ord(x[0])
+)
 
 
 def _find_nearest_valid_hangul(ch):
@@ -824,9 +825,15 @@ def ensemble_vote_v2(ocr_results_list):
         default=scores[best]
     )
 
+    final_conf = min(best_conf, 1.0)
+
+    # 신뢰도 75% 미만은 저신뢰 결과로 판단하여 반환하지 않음
+    if final_conf < 0.75:
+        return {'plate': '', 'conf': 0.0, 'method': 'low_confidence'}
+
     return {
         'plate': best,
-        'conf': min(best_conf, 1.0),
+        'conf': final_conf,
         'method': 'ensemble_vote',
         'all_candidates': scores,
     }

@@ -125,7 +125,7 @@ class PlateTracker:
     # 트랙에 OCR 결과가 있을 때, 마지막 OCR 이후 이 프레임 수 이상 지나면
     # 다른 차량이 같은 위치에 들어온 것으로 판단하고 OCR 결과를 지운다.
     # ★ OCR 처리 500ms+ → 30fps에서 15~20프레임 간격 발생하므로 여유 있게 설정
-    STALE_FRAME_GAP = 45
+    STALE_FRAME_GAP = 20
 
     # bbox 면적 비율이 이 범위를 벗어나면 다른 차량으로 판단
     AREA_RATIO_MIN = 0.5
@@ -142,12 +142,12 @@ class PlateTracker:
     # bbox EMA 평활화 계수 (0=이전 유지, 1=새 값 즉시 적용)
     BBOX_SMOOTH_ALPHA = 0.4
     # OCR 확인된 트랙의 표시 유지 프레임 수 (OCR 미수신 시에도 초록 박스 유지)
-    # ★ engine regression 대응: OCR 결과 간격이 길어져도 확정 텍스트 유지
-    DISPLAY_HOLD_FRAMES = 30
+    # ★ 너무 크면 지나간 차량이 화면에 잔존 → 10프레임(~0.3초)이 적정
+    DISPLAY_HOLD_FRAMES = 10
     # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
     GAP_TOLERANCE = 5
 
-    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 25):
+    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 15):
         self.iou_threshold = iou_threshold
         self.max_ttl = max_ttl
         self.tracks: dict[int, dict] = {}  # track_id → track 정보
@@ -1093,55 +1093,85 @@ class PlateGUIApp(tk.Tk):
 
     # ─── 오버레이 그리기 (2단계) ───
 
+    # 오버레이 최대 표시 개수 (화면 정리용)
+    MAX_PHASE2_DISPLAY = 4   # OCR 확정 박스 최대 표시 수
+    MAX_PHASE1_DISPLAY = 0   # 탐지중 박스 표시 안 함 (OCR 확정만 표시)
+
     def _draw_overlay(self, frame: np.ndarray, detections: list[dict]) -> np.ndarray:
-        """프레임 위에 2단계 오버레이:
-        Phase 1 (is_valid_plate=False): 빨간 박스 + '탐지중...'  ← YOLO만 완료
-        Phase 2 (is_valid_plate=True):  초록 박스 + '서울바9203 (72%)'  ← OCR 완료
+        """프레임 위에 OCR 확정 결과만 오버레이:
+        ★ Phase 1 (탐지중) 미표시 — 확정된 번호판만 깔끔하게 표시
+        ★ 라벨: '서울바9203 (72%)' — 등급 태그 제거
+        ★ 최대 4개, 겹침 방지
         """
         result = frame.copy()
 
+        # ── OCR 확정만 필터 ──
+        phase2_dets = []
         for det in detections:
             bbox = det.get("bbox", [])
             if len(bbox) < 4:
                 continue
+            text = det.get("text") or det.get("plate", "")
+            is_valid = det.get("is_valid_plate", False)
+            if is_valid and text:
+                phase2_dets.append(det)
+
+        if not phase2_dets:
+            return result
+
+        # ── 신뢰도 내림차순 정렬 후 상위만 표시 ──
+        phase2_dets.sort(key=lambda d: d.get("ocr_confidence", d.get("confidence", 0)), reverse=True)
+        phase2_dets = phase2_dets[:self.MAX_PHASE2_DISPLAY]
+
+        # 라벨 겹침 방지용 점유 영역 목록 [(y_top, y_bottom, x_left, x_right)]
+        _label_rects = []
+
+        def _find_label_y(x1, base_y, font_sz, label_w):
+            """라벨 Y 위치를 기존 라벨과 겹치지 않게 조정"""
+            y_top = base_y
+            y_bot = base_y + font_sz + 6
+            for _attempt in range(8):
+                overlap = False
+                for (ry1, ry2, rx1, rx2) in _label_rects:
+                    if x1 < rx2 and (x1 + label_w) > rx1 and y_top < ry2 and y_bot > ry1:
+                        overlap = True
+                        y_top = ry2 + 4
+                        y_bot = y_top + font_sz + 6
+                        break
+                if not overlap:
+                    break
+            _label_rects.append((y_top, y_bot, x1, x1 + label_w))
+            return y_top
+
+        for det in phase2_dets:
+            bbox = det.get("bbox", [])
             x1, y1, x2, y2 = [int(v) for v in bbox]
             text = det.get("text") or det.get("plate", "")
             conf = det.get("ocr_confidence", det.get("confidence", 0))
-            is_valid = det.get("is_valid_plate", False)
 
-            if is_valid and text:
-                # ── Phase 2: OCR 완료 → 신뢰도 등급별 색상 박스 + 번호판 텍스트 ──
-                _clevel = det.get("confidence_level", "")
-                if _clevel.startswith("HIGH"):
-                    color = (0, 230, 70)    # 초록 (HIGH)
-                elif _clevel.startswith("MEDIUM"):
-                    color = (0, 200, 255)   # 주황/노랑 (MEDIUM)
-                else:
-                    color = (0, 230, 70)    # 기본 초록
-                thickness = 3
-                cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
-
-                # 신뢰도 등급 표시 포함
-                _level_tag = f" [{_clevel}]" if _clevel else ""
-                label = f"{text} ({conf:.0%}){_level_tag}"
-                font_sz = max(20, min(32, (x2 - x1) // 3))
-                result = draw_korean_text(result, label, (x1, max(0, y1 - font_sz - 8)),
-                                          font_size=font_sz, color=color)
-
-                # 신뢰도 바
-                if conf > 0:
-                    bar_w = int((x2 - x1) * conf)
-                    cv2.rectangle(result, (x1, y2 + 2), (x1 + bar_w, y2 + 8), color, -1)
+            _clevel = det.get("confidence_level", "")
+            if _clevel.startswith("HIGH"):
+                color = (0, 230, 70)    # 초록 (HIGH)
+            elif _clevel.startswith("MEDIUM"):
+                color = (0, 200, 255)   # 주황/노랑 (MEDIUM)
             else:
-                # ── Phase 1: YOLO만 → 빨간 박스 + "탐지중..." ──
-                color = (0, 0, 255)  # 빨간색 (BGR)
-                thickness = 3
-                cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
+                color = (0, 230, 70)    # 기본 초록
+            thickness = 2
+            cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
 
-                label = f"탐지중... ({conf:.0%})" if conf > 0 else "탐지중..."
-                font_sz = max(18, min(28, (x2 - x1) // 3))
-                result = draw_korean_text(result, label, (x1, max(0, y1 - font_sz - 8)),
-                                          font_size=font_sz, color=color)
+            # ★ 라벨: 번호판 + 신뢰도만 (등급 태그 제거)
+            label = f"{text} ({conf:.0%})"
+            font_sz = max(18, min(28, (x2 - x1) // 4))
+            # 한글 포함 라벨 너비: 한글=폰트크기, ASCII=폰트크기*0.6
+            est_label_w = sum(font_sz if ord(c) > 127 else int(font_sz * 0.6) for c in label)
+            label_y = _find_label_y(x1, max(0, y1 - font_sz - 6), font_sz, est_label_w)
+            result = draw_korean_text(result, label, (x1, label_y),
+                                      font_size=font_sz, color=color)
+
+            # 신뢰도 바 (얇게)
+            if conf > 0:
+                bar_w = int((x2 - x1) * conf)
+                cv2.rectangle(result, (x1, y2 + 1), (x1 + bar_w, y2 + 4), color, -1)
 
         return result
 
