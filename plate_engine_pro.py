@@ -38,7 +38,6 @@ import re
 import time
 import json
 import sqlite3
-import threading
 from datetime import datetime
 from pathlib import Path
 from collections import defaultdict, deque
@@ -1150,6 +1149,7 @@ class PlateTracker:
         trk["best_conf"] = 0
         trk["recorded"] = False
         trk["consecutive"] = 1
+        trk["_detect_count"] = 1
 
     def begin_frame(self):
         """새 프레임 시작 — 프레임 카운터 증가, 트랙 seen 플래그 리셋"""
@@ -1184,8 +1184,10 @@ class PlateTracker:
                 best_trk["texts"] = defaultdict(int, top_items)
 
             # 기존 트랙 갱신
+            best_trk["_pre_gap"] = self._frame_id - best_trk["last_frame"]  # ★ 매칭 전 갭 저장 (OCR 스킵 판단용)
             best_trk["bbox"] = bbox
             best_trk["consecutive"] += 1
+            best_trk["_detect_count"] = best_trk.get("_detect_count", 0) + 1
             best_trk["last_frame"] = self._frame_id
             best_trk["_seen"] = True
             return best_trk, False
@@ -1195,6 +1197,7 @@ class PlateTracker:
                 "bbox": bbox,
                 "texts": defaultdict(int),
                 "consecutive": 1,
+                "_detect_count": 1,  # 감지된 총 프레임 수 (투표 가중치 무관)
                 "best_conf": 0,
                 "recorded": False,
                 "last_frame": self._frame_id,
@@ -1410,7 +1413,7 @@ class PlateEnginePro:
             _imgsz = 960
         else:
             _imgsz = 640
-        detections = self.model(frame, conf=self.config.DETECT_CONF, imgsz=_imgsz, verbose=False)
+        detections = self.model(frame, conf=self.config.DETECT_CONF, imgsz=_imgsz, verbose=False, max_det=3)
 
         crop_src = full_frame if full_frame is not None else frame
         ch_full, cw_full = crop_src.shape[:2]
@@ -1493,6 +1496,54 @@ class PlateEnginePro:
             roi = crop_src[ry1:ry2, rx1:rx2]   # CROP: 번호판 영역 이미지 추출
 
             if roi.size == 0:
+                continue
+
+            # ★ 트래커 기반 OCR 스킵: 이미 확인된 번호판이면 OCR 건너뜀 (FPS 최적화)
+            # 조건: 기존 트랙 + 직전 프레임 연속 감지(gap≤1) + 3프레임 확인 + 3+표
+            # gap>1이면 차량 교체 가능성 → OCR 반드시 실행
+            cur_bbox = [ox1, oy1, ox2, oy2]
+            _pre_trk, _pre_is_new = self._tracker.match(cur_bbox)
+            _skip_ocr = False
+            if not _pre_is_new and _pre_trk["texts"]:
+                _pre_gap = _pre_trk.get("_pre_gap", 999)
+                _pre_top_text = max(_pre_trk["texts"], key=_pre_trk["texts"].get)
+                _pre_top_votes = _pre_trk["texts"][_pre_top_text]
+                _pre_detect_cnt = _pre_trk.get("_detect_count", 0)
+                # 직전 프레임 연속(gap≤1) & 3프레임+ 감지 & 3+표 → OCR 스킵
+                if _pre_gap <= 1 and _pre_detect_cnt >= 3 and _pre_top_votes >= 3:
+                    _skip_ocr = True
+            if _skip_ocr:
+                # OCR 없이 트래커 결과 사용
+                _pre_conf = _pre_trk.get("best_conf", 0.5)
+                seen_this_frame.add(_pre_top_text)
+                plate_info = self.recent_plates[_pre_top_text]
+                plate_info["consecutive"] = _pre_trk["consecutive"]
+                plate_info["last_seen"] = time.time()
+                plate_info["count"] += 1
+                _show = (_pre_trk["consecutive"] >= self.consecutive_required
+                         or _pre_detect_cnt >= self.consecutive_required)
+                if _show:
+                    _adj_conf = min(_pre_conf + 0.10, 1.0)
+                    _conf_level = self.validator.get_confidence_level(_adj_conf) + "(추적)"
+                    _bbox_w = ox2 - ox1
+                    _bbox_h = oy2 - oy1
+                    results.append({
+                        "plate": _pre_top_text,
+                        "confidence": _pre_conf,
+                        "bbox": cur_bbox,
+                        "is_alert": False,
+                        "alert_info": None,
+                        "plate_number": _pre_top_text,
+                        "confidence_level": _conf_level,
+                        "plate_type": self.validator.classify_plate_type(_pre_top_text),
+                        "vehicle_type": self.validator.classify_vehicle_type(_pre_top_text),
+                        "plate_lines": 1 if _bbox_w / max(_bbox_h, 1) > 2.5 else 2,
+                        "plate_color": "흰색바탕_검은글씨",
+                        "bbox_area": _bbox_w * _bbox_h,
+                        "frame_count": _pre_top_votes,
+                        "is_valid_format": True,
+                        "rejection_reason": None,
+                    })
                 continue
 
             # ★ 디버그: 번호판 crop 저장 (환경변수 _DEBUG_CROP=1 로 활성화)
@@ -1623,10 +1674,9 @@ class PlateEnginePro:
                 else:
                     top_sharp800 = top_inv
                 extra_crops = [
-                    ("top", top_crop), ("top", top_inv), ("top", top_clahe_bgr),
-                    ("top", top_val_bgr), ("top", top_sharp800),
+                    ("top", top_inv),
                     ("bot", bot_crop),
-                ]
+                ]  # ★ 6→2 축소 (속도 최적화: top_inv + bot가 핵심)
                 # ★ 녹색 번호판: 추가 전처리 (반전+강화CLAHE, 녹색채널 이진화)
                 if _is_green_plate:
                     # 반전 + 강화 CLAHE (clipLimit 8.0)
@@ -1661,7 +1711,7 @@ class PlateEnginePro:
             # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
             _ENGINE_WEIGHT = {'paddleocr': 1.0, 'easyocr': 0.85, 'tesseract': 0.6}
             _TIER1_METHODS = ["original", "clahe"]
-            _TIER2_METHODS = ["adaptive_threshold", "otsu_inv", "deskew", "_inverted"]
+            _TIER2_METHODS = ["_inverted"]  # ★ 4→1 축소 (속도 최적화: 반전이 가장 범용)
             from collections import Counter
             all_candidates = []  # [(normalized_text, weighted_confidence), ...]
             _ocr_time_by_engine = defaultdict(float)
@@ -1710,75 +1760,32 @@ class PlateEnginePro:
                     if _t1_cnt >= 2 and float(np.mean(_t1_confs)) > 0.6:
                         _tier1_consensus = True
 
-            # ── Tier 2: PaddleOCR + EasyOCR 병렬 실행 (속도 최적화) ──
-            # ★ PaddleOCR(메인스레드) + EasyOCR(백그라운드스레드) 동시 실행
-            #   PaddleOCR 합의 시 EasyOCR 조기중단, 미합의 시 EasyOCR 완료 대기
+            # ── Tier 2: PaddleOCR + EasyOCR 교차검증 (순차 실행, Tesseract 제거) ──
+            # ★ 메서드 수 축소 (4→2) + 매 메서드 후 조기종료로 속도 최적화
             _mid_consensus = False
             if not _tier1_consensus:
-                # 전처리 이미지 미리 준비 (두 엔진이 동일 이미지 사용)
-                _t2_images = []
-                for method in _TIER2_METHODS:
+                _tier2_break = False
+                for _t2_idx, method in enumerate(_TIER2_METHODS):
+                    if _tier2_break:
+                        break
                     try:
                         if method == "_inverted":
-                            _t2_images.append((method, roi_inv.copy()))
+                            processed = roi_inv.copy()
                         else:
                             proc_func = getattr(self.preprocessor, method, None)
                             if proc_func is None:
                                 continue
-                            _t2_images.append((method, proc_func(roi_for_ocr.copy())))
-                    except Exception:
-                        continue
-
-                _easy_engine = self.ocr_engines.get("easyocr")
-                _stop_event = threading.Event()
-                _easy_candidates = []  # EasyOCR 전용 결과 (스레드에서 수집)
-                _easy_time = [0.0]
-                _easy_count = [0]
-
-                # EasyOCR 백그라운드 워커
-                def _easyocr_worker():
-                    for _m_name, _m_img in _t2_images:
-                        if _stop_event.is_set():
-                            break
-                        try:
+                            processed = proc_func(roi_for_ocr.copy())
+                        _skip_easy = False
+                        for engine_name, engine in self.ocr_engines.items():
+                            if engine_name == "tesseract":
+                                continue  # ★ Tesseract 제거 (속도 최적화)
+                            if engine_name == "easyocr" and _skip_easy:
+                                continue  # ★ PaddleOCR 합의 시 EasyOCR 스킵
                             _t_ocr = time.time()
-                            text, ocr_conf = self._run_ocr("easyocr", _easy_engine, _m_img)
-                            _easy_time[0] += time.time() - _t_ocr
-                            _easy_count[0] += 1
-                            if not text or ocr_conf < 0.15:
-                                continue
-                            cleaned = self.validator.clean_ocr_text(text)
-                            if not self.validator.is_valid_length(cleaned):
-                                continue
-                            is_valid, final_text = self.validator.validate(cleaned)
-                            if not is_valid:
-                                continue
-                            _ew = _ENGINE_WEIGHT.get("easyocr", 0.85)
-                            weighted_conf = ocr_conf * _ew
-                            _v2r = bool(re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', cleaned))
-                            weight = 4 if _v2r else 1
-                            for _ in range(weight):
-                                _easy_candidates.append((final_text, weighted_conf))
-                        except Exception:
-                            continue
-
-                # EasyOCR 스레드 시작
-                _easy_thread = None
-                if _easy_engine:
-                    _easy_thread = threading.Thread(target=_easyocr_worker, daemon=True)
-                    _easy_thread.start()
-
-                # PaddleOCR 메인 스레드 실행 (조기종료 포함)
-                _paddle_consensus = False
-                if _paddle_engine:
-                    for _m_name, _m_img in _t2_images:
-                        if _paddle_consensus:
-                            break
-                        try:
-                            _t_ocr = time.time()
-                            text, ocr_conf = self._run_ocr("paddleocr", _paddle_engine, _m_img)
-                            _ocr_time_by_engine["paddleocr"] += time.time() - _t_ocr
-                            _ocr_count_by_engine["paddleocr"] += 1
+                            text, ocr_conf = self._run_ocr(engine_name, engine, processed)
+                            _ocr_time_by_engine[engine_name] += time.time() - _t_ocr
+                            _ocr_count_by_engine[engine_name] += 1
                             if not text or ocr_conf < 0.15:
                                 continue
                             cleaned = self.validator.clean_ocr_text(text)
@@ -1789,36 +1796,30 @@ class PlateEnginePro:
                             if not is_valid:
                                 self.stats["filtered_by_pattern"] += 1
                                 continue
-                            weighted_conf = ocr_conf * 1.0
+                            _ew = _ENGINE_WEIGHT.get(engine_name, 0.7)
+                            weighted_conf = ocr_conf * _ew
                             _v2_has_region = bool(re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', cleaned))
                             weight = 4 if _v2_has_region else 1
                             for _ in range(weight):
                                 all_candidates.append((final_text, weighted_conf))
-                        except Exception:
-                            continue
-                        # ★ PaddleOCR 단독 합의: 8+표(지역명 가중) & conf > 0.75 → EasyOCR 중단
-                        # 비지역 번호판(1표/메서드)은 최대 6표 → 8 못 넘음 → EasyOCR 안전
-                        # 지역명 번호판(4표/메서드)은 2개 메서드 → 8표 → 조기종료
-                        if all_candidates:
-                            _t2_counter = Counter(t for t, c in all_candidates)
-                            _t2_top, _t2_cnt = _t2_counter.most_common(1)[0]
-                            _t2_confs = [c for t, c in all_candidates if t == _t2_top]
-                            if _t2_cnt >= 8 and float(np.mean(_t2_confs)) > 0.75:
-                                _paddle_consensus = True
-                                _stop_event.set()  # EasyOCR 조기중단 신호
+                            # ★ PaddleOCR 후 합의 체크: 4+표 & 0.70+ → EasyOCR 스킵
+                            if engine_name == "paddleocr" and all_candidates:
+                                _pe_counter = Counter(t for t, c in all_candidates)
+                                _pe_top, _pe_cnt = _pe_counter.most_common(1)[0]
+                                _pe_confs = [c for t, c in all_candidates if t == _pe_top]
+                                if _pe_cnt >= 4 and float(np.mean(_pe_confs)) > 0.70:
+                                    _skip_easy = True
+                    except Exception:
+                        continue
+                    # ★ 매 메서드 후 조기종료: 4+표 & conf > 0.70
+                    if all_candidates:
+                        _t2_counter = Counter(t for t, c in all_candidates)
+                        _t2_top, _t2_cnt = _t2_counter.most_common(1)[0]
+                        _t2_confs = [c for t, c in all_candidates if t == _t2_top]
+                        if _t2_cnt >= 4 and float(np.mean(_t2_confs)) > 0.70:
+                            _tier2_break = True
 
-                # EasyOCR 스레드 종료 대기 + 결과 병합
-                if _easy_thread:
-                    if _paddle_consensus:
-                        _easy_thread.join(timeout=1.0)  # 합의 시 빠르게 종료
-                    else:
-                        _easy_thread.join(timeout=15.0)  # 미합의 시 EasyOCR 완료 대기
-                    # EasyOCR 결과 병합
-                    all_candidates.extend(_easy_candidates)
-                    _ocr_time_by_engine["easyocr"] += _easy_time[0]
-                    _ocr_count_by_engine["easyocr"] += _easy_count[0]
-
-                # extra_crops 스킵용 합의 체크 (병합 후)
+                # extra_crops 스킵용 합의 체크
                 if all_candidates:
                     _mid_counter = Counter(t for t, c in all_candidates)
                     _mid_top, _mid_cnt = _mid_counter.most_common(1)[0]
@@ -2186,9 +2187,29 @@ class PlateEnginePro:
                     self.stats["filtered_by_confidence"] = self.stats.get("filtered_by_confidence", 0) + 1
                     continue
 
-                # ── PlateTracker: IoU 기반 차량 추적 (ghost detection 방지) ──
-                cur_bbox = [ox1, oy1, ox2, oy2]
-                matched_trk, is_new_track = self._tracker.match(cur_bbox)
+                # ── PlateTracker: 이미 매칭된 트랙 재사용 (OCR 스킵 사전체크에서 매칭 완료) ──
+                matched_trk, is_new_track = _pre_trk, _pre_is_new
+
+                # ★ 텍스트 기반 트랙 병합: IoU로 새 트랙이 됐지만 같은 텍스트의 기존 트랙이 있으면 병합
+                # → 차량 이동으로 IoU < 0.30 → 새 트랙 생성 → 동일 번호판 텍스트로 기존 트랙과 연결
+                if is_new_track and best_text:
+                    for _exist_trk in self._tracker.tracks:
+                        if _exist_trk is matched_trk:
+                            continue
+                        if _exist_trk["texts"]:
+                            _exist_top = max(_exist_trk["texts"], key=_exist_trk["texts"].get)
+                            if _exist_top == best_text:
+                                # 기존 트랙 데이터를 새 트랙으로 이전
+                                matched_trk["texts"] = _exist_trk["texts"]
+                                matched_trk["best_conf"] = max(matched_trk["best_conf"], _exist_trk["best_conf"])
+                                matched_trk["_detect_count"] = _exist_trk.get("_detect_count", 0) + 1
+                                matched_trk["consecutive"] = _exist_trk["consecutive"] + 1
+                                matched_trk["recorded"] = _exist_trk["recorded"]
+                                # 기존 트랙 무효화
+                                _exist_trk["texts"] = defaultdict(int)
+                                _exist_trk["last_frame"] = 0
+                                is_new_track = False
+                                break
 
                 # ★ 투표 decay: 새 텍스트가 기존 최다 투표와 다르면 이전 투표 전부 삭제
                 # → 새 차량이 즉시(프레임 1) 이전 차량을 역전
@@ -2228,10 +2249,11 @@ class PlateEnginePro:
                 plate_info["last_seen"] = time.time()
                 plate_info["count"] += 1
 
-                # ★ 표시 기준: consecutive >= N 또는 총 투표 >= N (실시간 미감지 프레임 허용)
-                _total_votes = sum(matched_trk["texts"].values())
+                # ★ 표시 기준: consecutive >= N 또는 감지 프레임 >= N (비연속 허용)
+                # _detect_count: 투표 가중치 무관, 실제 감지된 프레임 수
+                _detect_count = matched_trk.get("_detect_count", matched_trk["consecutive"])
                 _show = (matched_trk["consecutive"] >= self.consecutive_required
-                         or _total_votes >= self.consecutive_required)
+                         or _detect_count >= self.consecutive_required)
                 if _show:
                     is_alert, alert_info = (0, None)
                     if not matched_trk["recorded"]:

@@ -96,9 +96,9 @@ def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
     if w >= 100:
         min_conf = 0.70
     elif w >= 60:
-        min_conf = 0.80
+        min_conf = 0.85
     else:
-        min_conf = 0.90
+        min_conf = 0.92
     if confidence < min_conf:
         return False
 
@@ -129,6 +129,9 @@ class PlateTracker:
 
     # bbox 중심이 대각선 길이의 이 비율 이상 이동하면 다른 차량으로 판단
     CENTER_JUMP_RATIO = 0.5
+
+    # OCR 결과가 연속 N프레임 확인되어야 표시 (노이즈 1회성 제거)
+    CONSECUTIVE_REQUIRED = 2
 
     def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 15):
         self.iou_threshold = iou_threshold
@@ -200,6 +203,7 @@ class PlateTracker:
                 if frame_idx - last_matched > 1 and track.get("plate_text"):
                     track["plate_text"] = ""
                     track["confidence"] = 0
+                    track["ocr_count"] = 0
                     track["det_data"] = {}
 
                 # ★ bbox 면적 비율 체크: 크기가 급변하면 다른 차량
@@ -210,6 +214,7 @@ class PlateTracker:
                 if not (self.AREA_RATIO_MIN <= area_ratio <= self.AREA_RATIO_MAX):
                     track["plate_text"] = ""
                     track["confidence"] = 0
+                    track["ocr_count"] = 0
                     track["det_data"] = {}
 
                 # ★ bbox 중심 이동 거리 체크: 중심이 크게 점프하면 다른 차량
@@ -222,6 +227,7 @@ class PlateTracker:
                 if center_dist > old_diag * self.CENTER_JUMP_RATIO and track.get("plate_text"):
                     track["plate_text"] = ""
                     track["confidence"] = 0
+                    track["ocr_count"] = 0
                     track["det_data"] = {}
 
                 det_text = det.get("text", "")
@@ -234,6 +240,7 @@ class PlateTracker:
                 if ocr_gap > self.STALE_FRAME_GAP and track.get("plate_text"):
                     track["plate_text"] = ""
                     track["confidence"] = 0
+                    track["ocr_count"] = 0
                     track["det_data"] = {}
 
                 track["bbox"] = bbox
@@ -244,16 +251,26 @@ class PlateTracker:
                 if det_valid and det_text:
                     # 새 OCR 결과가 있으면: 신뢰도 비교 후 교체
                     track["last_ocr_frame"] = frame_idx
+                    # 같은 번호면 연속 카운트 증가, 다른 번호면 리셋
+                    if det_text == track.get("plate_text", ""):
+                        track["ocr_count"] = track.get("ocr_count", 0) + 1
+                    else:
+                        track["ocr_count"] = 1
                     if det_conf >= track.get("confidence", 0):
                         track["plate_text"] = det_text
                         track["confidence"] = det_conf
                         track["det_data"] = det
-                    result_det = dict(track.get("det_data", det))
-                    result_det["bbox"] = bbox
+                    # 연속 감지 횟수 미달이면 Phase 1로 표시
+                    if track.get("ocr_count", 0) >= self.CONSECUTIVE_REQUIRED:
+                        result_det = dict(track.get("det_data", det))
+                        result_det["bbox"] = bbox
+                    else:
+                        result_det = det
+                        result_det["is_valid_plate"] = False
                 else:
                     # Phase 1 (OCR 미완료): 이전 결과가 살아있으면 유지
                     # (stale 체크를 이미 위에서 했으므로 안전)
-                    if track.get("plate_text"):
+                    if track.get("plate_text") and track.get("ocr_count", 0) >= self.CONSECUTIVE_REQUIRED:
                         result_det = dict(track.get("det_data", {}))
                         result_det["bbox"] = bbox
                     else:
@@ -277,9 +294,16 @@ class PlateTracker:
                     "frame_idx": frame_idx,
                     "last_matched_frame": frame_idx,
                     "last_ocr_frame": frame_idx if has_ocr else 0,
+                    "ocr_count": 1 if has_ocr else 0,
                     "det_data": det if has_ocr else {},
                 }
-                output.append(det)
+                # 새 차량 첫 감지: consecutive 미달이면 Phase 1로 표시
+                new_det = dict(det)
+                if has_ocr and self.CONSECUTIVE_REQUIRED <= 1:
+                    pass  # 그대로 출력
+                elif has_ocr:
+                    new_det["is_valid_plate"] = False
+                output.append(new_det)
                 matched_det_indices.add(d_idx)
 
         # 2단계: TTL 감소 + 만료된 track 삭제
