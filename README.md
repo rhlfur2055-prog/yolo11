@@ -1,120 +1,106 @@
-# YOLO26 번호판 인식 시스템
+# YOLO26 — 한국 차량 번호판 자동 인식 시스템
 
-YOLO26 + OCR 앙상블 기반 실시간 번호판 인식 파이프라인.
-한국 번호판 특화, 4K CCTV 영상 처리, 18종 전처리, 98% 목표.
+YOLO 객체 탐지 + 다중 OCR 앙상블 기반 한국 차량 번호판 인식 파이프라인.
+정적 이미지 **12/12 (100%)**, 실시간 영상 Ghost Detection **5/5 (100%)** 달성.
 
 ## 아키텍처
 
 ```
-[입력]                       [엔진]                            [출력]
-video.mp4  ──┐
-CCTV stream ─┤──▶ YOLO26 감지 ──▶ 18종 전처리 ──▶ OCR 앙상블  ──▶ plate_results/
-이미지 폴더 ─┘    (NMS-free)      (샤프닝/CLAHE    (Paddle+Easy       results.json
-                                  /기울기보정 등)   Counter투표)       plate_XXXX.png
-
-     plate_gui.py   ◀──── 실시간 Tkinter GUI
-     plate_server.py ◀─── 웹 뷰어 (localhost:8000)
-     api_server.py  ◀──── REST API (POST /recognize)
+입력 (이미지/영상)
+  │
+  ▼
+YOLO11x 번호판 탐지 (mAP@50 = 98.4%)
+  │
+  ▼
+ROI 크롭 (35%/40% 마진) → 500px 업스케일
+  │
+  ▼
+18가지 전처리 × 2 OCR 엔진 (PaddleOCR + EasyOCR)
+  │
+  ▼
+위치 기반 분해 투표 → PlateValidator → HangulClassifier (초성 교차검증)
+  │
+  ▼
+PlateTracker (IoU 기반 차량 추적, Ghost Detection 방지)
 ```
 
-## 파일 구조
+## 핵심 파일
 
 | 파일 | 역할 |
-| --- | --- |
-| `plate_recognition_4k.py` | 핵심 엔진 - YOLO26 감지 + 18종 전처리 + OCR 앙상블 |
-| `plate_engine_pro.py` | Pro 앙상블 엔진 (슬라이딩 윈도우 버퍼) |
-| `plate_ocr_pipeline.py` | OCR 파이프라인 (한국 번호판 패턴 검증) |
-| `plate_gui.py` | Tkinter + OpenCV 실시간 GUI (자동 저장) |
-| `plate_server.py` | HTTP 결과 뷰어 (멀티 디렉토리 자동 스캔) |
-| `api_server.py` | REST API 서버 (POST /recognize) |
-| `video_plate_recognizer.py` | 비디오 배치 처리 |
-| `run_benchmark_v2.py` | 정확도 벤치마크 (Precision/Recall/F1) |
-| `scripts/bench_accuracy.py` | 간편 정확도 측정 스크립트 |
-| `scripts/run_headless_plate_test.py` | GUI 없이 터미널 테스트 |
-| `ocr_test.py` / `test_frames.py` | 단위 테스트 |
-| `debug_ocr.py` | OCR 디버그 도구 |
-| `make_demo_video.py` | 데모 영상 생성 |
+|------|------|
+| `plate_engine_pro.py` | 메인 OCR 엔진 — YOLO 탐지 + 18종 전처리 + 앙상블 투표 + 추적 |
+| `plate_gui.py` | Tkinter GUI + 실시간 영상 처리 |
+| `plate_ocr_postfilter_v2.py` | OCR 후처리/정제 필터 |
+| `test_ocr_accuracy.py` | 정적 이미지 12장 정확도 테스트 |
+| `test_ghost_detection.py` | 실시간 영상 Ghost Detection 테스트 |
+| `train_plate_ocr.py` | CRNN OCR 모델 학습 스크립트 |
 
-## 모델 우선순위 (자동 선택)
+## 실행 방법
 
-| 순위 | 모델 | 특징 |
-| --- | --- | --- |
-| 1 | `yolo26n.pt` | **YOLO26** Ultralytics 최신 - NMS-free, 최고속 |
-| 2 | `yolo26s.pt` | YOLO26s - 균형형 |
-| 3 | `yolo11x_plate.pt` | YOLOv11x fine-tuned (mAP@50=98.4%) |
-| 4 | `yolo26.pt` | 기존 번호판 전용 모델 |
-| 5 | `yolo11n.pt` | COCO fallback |
-
-## OCR 파이프라인 (앙상블 투표)
-
-```
-PaddleOCR (한글) ─┐
-                  ├──▶ Counter 투표 ──▶ 최다득표 번호판 확정
-EasyOCR (영문)  ─┘
-
-18종 이미지 전처리:
-  ① 원본그레이  ② CLAHE  ③ Otsu  ④ Otsu반전  ⑤ Adaptive-Mean
-  ⑥ Adaptive-Gauss  ⑦ 샤프닝  ⑧ 중앙값필터  ⑨ 2배업스케일
-  ⑩ 밝기보정  ⑪ 히스토그램평활화  ⑫ 기울기보정
-  ⑬ bilateral  ⑭ morphology  ⑮ deblur  ⑯ gamma  ⑰ stretch  ⑱ threshold
-```
-
-## 설치 및 실행
+### GUI 실행 (실시간 영상)
 
 ```bash
-# 설치
-pip install -r requirements.txt
-pip install fast-alpr  # 선택: 98.4% 정확도 OCR
+python plate_gui.py movie/hiway.mp4
+```
 
-# GUI 실행 (YOLO26 자동 사용)
+기본 영상 없이 실행하면 내장 테스트 영상을 자동으로 사용합니다:
+
+```bash
 python plate_gui.py
-python plate_gui.py video.mp4
-
-# 이미지 1장=1프레임 영상 (PowerShell)
-$env:PLATE_CONSECUTIVE_FRAMES=1
-python plate_gui.py vehicle_plate_test.mp4
-
-# 헤드리스 테스트 (GUI 없이)
-python scripts/run_headless_plate_test.py video.mp4
-python scripts/run_headless_plate_test.py --max-frames 100
-
-# CLI 배치 처리
-python plate_recognition_4k.py --input video.mp4
-
-# 정확도 벤치마크
-python run_benchmark_v2.py
-python scripts/bench_accuracy.py
-
-# 결과 웹뷰어
-python plate_server.py  # → http://localhost:8000
 ```
 
-## YOLO26 모델 다운로드
+### 정확도 테스트
 
-```python
-# Ultralytics 공식 (자동 다운로드)
-from ultralytics import YOLO
-model = YOLO("yolo26n.pt")  # 첫 실행 시 자동 다운로드
+```bash
+# 정적 이미지 OCR 정확도 (12장, Python 3.10 필수)
+python test_ocr_accuracy.py
 
-# HuggingFace fine-tuned (번호판 특화, 권장)
-pip install huggingface_hub
-python -c "
-from huggingface_hub import hf_hub_download; import shutil
-shutil.copy(hf_hub_download(
-    'morsetechlab/yolov11-license-plate-detection',
-    'lpr-finetune-v1x.pt'), 'yolo11x_plate.pt')
-"
+# 실시간 Ghost Detection 테스트
+python test_ghost_detection.py
 ```
 
-## 결과 디렉토리
+## 설치
 
-- `plate_results_v3/` - GUI 자동 저장 (최신)
-- `plate_results_v2/` - CLI 배치 결과
+```bash
+pip install -r requirements.txt
+```
 
-## 성능 목표
+### 의존성
 
-| 지표 | 현재 | 목표 |
-| --- | --- | --- |
-| Precision | ~72% | **98%** |
-| Recall | ~68% | **95%** |
-| 처리 속도 | ~8fps | **15fps** |
+- Python 3.10+
+- ultralytics (YOLO), opencv-python, numpy, Pillow
+- paddleocr, easyocr (OCR 앙상블)
+- torch, torchvision (CRNN 모델)
+- tkinter (GUI)
+
+## 모델 파일
+
+| 모델 | 용도 |
+|------|------|
+| `best.pt` | YOLO11x 번호판 전용 fine-tuned (mAP@50=98.4%) |
+| `yolo11x_plate.pt` | YOLO11x 번호판 전용 |
+| `plate_ocr_crnn.pth` | CRNN OCR 모델 (42MB) |
+| `yolo26n.pt` | YOLO26 nano fallback |
+| `yolo11n.pt` | YOLOv11 nano fallback |
+
+## 현재 성능
+
+| 테스트 | 결과 |
+|--------|------|
+| 정적 이미지 OCR 정확도 | **12/12 (100%)** |
+| 실시간 Ghost Detection | **5/5 (100%)** |
+
+## 테스트 데이터
+
+- `22/` — 번호판 이미지 12장 (파일명 = Ground Truth)
+- `movie/hiway.mp4` — 고속도로 실시간 테스트 영상
+
+## 알려진 한계
+
+- **CCTV급 소형 번호판** — 해상도 제약으로 OCR 정확도 저하 가능
+- **흰색/은색 번호판** — 그림자/음영에 의한 HSV 임계값 오판 가능성
+- **OCR 처리 시간** — CPU 기준 이미지당 5~16초 (GPU 미사용 시)
+
+## 라이선스
+
+이 프로젝트는 교육/연구 목적으로 개발되었습니다.
