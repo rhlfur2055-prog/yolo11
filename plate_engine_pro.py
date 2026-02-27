@@ -196,6 +196,10 @@ class PlateEngineConfig:
 
     # ── 인식 임계값 ──
     DETECT_CONF = 0.25          # YOLO 감지 임계값 (원거리/소형 번호판 재현율 향상)
+    ROI_X1 = 200
+    ROI_X2 = 900
+    ROI_Y1 = 300
+    ROI_Y2 = 700
     OCR_CONF = 0.40             # OCR 최소 신뢰도 (0.70→0.40, 부분인식 후보 유지)
 
     # ── 출력 필터링 임계값 ──
@@ -1460,8 +1464,14 @@ class PlateEnginePro:
         for det in detections[0].boxes:
             _rb = list(map(int, det.xyxy[0].tolist()))
             _rc = float(det.conf[0])
+            # ★ 영상 모드에서만 ROI 필터 적용 (정적 이미지는 해상도 다름)
+            if self.consecutive_required > 1:
+                cx = (_rb[0] + _rb[2]) / 2
+                cy = (_rb[1] + _rb[3]) / 2
+                if not (self.config.ROI_X1 <= cx <= self.config.ROI_X2 and self.config.ROI_Y1 <= cy <= self.config.ROI_Y2):
+                    continue
             _raw_boxes.append((_rb, _rc, det))
-        _raw_boxes.sort(key=lambda x: x[1], reverse=True)  # conf 높은 순
+        _raw_boxes.sort(key=lambda x: (x[0][2]-x[0][0])*(x[0][3]-x[0][1]), reverse=True)  # bbox 면적 큰 순
         _keep_dets = []
         for _rb, _rc, _det in _raw_boxes:
             _suppressed = False
