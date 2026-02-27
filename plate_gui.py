@@ -140,10 +140,10 @@ class PlateTracker:
 
     # ── 안정화 파라미터 ──
     # bbox EMA 평활화 계수 (0=이전 유지, 1=새 값 즉시 적용)
-    BBOX_SMOOTH_ALPHA = 0.4
+    BBOX_SMOOTH_ALPHA = 0.8
     # OCR 확인된 트랙의 표시 유지 프레임 수 (OCR 미수신 시에도 초록 박스 유지)
-    # ★ 실시간 카메라는 fps 불안정 → 15프레임(~0.5초)으로 깜빡임 방지
-    DISPLAY_HOLD_FRAMES = 15
+    # ★ 실시간 카메라: 너무 크면 이전 차량 잔존, 너무 작으면 깜빡임
+    DISPLAY_HOLD_FRAMES = 8
     # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
     GAP_TOLERANCE = 5
 
@@ -220,6 +220,7 @@ class PlateTracker:
                     track["confidence"] = 0
                     track["ocr_count"] = 0
                     track["det_data"] = {}
+                    track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
                 # ★ bbox 면적 비율 체크: 크기가 급변하면 다른 차량
                 old_bbox = track["bbox"]
@@ -231,6 +232,7 @@ class PlateTracker:
                     track["confidence"] = 0
                     track["ocr_count"] = 0
                     track["det_data"] = {}
+                    track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
                 # ★ bbox 중심 이동 거리 체크: 중심이 크게 점프하면 다른 차량
                 old_cx = (old_bbox[0] + old_bbox[2]) / 2
@@ -244,6 +246,7 @@ class PlateTracker:
                     track["confidence"] = 0
                     track["ocr_count"] = 0
                     track["det_data"] = {}
+                    track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
                 det_text = det.get("text", "")
                 det_conf = det.get("ocr_confidence", det.get("confidence", 0))
@@ -257,6 +260,7 @@ class PlateTracker:
                     track["confidence"] = 0
                     track["ocr_count"] = 0
                     track["det_data"] = {}
+                    track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
                 # ★ bbox EMA 평활화: 좌표 떨림 방지
                 alpha = self.BBOX_SMOOTH_ALPHA
