@@ -91,6 +91,102 @@ except Exception:
     fast_alpr = None
     HAS_FAST_ALPR = False
 
+# ── CRNN OCR 모델 (학습된 번호판 전용) ──
+try:
+    import torch as _torch
+    HAS_TORCH = True
+except Exception:
+    HAS_TORCH = False
+
+
+class _CRNNModel:
+    """학습된 CRNN 번호판 OCR 모델 래퍼."""
+
+    def __init__(self, model_path):
+        import torch
+        import torch.nn as nn
+
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
+        self.idx2char = checkpoint["idx2char"]
+        self.img_h = checkpoint.get("img_h", 64)
+        self.img_w = checkpoint.get("img_w", 256)
+        num_classes = checkpoint["num_classes"]
+        hidden = checkpoint.get("hidden_size", 256)
+        n_layers = checkpoint.get("num_layers", 2)
+
+        # CRNN 모델 구조 (train_plate_ocr.py와 동일)
+        class CRNN(nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.cnn = nn.Sequential(
+                    nn.Conv2d(1, 64, 3, 1, 1), nn.BatchNorm2d(64), nn.ReLU(True),
+                    nn.MaxPool2d(2, 2),
+                    nn.Conv2d(64, 128, 3, 1, 1), nn.BatchNorm2d(128), nn.ReLU(True),
+                    nn.MaxPool2d(2, 2),
+                    nn.Conv2d(128, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(True),
+                    nn.Conv2d(256, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(True),
+                    nn.MaxPool2d((2, 2), (2, 1), (0, 1)),
+                    nn.Conv2d(256, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU(True),
+                    nn.Conv2d(512, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU(True),
+                    nn.MaxPool2d((2, 2), (2, 1), (0, 1)),
+                    nn.Conv2d(512, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU(True),
+                    nn.MaxPool2d((2, 2), (2, 1), (0, 1)),
+                    nn.Conv2d(512, 512, (2, 1), 1, 0), nn.BatchNorm2d(512), nn.ReLU(True),
+                )
+                self.rnn = nn.LSTM(512, hidden, n_layers,
+                                   bidirectional=True, batch_first=True, dropout=0.2)
+                self.fc = nn.Linear(hidden * 2, num_classes)
+
+            def forward(self, x):
+                conv = self.cnn(x)
+                conv = conv.squeeze(2).permute(0, 2, 1)
+                rnn_out, _ = self.rnn(conv)
+                return self.fc(rnn_out).permute(1, 0, 2)
+
+        self.model = CRNN().to(self.device)
+        self.model.load_state_dict(checkpoint["model_state"])
+        self.model.eval()
+
+    def recognize(self, bgr_image):
+        """BGR 이미지 → (text, confidence)."""
+        import torch
+
+        # 전처리: 그레이스케일 → 리사이즈 → 패딩 → 정규화
+        gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY) if len(bgr_image.shape) == 3 else bgr_image
+        h, w = gray.shape[:2]
+        ratio = self.img_h / h
+        new_w = min(int(w * ratio), self.img_w)
+        gray = cv2.resize(gray, (new_w, self.img_h), interpolation=cv2.INTER_CUBIC)
+        if new_w < self.img_w:
+            pad = np.ones((self.img_h, self.img_w - new_w), dtype=np.uint8) * 255
+            gray = np.concatenate([gray, pad], axis=1)
+
+        tensor = torch.FloatTensor(gray.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)
+        tensor = tensor.to(self.device)
+
+        with torch.no_grad():
+            output = self.model(tensor)  # (T, 1, C)
+            probs = output.softmax(2)
+            max_probs, preds = probs.max(2)  # (T, 1)
+
+        # CTC greedy decode
+        chars = []
+        confs = []
+        prev = -1
+        for t in range(preds.size(0)):
+            p = preds[t, 0].item()
+            c = max_probs[t, 0].item()
+            if p != 0 and p != prev:
+                if p in self.idx2char:
+                    chars.append(self.idx2char[p])
+                    confs.append(c)
+            prev = p
+
+        text = "".join(chars)
+        conf = float(np.mean(confs)) if confs else 0.0
+        return text, conf
+
 
 class PlateEngineConfig:
     """엔진 설정"""
@@ -101,6 +197,16 @@ class PlateEngineConfig:
     # ── 인식 임계값 ──
     DETECT_CONF = 0.25          # YOLO 감지 임계값 (원거리/소형 번호판 재현율 향상)
     OCR_CONF = 0.40             # OCR 최소 신뢰도 (0.70→0.40, 부분인식 후보 유지)
+
+    # ── 출력 필터링 임계값 ──
+    OUTPUT_CONF_HIGH = 0.90     # ✅ HIGH 확정
+    OUTPUT_CONF_MEDIUM = 0.70   # ⚠️ MEDIUM (재확인 권장)
+    OUTPUT_CONF_LOW = 0.70      # ❌ 미만 → 폐기
+    MIN_BBOX_WIDTH = 50         # 최소 bbox 가로 px (미만 → 신뢰도 차감/거부)
+    MIN_BBOX_HEIGHT = 15        # 최소 bbox 세로 px
+    MIN_FRAME_COUNT = 2         # 확정 최소 프레임 수 (영상 모드)
+    TRACKER_IOU_THRESHOLD = 0.30  # IoU 기준 (미만 → 다른 차량)
+    TRACKER_TTL_FRAMES = 30       # 미감지 후 트랙 만료 프레임 수
 
     # ── MareArts/한국 번호판 정규식 완전판 ──
     KR_PATTERNS = [
@@ -595,6 +701,60 @@ class PlateValidator:
         clean = self._normalize_for_validation(text)
         return self.min_len <= len(clean) <= self.max_len
 
+    # ── 번호판 유형/차량 유형 분류 ──
+
+    # 번호판 허용 한글 (차량 용도별)
+    _HANGUL_COMMERCIAL = set('아바사자')         # 영업용 (택시, 버스 등)
+    _HANGUL_RENTAL = set('하허호')               # 렌터카
+
+    @staticmethod
+    def classify_plate_type(text):
+        """번호판 유형 분류 → str"""
+        # 전기차: 3자리(700~799) + 한글 + 4자리
+        m = re.match(r'^(\d{3})([가-힣])(\d{4})$', text)
+        if m:
+            prefix = int(m.group(1))
+            if 700 <= prefix <= 799:
+                return "전기차"
+            elif 100 <= prefix <= 699:
+                return "신형"
+        # 영업용: 지역명 + 2자리 + 영업용한글(아바사자) + 4자리
+        m = re.match(r'^([가-힣]{2,3})(\d{2})([아바사자])(\d{4})$', text)
+        if m:
+            return "영업용"
+        # 지역명 구형: 지역명 + 2자리 + 한글 + 4자리
+        m = re.match(r'^([가-힣]{2,3})(\d{2})([가-힣])(\d{4})$', text)
+        if m:
+            return "지역명_구형"
+        # 구형: 2자리 + 한글 + 4자리
+        m = re.match(r'^(\d{2})([가-힣])(\d{4})$', text)
+        if m:
+            return "구형"
+        return "기타"
+
+    @classmethod
+    def classify_vehicle_type(cls, text):
+        """차량 용도 분류 → str"""
+        # 번호판에서 한글 문자 추출 (지역명 제외)
+        m = re.search(r'\d([가-힣])\d', text)
+        if m:
+            hangul = m.group(1)
+            if hangul in cls._HANGUL_COMMERCIAL:
+                return "영업용"
+            if hangul in cls._HANGUL_RENTAL:
+                return "렌터카"
+        return "자가용"
+
+    @staticmethod
+    def get_confidence_level(conf):
+        """신뢰도 등급 분류 → str"""
+        if conf >= PlateEngineConfig.OUTPUT_CONF_HIGH:
+            return "HIGH"
+        elif conf >= PlateEngineConfig.OUTPUT_CONF_MEDIUM:
+            return "MEDIUM"
+        else:
+            return "LOW"
+
 
 class HangulClassifier:
     """번호판 한글 전용 분류기 — 초성 교차검증 방식
@@ -636,8 +796,105 @@ class HangulClassifier:
         """(초성, 중성, 종성) → 한글 음절"""
         return chr(0xAC00 + ini * 21 * 28 + med * 28 + fin)
 
-    def check_override(self, voted_hg, crop_bgr, paddle_engine):
-        """투표 결과 한글의 초성을 PaddleOCR 크롭 인식으로 교차검증.
+    @staticmethod
+    def _structural_bieup_check(crop_bgr):
+        """형태학적 구조 분석으로 ㅂ/ㅁ 구분.
+
+        ㅂ: 자음 영역에 3개 이상의 수평 바 (상단+중단+하단) + 높은 픽셀 밀도
+        ㅁ: 자음 영역에 2개의 수평 바 (상단+하단) + 낮은 픽셀 밀도
+
+        Returns: True if structural evidence suggests ㅂ, False otherwise
+        """
+        try:
+            gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
+            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
+            hh, hw = binary.shape
+            if hh < 20 or hw < 20:
+                return False
+
+            # 수직 프로젝션으로 자음 영역 열 범위 탐색
+            v_proj = np.sum(binary > 0, axis=0)
+            v_threshold = hh * 0.15
+
+            # 연속 high-value 열 그룹 찾기 (자음 영역)
+            groups = []
+            in_group = False
+            g_start = -1
+            for c in range(hw):
+                if v_proj[c] >= v_threshold:
+                    if not in_group:
+                        g_start = c
+                        in_group = True
+                else:
+                    if in_group:
+                        groups.append((g_start, c - 1))
+                        in_group = False
+            if in_group:
+                groups.append((g_start, hw - 1))
+
+            if not groups:
+                return False
+
+            # 가장 넓은 열 그룹 = 자음 본체 (보통 자음이 가장 넓음)
+            # 단, 최소 폭 8px 이상인 그룹만 고려
+            valid_groups = [(s, e) for s, e in groups if (e - s + 1) >= 8]
+            if not valid_groups:
+                return False
+            cons_start, cons_end = max(valid_groups, key=lambda g: g[1] - g[0])
+            cons_region = binary[:, cons_start:cons_end + 1]
+            ch, cw = cons_region.shape
+
+            # 자음 영역의 수평 프로젝션 (행별 흰 픽셀 수)
+            h_proj = np.sum(cons_region > 0, axis=1)
+
+            # 수평 바 감지 (h_proj > 60% 자음 폭)
+            bar_threshold = cw * 0.55
+            bars = []
+            in_bar = False
+            bar_start = -1
+            for r in range(ch):
+                if h_proj[r] >= bar_threshold:
+                    if not in_bar:
+                        bar_start = r
+                        in_bar = True
+                else:
+                    if in_bar:
+                        bars.append((bar_start, r - 1))
+                        in_bar = False
+            if in_bar:
+                bars.append((bar_start, ch - 1))
+
+            # 자음 영역만 추출: 상단 60% 이내의 바만 (하단은 모음 ㅜ/ㅗ)
+            cons_height_limit = int(ch * 0.55)
+            cons_bars = [(s, e) for s, e in bars if s < cons_height_limit]
+
+            # 판정 기준 1: 자음 상반부에 3+ 바 → ㅂ 가능성 매우 높음
+            if len(cons_bars) >= 3:
+                return True
+
+            # 판정 기준 2: 자음 상반부에 2개 바가 있고, 간격이 좁으면 ㅂ
+            # (ㅂ의 상단바+중단바 = 좁은 간격, ㅁ의 상단바+하단바 = 넓은 간격)
+            if len(cons_bars) == 2:
+                bar1_end = cons_bars[0][1]
+                bar2_start = cons_bars[1][0]
+                gap = bar2_start - bar1_end - 1
+                bar_span = cons_bars[1][1] - cons_bars[0][0] + 1
+                # ㅂ: 두 바 사이 간격이 전체 높이의 25% 이하
+                if bar_span > 0 and gap < bar_span * 0.25:
+                    return True
+
+            # 판정 기준 3: 픽셀 밀도 (자음 영역 상반부)
+            cons_upper = cons_region[:cons_height_limit, :]
+            density = np.sum(cons_upper > 0) / max(cons_upper.size, 1)
+            if density > 0.50:
+                return True
+
+            return False
+        except Exception:
+            return False
+
+    def check_override(self, voted_hg, crop_bgr, paddle_engine, ocr_engines=None):
+        """투표 결과 한글의 초성을 PaddleOCR+Tesseract 크롭 인식으로 교차검증.
 
         Returns: (corrected_hangul, changed: bool)
         """
@@ -687,6 +944,22 @@ class HangulClassifier:
             except Exception:
                 pass
 
+        # ★ Tesseract 초성 증거 수집 (PaddleOCR과 다른 인식 모델)
+        if ocr_engines and 'tesseract' in ocr_engines and HAS_TESSERACT:
+            for v in variants:
+                try:
+                    gray = cv2.cvtColor(v, cv2.COLOR_BGR2GRAY) if len(v.shape) == 3 else v
+                    # PSM 10 = single character (한글 1자 크롭)
+                    text = pytesseract.image_to_string(
+                        gray, config='--oem 3 --psm 10 -l kor'
+                    )
+                    for ch in text.strip():
+                        d = self._decompose(ch)
+                        if d:
+                            crop_initials.append(d[0])
+                except Exception:
+                    pass
+
         if not crop_initials:
             return voted_hg, False
 
@@ -707,6 +980,13 @@ class HangulClassifier:
             new_hg = self._compose(target_ini, vd[1], vd[2])
             if new_hg in PlateValidator._VALID_PLATE_HANGUL:
                 return new_hg, True
+
+        # ★ OCR 증거 부족 시 구조 분석 fallback (ㅁ→ㅂ만 적용)
+        if vd[0] == 6 and evidence == 0:
+            if self._structural_bieup_check(crop_bgr):
+                new_hg = self._compose(target_ini, vd[1], vd[2])
+                if new_hg in PlateValidator._VALID_PLATE_HANGUL:
+                    return new_hg, True
 
         return voted_hg, False
 
@@ -801,6 +1081,100 @@ def _resolve_plate_model(config: "PlateEngineConfig") -> Path:
     return None
 
 
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# PlateTracker: IoU 기반 차량 추적 + TTL 프레임 만료
+#   → Ghost Detection (이전 차량 잔상) 방지
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+class PlateTracker:
+    """IoU 기반 번호판 트래커.
+
+    각 트랙은 bbox 위치로 차량을 식별하며, IoU < threshold 이면
+    다른 차량으로 판단하여 이전 결과를 초기화합니다.
+
+    TTL(Time-To-Live) 프레임 이내에 재감지되지 않으면 트랙을 만료시켜
+    ghost detection (이전 차량 번호가 다음 차량에 표시) 을 방지합니다.
+    """
+
+    def __init__(self, iou_threshold=0.30, ttl_frames=30):
+        self.iou_threshold = iou_threshold
+        self.ttl_frames = ttl_frames
+        self.tracks = []  # list of track dicts
+        self._frame_id = 0
+
+    def _bbox_iou(self, a, b):
+        """두 bbox [x1,y1,x2,y2] 간 IoU 계산"""
+        x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
+        x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
+        inter = max(0, x2 - x1) * max(0, y2 - y1)
+        area_a = (a[2] - a[0]) * (a[3] - a[1])
+        area_b = (b[2] - b[0]) * (b[3] - b[1])
+        union = area_a + area_b - inter
+        return inter / union if union > 0 else 0
+
+    def begin_frame(self):
+        """새 프레임 시작 — 프레임 카운터 증가, 트랙 seen 플래그 리셋"""
+        self._frame_id += 1
+        for trk in self.tracks:
+            trk["_seen"] = False
+
+    def match(self, bbox):
+        """bbox와 가장 높은 IoU를 가진 트랙 매칭.
+
+        Returns:
+            track (dict): 매칭된 트랙 (새 트랙이면 새로 생성)
+            is_new (bool): 새 트랙 여부 (이전 차량과 다른 위치)
+        """
+        best_iou = 0
+        best_trk = None
+        for trk in self.tracks:
+            iou = self._bbox_iou(bbox, trk["bbox"])
+            if iou > best_iou:
+                best_iou = iou
+                best_trk = trk
+
+        if best_iou >= self.iou_threshold and best_trk is not None:
+            # 기존 트랙 갱신
+            best_trk["bbox"] = bbox
+            best_trk["consecutive"] += 1
+            best_trk["last_frame"] = self._frame_id
+            best_trk["_seen"] = True
+            return best_trk, False
+        else:
+            # 새 트랙 생성 (다른 차량)
+            new_trk = {
+                "bbox": bbox,
+                "texts": defaultdict(int),
+                "consecutive": 1,
+                "best_conf": 0,
+                "recorded": False,
+                "last_frame": self._frame_id,
+                "_seen": True,
+            }
+            self.tracks.append(new_trk)
+            return new_trk, True
+
+    def end_frame(self):
+        """프레임 종료 — 미감지 트랙 처리 + TTL 만료 트랙 제거"""
+        alive = []
+        for trk in self.tracks:
+            if trk["_seen"]:
+                alive.append(trk)
+            else:
+                # 이번 프레임에 미감지 → 연속 카운트 리셋
+                trk["consecutive"] = 0
+                # TTL 이내면 유지, 초과면 제거
+                frames_since = self._frame_id - trk["last_frame"]
+                if frames_since <= self.ttl_frames:
+                    alive.append(trk)
+                # else: 만료 → 제거 (ghost detection 방지)
+        self.tracks = alive
+
+    def reset(self):
+        """모든 트랙 초기화 — 이미지 단독 테스트 시 사용"""
+        self.tracks.clear()
+        self._frame_id = 0
+
+
 class PlateEnginePro:
     """
     상용급 번호판 인식 엔진 (평가기준 반영)
@@ -870,6 +1244,17 @@ class PlateEnginePro:
                 print(f"[엔진] PaddleOCR 초기화 실패: {e}")
         if HAS_EASYOCR:
             self.ocr_engines["easyocr"] = easyocr.Reader(["ko", "en"], gpu=True)
+        if HAS_TESSERACT:
+            try:
+                # 한국어 언어팩 확인
+                _tess_langs = pytesseract.get_languages()
+                if 'kor' in _tess_langs:
+                    self.ocr_engines["tesseract"] = "tesseract"
+                else:
+                    print("[엔진] Tesseract: 한국어 언어팩(kor) 없음 — 건너뜀")
+            except Exception:
+                # get_languages 실패 시에도 일단 추가 (런타임에서 처리)
+                self.ocr_engines["tesseract"] = "tesseract"
         # 한국 번호판 허용 문자 (EasyOCR allowlist)
         self._kr_allowlist = (
             "0123456789"
@@ -882,6 +1267,16 @@ class PlateEnginePro:
             "경기강원충북충남전북전남경북경남제주"
             "전기외교"
         )
+        # ── CRNN 학습 모델 로드 (별도 실행, 전처리 루프 밖) ──
+        self._crnn_model = None
+        _crnn_path = Path(__file__).resolve().parent / "plate_ocr_crnn.pth"
+        if HAS_TORCH and _crnn_path.exists():
+            try:
+                self._crnn_model = _CRNNModel(str(_crnn_path))
+                print(f"[엔진] CRNN 모델 로드: {_crnn_path}")
+            except Exception as e:
+                print(f"[엔진] CRNN 모델 로드 실패: {e}")
+
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
 
         # ★ 한글 전용 분류기 (템플릿 매칭 방식)
@@ -895,10 +1290,14 @@ class PlateEnginePro:
             self.config, "CONSECUTIVE_FRAMES_REQUIRED", 3
         )
         self.consecutive_required = default_consecutive
-        # ── 위치 기반 연속 감지 (bbox IoU로 같은 번호판 추적) ──
-        # list of {"bbox": [x1,y1,x2,y2], "texts": {text: count}, "consecutive": int, ...}
-        self._pos_trackers = []
-        self._POS_IOU_THRESHOLD = 0.15  # IoU 15% 이상이면 같은 번호판
+        # ── PlateTracker: IoU 기반 차량 추적 + TTL 프레임 만료 ──
+        self._tracker = PlateTracker(
+            iou_threshold=self.config.TRACKER_IOU_THRESHOLD,
+            ttl_frames=self.config.TRACKER_TTL_FRAMES,
+        )
+        # 하위 호환: 기존 _pos_trackers 참조를 tracker.tracks로 연결
+        self._pos_trackers = self._tracker.tracks
+        self._POS_IOU_THRESHOLD = self.config.TRACKER_IOU_THRESHOLD
         # 멀티프레임: 최근 5프레임 크롭 저장 (번호판 너비 < 80px 시 사용)
         self._multiframe_buffer = deque(maxlen=PlateEngineConfig.MULTIFRAME_SIZE)
         # 리테스트/벤치마크용 통계
@@ -916,7 +1315,8 @@ class PlateEnginePro:
     def reset_state(self):
         """내부 캐시 초기화 — 이미지 단독 테스트 시 이전 결과 오염 방지"""
         self.recent_plates.clear()
-        self._pos_trackers.clear()
+        self._tracker.reset()
+        self._pos_trackers = self._tracker.tracks
         self._multiframe_buffer.clear()
         self.stats["frames_processed"] = 0
         self.stats["plates_shown"] = 0
@@ -941,6 +1341,7 @@ class PlateEnginePro:
         """
         results = []
         self.stats["frames_processed"] += 1
+        self._tracker.begin_frame()
         # ★ 해상도에 따라 imgsz 동적 조정 (고해상도 영상에서 소형 번호판 탐지 향상)
         _fh, _fw = frame.shape[:2]
         if _fw >= 3840:      # 4K
@@ -977,8 +1378,26 @@ class PlateEnginePro:
             # ★ 최소 크기 필터 (너무 작은 탐지는 노이즈)
             det_w = ox2 - ox1
             det_h = oy2 - oy1
-            if det_w < 15 or det_h < 8:
+            if det_w < self.config.MIN_BBOX_WIDTH or det_h < self.config.MIN_BBOX_HEIGHT:
                 continue
+
+            # ★ bbox 가로세로 비율 검증 (엠블럼/그릴/간판 제거)
+            _aspect = det_w / max(det_h, 1)
+            _is_1line = 2.0 <= _aspect <= 5.5   # 1줄 번호판
+            _is_2line = 0.8 <= _aspect < 2.0    # 2줄 번호판
+            if not (_is_1line or _is_2line):
+                continue  # 번호판 비율 아님 → 엠블럼/그릴/간판 가능성
+
+            # ★ bbox 위치 검증 (이미지 상단 10% / 하단 5% → 간판/노면)
+            if oy1 < ch_full * 0.10:
+                continue  # 상단 영역 (간판/표지판 의심)
+            if oy2 > ch_full * 0.95:
+                continue  # 하단 영역 (노면 의심)
+
+            # ★ bbox 크기 기반 신뢰도 페널티 (50~80px → conf × 0.95)
+            _bbox_conf_penalty = 1.0
+            if det_w < 80:
+                _bbox_conf_penalty = 0.95
 
             # [평가기준 20점] ROI (Region of Interest) + CROP: 번호판 영역 좌표로 관심영역 설정 후 크롭
             margin_x = int((ox2 - ox1) * 0.35)  # ★ 좌우 마진 확대 (0.25→0.35, 가장자리 문자 보존)
@@ -1035,6 +1454,36 @@ class PlateEnginePro:
                     cv2.BORDER_CONSTANT, value=(255, 255, 255)
                 )
                 _clf_scale, _clf_pad = scale, pad  # 한글 분류기용 저장
+
+            # ★ 번호판 색상 검증 (번호판 바탕색으로 오감지 필터링)
+            _color_conf_penalty = 1.0
+            try:
+                _hsv_check = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                _h_avg = np.mean(_hsv_check[:, :, 0])
+                _s_avg = np.mean(_hsv_check[:, :, 1])
+                _v_avg = np.mean(_hsv_check[:, :, 2])
+                _is_white = _s_avg < 50 and _v_avg > 80        # 흰색/은색 바탕 (자가용, 음영 포함)
+                _is_yellow = 15 < _h_avg < 35 and _s_avg > 60  # 노란색 (영업용)
+                _is_green = 35 < _h_avg < 85 and _s_avg > 40   # 초록색 (구형/영업용)
+                _is_blue = 90 < _h_avg < 130 and _s_avg > 40   # 파란색 (전기차)
+                if not (_is_white or _is_yellow or _is_green or _is_blue):
+                    _color_conf_penalty = 0.85  # 판별 불가 → 15% 페널티
+            except Exception:
+                pass
+
+            # ★ CRNN 학습 모델: 원본 ROI에서 직접 실행 (전처리 루프 밖)
+            _crnn_candidates = []
+            if self._crnn_model is not None:
+                try:
+                    crnn_text, crnn_conf = self._crnn_model.recognize(roi)
+                    if crnn_text and crnn_conf > 0.3:
+                        cleaned = self.validator.clean_ocr_text(crnn_text)
+                        if self.validator.is_valid_length(cleaned):
+                            is_valid, final_text = self.validator.validate(cleaned)
+                            if is_valid:
+                                _crnn_candidates.append((final_text, crnn_conf))
+                except Exception:
+                    pass
 
             # ★ 녹색 번호판 감지 (HSV 분석) — extra_crops 및 OCR 루프 전에 판정
             _is_green_plate = False
@@ -1241,6 +1690,30 @@ class PlateEnginePro:
                                 for _ in range(weight):
                                     all_candidates.append((final, avg_c))
 
+            # ★ CRNN 결과를 all_candidates에 추가 (합의 기반 가중)
+            # CRNN은 12장 학습 모델이므로 미학습 번호판에서 오인식 가능
+            # → 기존 OCR 후보와 숫자 부분이 겹치면 높은 가중치, 아니면 낮은 가중치
+            for ct, cc in _crnn_candidates:
+                _crnn_weight = 2  # 기본: 소수 투표 (미학습 번호판 안전장치)
+                if all_candidates:
+                    # CRNN 결과에서 숫자 부분 추출
+                    _crnn_digits = re.sub(r'[^0-9]', '', ct)
+                    # 기존 OCR 후보 중 숫자 부분이 일치하는 비율 계산
+                    _digit_matches = 0
+                    for _oc_text, _ in all_candidates:
+                        _oc_digits = re.sub(r'[^0-9]', '', _oc_text)
+                        if _crnn_digits and _oc_digits:
+                            # 뒷 4자리 숫자 일치 확인 (가장 안정적인 부분)
+                            if _crnn_digits[-4:] == _oc_digits[-4:]:
+                                _digit_matches += 1
+                    # 숫자 합의율이 20% 이상이면 CRNN 신뢰 → 고가중
+                    if _digit_matches > len(all_candidates) * 0.2:
+                        _crnn_weight = 40  # 학습 데이터와 OCR 합의 → 최우선
+                    elif _digit_matches > 0:
+                        _crnn_weight = 10  # 부분 합의
+                for _ in range(_crnn_weight):
+                    all_candidates.append((ct, cc))
+
             # ── 위치별 분리 투표: 한글·숫자 각각 투표 후 합성 ──
             # 전체 문자열 투표만 하면 한글 1자 차이로 표 분산 → 정확도 하락
             # 예: "55저9392" 10표, "55가9392" 8표, "55아9392" 5표
@@ -1305,7 +1778,8 @@ class PlateEnginePro:
                             if _hx2 > _hx1 + 10 and _hy2 > _hy1 + 10:
                                 _hcrop = roi_for_ocr[_hy1:_hy2, _hx1:_hx2]
                                 _new_hg, _changed = self._hangul_clf.check_override(
-                                    best_hg, _hcrop, self.ocr_engines['paddleocr']
+                                    best_hg, _hcrop, self.ocr_engines['paddleocr'],
+                                    self.ocr_engines
                                 )
                                 if _changed:
                                     best_hg = _new_hg
@@ -1423,29 +1897,18 @@ class PlateEnginePro:
                                     break
 
             if best_text and best_conf >= self.config.OCR_CONF:
-                # ── 위치 기반 연속 감지 (IoU 매칭) ──
+                # ★ bbox 크기 + 색상 기반 신뢰도 페널티 적용
+                best_conf *= _bbox_conf_penalty * _color_conf_penalty
+
+                # ★ 신뢰도 최종 필터: OUTPUT_CONF_LOW(0.70) 미만 → 폐기
+                if best_conf < self.config.OUTPUT_CONF_LOW:
+                    self.stats["filtered_by_confidence"] = self.stats.get("filtered_by_confidence", 0) + 1
+                    continue
+
+                # ── PlateTracker: IoU 기반 차량 추적 (ghost detection 방지) ──
                 cur_bbox = [ox1, oy1, ox2, oy2]
-                matched_trk = None
-                best_iou = 0
-                for trk in self._pos_trackers:
-                    iou = self._bbox_iou(cur_bbox, trk["bbox"])
-                    if iou > best_iou:
-                        best_iou = iou
-                        matched_trk = trk
-
-                if best_iou < self._POS_IOU_THRESHOLD or matched_trk is None:
-                    # 새로운 번호판 위치
-                    matched_trk = {
-                        "bbox": cur_bbox, "texts": defaultdict(int),
-                        "consecutive": 0, "best_conf": 0, "recorded": False,
-                    }
-                    self._pos_trackers.append(matched_trk)
-
-                matched_trk["bbox"] = cur_bbox  # bbox 위치 갱신
-                matched_trk["consecutive"] += 1
-                matched_trk["last_seen"] = time.time()
+                matched_trk, is_new_track = self._tracker.match(cur_bbox)
                 matched_trk["texts"][best_text] += 1
-                matched_trk["_seen"] = True  # 이번 프레임에 봄
 
                 # 해당 위치에서 가장 많이 읽힌 텍스트 사용
                 top_text = max(matched_trk["texts"], key=matched_trk["texts"].get)
@@ -1474,29 +1937,64 @@ class PlateEnginePro:
                             pass
                     self.stats["plates_shown"] += 1
                     self.stats["confidences"].append(top_conf)
-                    # [평가기준 20점] 차량번호 인식 표시
+
+                    # ★ 프레임 카운트 (해당 위치에서 해당 텍스트가 읽힌 횟수)
+                    _frame_count = matched_trk["texts"].get(top_text, 1)
+                    # ★ 신뢰도 등급 + 프레임 보너스
+                    _adj_conf = min(top_conf + (0.02 if _frame_count >= 2 else 0), 1.0)
+                    _conf_level = self.validator.get_confidence_level(_adj_conf)
+                    # ★ 영상 모드: 1회만 등장 시 "미확정" 표시
+                    if self.consecutive_required > 1 and _frame_count < self.config.MIN_FRAME_COUNT:
+                        _conf_level += "(미확정)"
+
+                    # ★ bbox 면적 및 번호판 줄 수 판단
+                    _bbox_w = ox2 - ox1
+                    _bbox_h = oy2 - oy1
+                    _bbox_area = _bbox_w * _bbox_h
+                    _aspect = _bbox_w / max(_bbox_h, 1)
+                    _plate_lines = 1 if _aspect > 2.5 else 2
+
+                    # ★ 번호판 색상 감지 (ROI의 HSV 분석)
+                    _plate_color = "흰색바탕_검은글씨"  # 기본값
+                    if _is_green_plate:
+                        _plate_color = "초록색바탕_흰글씨"
+                    else:
+                        try:
+                            _hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
+                            _h_mean = np.mean(_hsv_roi[:, :, 0])
+                            _s_mean = np.mean(_hsv_roi[:, :, 1])
+                            _v_mean = np.mean(_hsv_roi[:, :, 2])
+                            if 20 < _h_mean < 35 and _s_mean > 60:
+                                _plate_color = "노란색바탕_검은글씨"
+                            elif 95 < _h_mean < 130 and _s_mean > 40:
+                                _plate_color = "파란색바탕_흰글씨"
+                        except Exception:
+                            pass
+
+                    # [평가기준 20점] 차량번호 인식 표시 (강화 출력 형식)
                     results.append({
+                        # ── 기존 호환 필드 (plate_gui.py 등) ──
                         "plate": top_text,
                         "confidence": top_conf,
                         "bbox": [ox1, oy1, ox2, oy2],
                         "is_alert": bool(is_alert),
                         "alert_info": alert_info,
+                        # ── 강화 필드 (LPR 프롬프트 규격) ──
+                        "plate_number": top_text,
+                        "confidence_level": _conf_level,
+                        "plate_type": self.validator.classify_plate_type(top_text),
+                        "vehicle_type": self.validator.classify_vehicle_type(top_text),
+                        "plate_lines": _plate_lines,
+                        "plate_color": _plate_color,
+                        "bbox_area": _bbox_area,
+                        "frame_count": _frame_count,
+                        "is_valid_format": True,
+                        "rejection_reason": None,
                     })
 
-        # 이번 프레임에 없던 위치의 번호판 tracker 정리
-        new_trackers = []
-        for trk in self._pos_trackers:
-            if trk.get("_seen"):
-                trk["_seen"] = False
-                new_trackers.append(trk)
-            else:
-                trk["consecutive"] = 0
-                trk["texts"].clear()
-                trk["recorded"] = False
-                # 오래된 tracker 제거 (1초 이상 미감지)
-                if time.time() - trk.get("last_seen", 0) < 1.0:
-                    new_trackers.append(trk)
-        self._pos_trackers = new_trackers
+        # ── PlateTracker: 프레임 종료 (미감지 트랙 처리 + TTL 만료) ──
+        self._tracker.end_frame()
+        self._pos_trackers = self._tracker.tracks
 
         # 기존 text 기반 리셋도 유지
         for key in list(self.recent_plates.keys()):
@@ -1565,6 +2063,28 @@ class PlateEnginePro:
                             avg_conf = float(np.mean(confs2))
 
                     return combined, avg_conf
+            elif engine_name == "tesseract":
+                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
+                # PSM 7 = single text line (번호판 1줄)
+                custom_config = r'--oem 3 --psm 7 -l kor+eng'
+                text = pytesseract.image_to_string(gray, config=custom_config)
+                text = text.strip().replace('\n', '').replace(' ', '')
+                if text:
+                    try:
+                        data = pytesseract.image_to_data(
+                            gray, config=custom_config,
+                            output_type=pytesseract.Output.DICT
+                        )
+                        confs = [int(c) for c in data['conf'] if int(c) > 0]
+                        conf = float(np.mean(confs)) / 100.0 if confs else 0.5
+                    except Exception:
+                        conf = 0.5
+                    return text, conf
+            elif engine_name == "crnn":
+                # CRNN은 process_frame에서 직접 호출 (여기 도달하면 안 됨)
+                text, conf = engine.recognize(image)
+                if text:
+                    return text, conf
         except Exception:
             pass
         return "", 0.0
