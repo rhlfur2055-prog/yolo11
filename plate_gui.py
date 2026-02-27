@@ -142,12 +142,12 @@ class PlateTracker:
     # bbox EMA 평활화 계수 (0=이전 유지, 1=새 값 즉시 적용)
     BBOX_SMOOTH_ALPHA = 0.4
     # OCR 확인된 트랙의 표시 유지 프레임 수 (OCR 미수신 시에도 초록 박스 유지)
-    # ★ 너무 크면 지나간 차량이 화면에 잔존 → 10프레임(~0.3초)이 적정
-    DISPLAY_HOLD_FRAMES = 10
+    # ★ 실시간 카메라는 fps 불안정 → 15프레임(~0.5초)으로 깜빡임 방지
+    DISPLAY_HOLD_FRAMES = 15
     # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
     GAP_TOLERANCE = 5
 
-    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 15):
+    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 20):
         self.iou_threshold = iou_threshold
         self.max_ttl = max_ttl
         self.tracks: dict[int, dict] = {}  # track_id → track 정보
@@ -1004,30 +1004,7 @@ class PlateGUIApp(tk.Tk):
                     # ── PlateTracker: Ghost Detection 방지 ──
                     tracked = self._plate_tracker.update(validated, frame_idx)
 
-                    # ★ 기존 확정 텍스트 보호 — engine regression/빈 결과 대응
-                    # 조건: 기존에 Phase 2 확정 결과가 있고, 새 결과에 Phase 2가 없을 때
-                    #   → engine이 일시적으로 인식 실패해도 확정 텍스트 유지
-                    _existing_valid = [d for d in self._latest_detections
-                                       if d.get("is_valid_plate") and d.get("text")]
-                    _new_has_valid = any(d.get("is_valid_plate") for d in tracked)
-                    if _existing_valid and not _new_has_valid:
-                        # 기존 확정 결과 유지 (새 bbox 위치만 반영)
-                        tracked = self._latest_detections
-                    elif _existing_valid and _new_has_valid:
-                        # 양쪽 다 Phase 2: 새 결과에 없는 기존 확정 트랙 보존
-                        _new_bboxes = [d.get("bbox", []) for d in tracked
-                                       if d.get("is_valid_plate")]
-                        for _ev in _existing_valid:
-                            _ev_bbox = _ev.get("bbox", [])
-                            if len(_ev_bbox) < 4:
-                                continue
-                            # 새 결과와 겹치지 않는 기존 확정 → 병합 유지
-                            _overlaps = any(
-                                self._plate_tracker.calculate_iou(_ev_bbox, nb) >= 0.3
-                                for nb in _new_bboxes if len(nb) >= 4
-                            )
-                            if not _overlaps:
-                                tracked.append(_ev)
+                    # ★ 엔진/트래커 결과를 그대로 반영 (사라진 차 즉시 제거)
                     self._latest_detections = tracked
 
                     if data["process_ms"] > 0:
