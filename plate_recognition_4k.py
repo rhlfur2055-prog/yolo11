@@ -48,28 +48,14 @@ import numpy as np
 # YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
-
-# 모델 우선순위 (위에서부터 먼저 찾으면 사용)
-_MODEL_PRIORITY = [
-    "yolo26n.pt",          # ★ YOLO26n - 최신 경량 (번호판 전용 fine-tune 필요)
-    "yolo26s.pt",          # ★ YOLO26s - 소형
-    "yolo11x_plate.pt",    # YOLOv11x fine-tuned (mAP@50=98.4%)
-    "yolo11n_plate.pt",    # YOLOv11n 경량
-    "yolo26.pt",           # 기존 프로젝트 모델
-    "yolo11n.pt",          # COCO fallback
-    "yolov8n.pt",         # 최후 fallback
-]
+from config import PathConfig, ThresholdConfig, OCRConfig, DisplayConfig
 
 def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
     from ultralytics import YOLO
-    for m in _MODEL_PRIORITY:
-        if _os.path.exists(m):
-            print(f"[YOLO26] 모델 로드: {m}")
-            return YOLO(m)
-    # 없으면 YOLO26n 자동 다운로드 (ultralytics에서)
-    print("[YOLO26] yolo26n.pt 자동 다운로드 중...")
-    return YOLO("yolo26n.pt")
+    best = PathConfig.find_best_model()
+    print(f"[YOLO26] 모델 로드: {best}")
+    return YOLO(best)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class NumpyEncoder(json.JSONEncoder):
     def default(self, obj):
@@ -83,109 +69,64 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 기본 설정값
+# 기본 설정값 (config.py 참조)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# -- 모델 우선순위 --
-# 0순위: 로컬 yolo26.engine (TensorRT FP16, 최고 속도)
-# 1순위: 로컬 yolo26.onnx (ONNX Runtime GPU, 2~3배 빠름)
-# 2순위: HuggingFace 번호판 전용 (morsetechlab/yolov11-license-plate-detection)
-# 3순위: 로컬 yolo26.pt (자동 판별: 번호판 or COCO)
-# 4순위: yolo11n.pt 차량 탐지 폴백
-HF_PLATE_REPO: str = "morsetechlab/yolov11-license-plate-detection"
-HF_PLATE_FILE: str = "license-plate-finetune-v1m.pt"
-LOCAL_ENGINE_MODEL: str = "yolo26.engine"
-LOCAL_ONNX_MODEL: str = "yolo26.onnx"
-LOCAL_PLATE_MODEL: str = "yolo26.pt"
-DEFAULT_PLATE_MODEL_SIZE: str = "n"
+# -- 모델 경로 (PathConfig) --
+HF_PLATE_REPO: str = PathConfig.HF_PLATE_REPO
+HF_PLATE_FILE: str = PathConfig.HF_PLATE_FILE
+LOCAL_ENGINE_MODEL: str = PathConfig.YOLO_ENGINE
+LOCAL_ONNX_MODEL: str = PathConfig.YOLO_ONNX
+LOCAL_PLATE_MODEL: str = PathConfig.YOLO_FALLBACK
+DEFAULT_PLATE_MODEL_SIZE: str = PathConfig.DEFAULT_MODEL_SIZE
 
 # -- COCO 폴백 모델 --
-COCO_MODEL: str = "yolo11n.pt"
-VEHICLE_CLASS_IDS: set[int] = {2, 3, 5, 7}  # car, motorcycle, bus, truck
+COCO_MODEL: str = PathConfig.YOLO_COCO_FALLBACK
+VEHICLE_CLASS_IDS: set[int] = ThresholdConfig.VEHICLE_CLASS_IDS
 
-# -- 탐지 설정 --
-DEFAULT_CONFIDENCE: float = 0.3
-MIN_VEHICLE_WIDTH: int = 200   # COCO 폴백 시 최소 차량 너비 (px)
-MIN_VEHICLE_HEIGHT: int = 150  # COCO 폴백 시 최소 차량 높이 (px)
-MIN_PLATE_WIDTH: int = 40      # 번호판 직접 탐지 시 최소 너비 (60→40, 소형 번호판 허용)
-MIN_PLATE_HEIGHT: int = 15     # 번호판 직접 탐지 시 최소 높이 (20→15, 소형 번호판 허용)
-PLATE_MIN_ASPECT: float = 1.3  # 번호판 최소 가로세로비 (트럭 2줄 번호판 허용: 2.0→1.3)
-PLATE_MAX_ASPECT: float = 5.0  # 번호판 최대 가로세로비 (개선1: 6.5→5.0)
-PLATE_MAX_AREA_RATIO: float = 0.05  # 프레임 면적 대비 번호판 최대 비율
-MAX_PLATE_TEXT_LEN: int = 12   # 번호판 OCR 최대 글자수 (초과 시 폐기)
-MIN_OCR_CONFIDENCE: float = 0.45  # OCR 최소 신뢰도 하향 (0.6→0.45, 부분인식 후보 유지)
-MIN_DET_CONFIDENCE: float = 0.30   # 탐지 최소 신뢰도 하향 (0.50→0.30, 미감지 복구)
-CONFIRM_FRAME_COUNT: int = 3      # confirmed 승격에 필요한 최소 프레임 수 (5→3, 짧은 노출 번호판 확정)
-UPSCALE_THRESHOLD: int = 300   # 이 너비 이하면 업스케일 (소형 번호판 더 적극 확대)
-UPSCALE_FACTOR: int = 6        # 6x 업스케일 (CCTV 소형 번호판 인식률 개선)
+# -- 탐지 설정 (ThresholdConfig) --
+DEFAULT_CONFIDENCE: float = ThresholdConfig.DETECT_CONF
+MIN_VEHICLE_WIDTH: int = ThresholdConfig.MIN_VEHICLE_WIDTH
+MIN_VEHICLE_HEIGHT: int = ThresholdConfig.MIN_VEHICLE_HEIGHT
+MIN_PLATE_WIDTH: int = ThresholdConfig.MIN_PLATE_WIDTH
+MIN_PLATE_HEIGHT: int = ThresholdConfig.MIN_PLATE_HEIGHT
+PLATE_MIN_ASPECT: float = ThresholdConfig.PLATE_MIN_ASPECT
+PLATE_MAX_ASPECT: float = ThresholdConfig.PLATE_MAX_ASPECT
+PLATE_MAX_AREA_RATIO: float = ThresholdConfig.PLATE_MAX_AREA_RATIO
+MAX_PLATE_TEXT_LEN: int = ThresholdConfig.MAX_PLATE_TEXT_LEN
+MIN_OCR_CONFIDENCE: float = ThresholdConfig.OCR_CONF
+MIN_DET_CONFIDENCE: float = ThresholdConfig.MIN_DET_CONFIDENCE
+CONFIRM_FRAME_COUNT: int = ThresholdConfig.CONFIRM_FRAME_COUNT
+UPSCALE_THRESHOLD: int = ThresholdConfig.UPSCALE_THRESHOLD
+UPSCALE_FACTOR: int = ThresholdConfig.UPSCALE_FACTOR
 
 # -- 프레임 스킵 & 버스트 캡처 --
-DEFAULT_FRAME_SKIP: int = 2
-BURST_FRAME_COUNT: int = 10
-NO_DETECT_TOLERANCE: int = 3
+DEFAULT_FRAME_SKIP: int = ThresholdConfig.FRAME_SKIP
+BURST_FRAME_COUNT: int = ThresholdConfig.BURST_FRAME_COUNT
+NO_DETECT_TOLERANCE: int = ThresholdConfig.NO_DETECT_TOLERANCE
 
 # -- Detection Log OCR (화면 내 텍스트 번호판 인식) --
-LOG_OCR_INTERVAL: int = 90  # N프레임마다 Detection Log 영역 OCR (속도 최적화)
+LOG_OCR_INTERVAL: int = ThresholdConfig.LOG_OCR_INTERVAL
 
 # -- SAHI 타일링 --
-SAHI_SLICE_SIZE: int = 640
-SAHI_OVERLAP_RATIO: float = 0.2
+SAHI_SLICE_SIZE: int = ThresholdConfig.SAHI_SLICE_SIZE
+SAHI_OVERLAP_RATIO: float = ThresholdConfig.SAHI_OVERLAP_RATIO
 
 # -- 크롭 & 선명도 --
-PLATE_PADDING_RATIO: float = 0.35  # COCO 폴백용 (차량→번호판 추출 시)
-PLATE_MODEL_PADDING_H: float = 0.40  # 번호판 전용 모델: 좌우 패딩 40% (bbox 좌측 잘림 방지)
-PLATE_MODEL_PADDING_V: float = 0.35  # 번호판 전용 모델: 상하 패딩 35% (2줄 번호판 상단 캡처)
-SHARPNESS_THRESHOLD: float = 100.0
+PLATE_PADDING_RATIO: float = ThresholdConfig.PLATE_PADDING_RATIO
+PLATE_MODEL_PADDING_H: float = ThresholdConfig.PLATE_MODEL_PADDING_H
+PLATE_MODEL_PADDING_V: float = ThresholdConfig.PLATE_MODEL_PADDING_V
+SHARPNESS_THRESHOLD: float = ThresholdConfig.SHARPNESS_THRESHOLD
 
-# -- 시간축 앙상블 (개선5) --
-TEMPORAL_WINDOW: int = 5       # 시간축 앙상블 슬라이딩 윈도우 크기
-TEMPORAL_LEVENSHTEIN_MAX: int = 2  # 동일 번호판 판정 최대 편집 거리
+# -- 시간축 앙상블 --
+TEMPORAL_WINDOW: int = ThresholdConfig.TEMPORAL_WINDOW
+TEMPORAL_LEVENSHTEIN_MAX: int = ThresholdConfig.TEMPORAL_LEVENSHTEIN_MAX
 
-# -- 한국 번호판 OCR 설정 --
-# 한글 자음모음 + 숫자 + 번호판에 사용되는 한글 글자
-KOREAN_PLATE_HANGUL = (
-    "가나다라마바사아자차카타파하"
-    "거너더러머버서어저처커터퍼허"
-    "고노도로모보소오조초코토포호"
-    "구누두루무부수우주추쿠투푸후"
-    "배"
-    "서울부산대구인천광주대전울산세종"
-    "경기강원충북충남전북전남경북경남제주"
-)
-KOREAN_PLATE_ALLOWLIST = "0123456789" + KOREAN_PLATE_HANGUL + "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
-
-# 한국 번호판 정규식 패턴들
-KOREAN_PLATE_PATTERNS = [
-    # 신형 (2019~): 123가4567
-    re.compile(r"\d{2,3}[가-힣]\d{4}"),
-    # 구형: 서울12가1234
-    re.compile(r"[가-힣]{2}\d{1,2}[가-힣]\d{4}"),
-    # 영업용: 서울12바1234
-    re.compile(r"[가-힣]{2,3}\d{1,2}[가-힣]\d{4}"),
-    # 렌터카: 하1234
-    re.compile(r"[하허호]\d{4}"),
-    # 부분 인식: 123가456 (뒷번호 3자리 - OCR이 마지막 자리 놓침)
-    re.compile(r"\d{2,3}[가-힣]\d{3}"),
-    # 숫자만 (부분 인식): 4자리 이상 연속 숫자
-    re.compile(r"\d{4,}"),
-    # 한글 + 숫자 혼합 (부분 인식)
-    re.compile(r"[가-힣]+\d{2,}"),
-    re.compile(r"\d{2,}[가-힣]+\d{2,}"),
-]
-
-# 국제 번호판 정규식 패턴들 (UK/EU/US 등)
-INTERNATIONAL_PLATE_PATTERNS = [
-    # UK 현행: AB12CDE 또는 AB12 CDE
-    re.compile(r"[A-Z]{2}\d{2}\s?[A-Z]{3}"),
-    # UK 구형: A123BCD
-    re.compile(r"[A-Z]\d{3}[A-Z]{3}"),
-    # UK 구형 변형: ABC 123D / A123 BCD
-    re.compile(r"[A-Z]{1,3}\s?\d{1,4}\s?[A-Z]{1,3}"),
-    # 미국/일반: 숫자+문자 혼합 5-8자
-    re.compile(r"[A-Z0-9]{5,8}"),
-    # 유럽: 숫자-문자 혼합
-    re.compile(r"[A-Z]{1,3}\d{2,4}[A-Z]{0,3}"),
-]
+# -- 한국 번호판 OCR 설정 (OCRConfig) --
+KOREAN_PLATE_HANGUL = OCRConfig.KOREAN_PLATE_HANGUL
+KOREAN_PLATE_ALLOWLIST = OCRConfig.KOREAN_PLATE_ALLOWLIST
+KOREAN_PLATE_PATTERNS = OCRConfig.KR_COMPILED_PATTERNS
+INTERNATIONAL_PLATE_PATTERNS = OCRConfig.INTL_COMPILED_PATTERNS
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -967,7 +908,7 @@ class PlateRecognizer:
         self.paddle_reader = None
 
         # 1순위: PaddleOCR 한국어 (한글 인식 최강, 최우선)
-        _PADDLE_MODEL_ROOT = "C:/paddle_models/.paddleocr/whl"
+        _PADDLE_MODEL_ROOT = str(PathConfig.paddle_model_dir())
         _DET_DIR = f"{_PADDLE_MODEL_ROOT}/det/ml/Multilingual_PP-OCRv3_det_infer"
         _REC_DIR = f"{_PADDLE_MODEL_ROOT}/rec/korean/korean_PP-OCRv4_rec_infer"
         _CLS_DIR = f"{_PADDLE_MODEL_ROOT}/cls/ch_ppocr_mobile_v2.0_cls_infer"
@@ -1026,7 +967,7 @@ class PlateRecognizer:
         # 4순위: Tesseract (영문+숫자 whitelist, 최후 수단)
         try:
             import pytesseract
-            _TESS_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            _TESS_PATH = PathConfig.tesseract_cmd()
             if os.path.isfile(_TESS_PATH):
                 pytesseract.pytesseract.tesseract_cmd = _TESS_PATH
             pytesseract.get_tesseract_version()
@@ -1582,7 +1523,7 @@ class PlateRecognizer:
         """
         try:
             import pytesseract
-            _TESS_PATH = r"C:\Program Files\Tesseract-OCR\tesseract.exe"
+            _TESS_PATH = PathConfig.tesseract_cmd()
             if os.path.isfile(_TESS_PATH):
                 pytesseract.pytesseract.tesseract_cmd = _TESS_PATH
 

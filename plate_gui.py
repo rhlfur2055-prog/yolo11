@@ -40,6 +40,8 @@ import tkinter as tk
 from tkinter import messagebox, filedialog
 from PIL import Image, ImageDraw, ImageFont, ImageTk
 
+from config import PathConfig, DisplayConfig
+
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 상수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -50,8 +52,8 @@ SIDE_PANEL_W = 300
 REFRESH_MS = 33  # ~30 FPS display
 DETECTION_SKIP = 1  # 매 프레임 탐지 (즉시 인식)
 
-FONT_PATH = "C:/Windows/Fonts/malgunbd.ttf"
-FONT_PATH_FALLBACK = "C:/Windows/Fonts/malgun.ttf"
+FONT_PATH = PathConfig.font_path(bold=True)
+FONT_PATH_FALLBACK = PathConfig.font_path(bold=False)
 
 # 다크 테마 색상
 C_BG = "#0f1117"

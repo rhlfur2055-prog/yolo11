@@ -116,3 +116,7 @@ class OcrResult(TypedDict):
 CMD_STOP = "STOP"
 CMD_OCR_STOP = "OCR_STOP"
 CMD_YOLO_READY = "YOLO_READY"      # YOLO 모델 로딩+warm-up 완료 신호
+CMD_FLUSH = "FLUSH"                # 차량 소멸 → 결과 초기화 신호
+
+# 차량 소멸 판정 기준 (연속 N프레임 미탐지 시 FLUSH)
+DISAPPEAR_FRAME_THRESHOLD = 15

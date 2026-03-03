@@ -15,7 +15,8 @@ from pathlib import Path
 from collections import Counter, defaultdict
 from multiprocessing import Queue
 
-from pipeline_common import CMD_OCR_STOP
+from pipeline_common import CMD_OCR_STOP, CMD_FLUSH
+from config import PathConfig
 
 # plate_engine_pro.py에서 클래스/함수 import (코드 중복 방지)
 # 모듈 레벨에서 모델 인스턴스화 없음 — 안전
@@ -70,15 +71,8 @@ def _init_ocr_engines():
     if HAS_PADDLEOCR:
         paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False, use_gpu=False)
         # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
-        _paddle_model_root = None
-        for _pdir in [
-            Path("C:/paddle_models/.paddleocr/whl"),
-            Path("C:/tools/paddleocr_models"),
-        ]:
-            if _pdir.exists():
-                _paddle_model_root = _pdir
-                break
-        if _paddle_model_root is not None:
+        _paddle_model_root = PathConfig.paddle_model_dir()
+        if _paddle_model_root.exists():
             _det = _paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer"
             _rec = _paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer"
             _cls = _paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer"
@@ -1082,7 +1076,21 @@ def ocr_worker_loop(ocr_queue: Queue, result_queue: Queue, cmd_queue: Queue):
         # 제어 명령 확인
         try:
             cmd = cmd_queue.get_nowait()
-            if cmd == CMD_OCR_STOP:
+            if cmd == CMD_FLUSH:
+                # ocr_queue 완전히 비우기
+                while not ocr_queue.empty():
+                    try:
+                        ocr_queue.get_nowait()
+                    except Exception:
+                        break
+                # result_queue도 비우기
+                while not result_queue.empty():
+                    try:
+                        result_queue.get_nowait()
+                    except Exception:
+                        break
+                print(f"[CMD6-OCR] FLUSH 완료 — 큐 초기화됨")
+            elif cmd == CMD_OCR_STOP:
                 print(f"[CMD6-OCR] STOP 수신 → 종료 (처리: {processed_count}건)")
                 break
         except Exception:

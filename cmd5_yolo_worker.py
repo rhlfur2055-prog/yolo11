@@ -15,7 +15,11 @@ import numpy as np
 from pathlib import Path
 from multiprocessing import Queue
 
-from pipeline_common import bbox_iou, DETECT_CONFIG, CMD_STOP, CMD_YOLO_READY
+from pipeline_common import (
+    bbox_iou, DETECT_CONFIG, CMD_STOP, CMD_YOLO_READY,
+    CMD_FLUSH, DISAPPEAR_FRAME_THRESHOLD,
+)
+from config import PathConfig
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 번호판 형식 정규식 패턴 (한국 번호판)
@@ -341,15 +345,8 @@ def _init_fast_ocr():
 
     paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False, use_gpu=False)
     # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
-    _paddle_model_root = None
-    for _pdir in [
-        Path("C:/paddle_models/.paddleocr/whl"),
-        Path("C:/tools/paddleocr_models"),
-    ]:
-        if _pdir.exists():
-            _paddle_model_root = _pdir
-            break
-    if _paddle_model_root is not None:
+    _paddle_model_root = PathConfig.paddle_model_dir()
+    if _paddle_model_root.exists():
         _det = _paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer"
         _rec = _paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer"
         _cls = _paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer"
@@ -438,6 +435,10 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
         print(f"[CMD5] Fast OCR(PaddleOCR) 준비 완료 — 워밍업 {_focr_ms:.0f}ms")
     else:
         print("[CMD5] Fast OCR 비활성 — PaddleOCR 없음")
+
+    # ━━ 차량 소멸 추적 상태 ━━
+    _no_detect_count = 0          # 연속 미탐지 프레임 수
+    _had_detection = False        # 직전에 탐지가 있었는지
 
     while True:
         # 제어 명령 확인 (논블로킹)
@@ -559,6 +560,19 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
                 print(f"[CMD5] frame={frame_id} raw={_raw_count} "
                       f"nms={len(_keep_dets)} final={len(det_results)} "
                       f"{inference_ms:.0f}ms", flush=True)
+
+            # ━━ 차량 소멸 감지 → FLUSH 전송 ━━
+            if det_results:
+                _no_detect_count = 0
+                _had_detection = True
+            else:
+                if _had_detection:
+                    _no_detect_count += 1
+                    if _no_detect_count >= DISAPPEAR_FRAME_THRESHOLD:
+                        result_queue.put({"cmd": CMD_FLUSH, "frame_id": frame_id})
+                        print(f"[CMD5] FLUSH 전송: {DISAPPEAR_FRAME_THRESHOLD}프레임 연속 미탐지 (frame={frame_id})")
+                        _had_detection = False
+                        _no_detect_count = 0
 
             # 결과 전송
             result = {

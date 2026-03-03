@@ -4,28 +4,14 @@
 # YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
-
-# 모델 우선순위 (번호판 전용 모델 최우선)
-_MODEL_PRIORITY = [
-    "yolo11x_plate.pt",    # ★ YOLOv11x fine-tuned (mAP@50=98.4%) - 최우선
-    "yolo11n_plate.pt",    # YOLOv11n 경량 번호판 전용
-    "yolo26n.pt",          # YOLO26n - 최신 경량
-    "yolo26s.pt",          # YOLO26s - 소형
-    "yolo26.pt",           # 기존 프로젝트 모델
-    "yolo11n.pt",          # COCO fallback
-    "yolov8n.pt",         # 최후 fallback
-]
+from config import PathConfig, ThresholdConfig, OCRConfig
 
 def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
     from ultralytics import YOLO
-    for m in _MODEL_PRIORITY:
-        if _os.path.exists(m):
-            print(f"[YOLO26] 모델 로드: {m}")
-            return YOLO(m)
-    # 없으면 YOLO26n 자동 다운로드 (ultralytics에서)
-    print("[YOLO26] yolo26n.pt 자동 다운로드 중...")
-    return YOLO("yolo26n.pt")
+    best = PathConfig.find_best_model()
+    print(f"[YOLO26] 모델 로드: {best}")
+    return YOLO(best)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # -*- coding: utf-8 -*-
 # ============================================
@@ -97,6 +83,18 @@ try:
     HAS_TORCH = True
 except Exception:
     HAS_TORCH = False
+
+
+# ── 모델 우선순위 ──
+_MODEL_PRIORITY = [
+    "yolo11x_plate.pt",
+    "yolo11n_plate.pt",
+    "yolo26n.pt",
+    "yolo26s.pt",
+    "yolo26.pt",
+    "yolo11n.pt",
+    "yolov8n.pt",
+]
 
 
 class _CRNNModel:
@@ -191,16 +189,16 @@ class _CRNNModel:
 class PlateEngineConfig:
     """엔진 설정"""
     # ── 모델 경로 ──
-    YOLO_MODEL = "yolo11x_plate.pt"      # 번호판 전용 파인튜닝 (mAP@50=98.4%)
-    YOLO_FALLBACK = "yolo26.pt"
+    YOLO_MODEL = PathConfig.YOLO_PRIMARY
+    YOLO_FALLBACK = PathConfig.YOLO_FALLBACK
 
     # ── 인식 임계값 ──
-    DETECT_CONF = 0.25          # YOLO 감지 임계값 (원거리/소형 번호판 재현율 향상)
+    DETECT_CONF = ThresholdConfig.DETECT_CONF
     ROI_X1 = 200
     ROI_X2 = 900
     ROI_Y1 = 300
     ROI_Y2 = 700
-    OCR_CONF = 0.40             # OCR 최소 신뢰도 (0.70→0.40, 부분인식 후보 유지)
+    OCR_CONF = ThresholdConfig.OCR_CONF
 
     # ── 출력 필터링 임계값 ──
     OUTPUT_CONF_HIGH = 0.90     # ✅ HIGH 확정
@@ -213,50 +211,20 @@ class PlateEngineConfig:
     TRACKER_TTL_FRAMES = 15       # 미감지 후 트랙 만료 프레임 수
 
     # ── MareArts/한국 번호판 정규식 완전판 ──
-    KR_PATTERNS = [
-        r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$',         # 구형: 서울12가3456 (8자)
-        r'^[0-9]{2,3}[가-힣][0-9]{4}$',                  # 신형: 123가4567
-        r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$',        # 구형지역포함: 서울70비9203 (9자)
-        r'^[가-힣]{2}[0-9]{2}[바사아자배비하][0-9]{4}$',  # 영업/버스
-        r'^[가-힣]{2,3}[0-9]{4}[가-힣]{1}$',             # 영업용 변형
-        r'^외교[0-9]{3}-?[0-9]{3}$',
-        r'^[가-힣]{2}[0-9]{3}[가-힣]$',                  # 이륜차
-        r'^[가-힣]{2}[0-9]{1,2}[가-힣]{1,2}[0-9]{4}$',  # 혼합형
-        # ── 전기차/친환경 번호판 ──
-        r'^전기[0-9]{4}$',                               # 구형 전기차: 전기1234 (6자)
-        r'^[가-힣]{2}전기[0-9]{4}$',                     # 지역+전기차: 서울전기1234
-        r'^[0-9]{2}[가-힣][0-9]{4}$',                    # 신형 전기차 (2자리): 12가3456 (7자)
-    ]
-    PLATE_MIN_LEN = 6    # 전기차 구형(전기1234=6자) 허용
-    PLATE_MAX_LEN = 10   # 구형 지역명 포함(서울70비9203=9자) 허용
-    CONSECUTIVE_FRAMES_REQUIRED = 1  # 즉시 표시 (저해상도 영상 호환)
-    # 환경변수로 오버라이드: set PLATE_CONSECUTIVE_FRAMES=3
-    _cf = os.environ.get('PLATE_CONSECUTIVE_FRAMES', '')
-    if _cf.strip().isdigit():
-        CONSECUTIVE_FRAMES_REQUIRED = int(_cf)
+    KR_PATTERNS = OCRConfig.KR_PATTERNS
+    PLATE_MIN_LEN = ThresholdConfig.PLATE_MIN_LEN
+    PLATE_MAX_LEN = ThresholdConfig.PLATE_MAX_LEN
+    CONSECUTIVE_FRAMES_REQUIRED = ThresholdConfig.CONFIRM_FRAME_COUNT
 
     # 자주 혼동되는 문자 보정 (MareArts) 0↔O, 1↔I, 8↔B, 6↔G
-    OCR_CONFUSION_MAP = {
-        "O": "0", "Q": "0", "D": "0",
-        "I": "1", "L": "1", "l": "1",
-        "B": "8", "S": "5", "Z": "2", "G": "6",
-        "ㅇ": "0", "ㅣ": "1",
-    }
+    OCR_CONFUSION_MAP = OCRConfig.CONFUSION_MAP
     # 멀티프레임 (MultiFrame-LPR): 번호판 픽셀 너비 < 80 이면 멀티프레임 ON
-    MULTIFRAME_SIZE = 2
-    MULTIFRAME_PLATE_WIDTH_THRESHOLD = 80
+    MULTIFRAME_SIZE = ThresholdConfig.MULTIFRAME_SIZE
+    MULTIFRAME_PLATE_WIDTH_THRESHOLD = ThresholdConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD
 
-    DB_PATH = "plate_records.db"
+    DB_PATH = str(PathConfig.DB_PATH)
 
-    PREPROCESS_METHODS = [
-        # ★ 실사용 6개만 유지 (cmd6 Tier1+Tier2)
-        "original",           # 원본 (Tier1)
-        "clahe",              # CLAHE 대비 강화 (Tier1)
-        "sharpen",            # 선명화 (Tier1)
-        "_inverted",          # 색상 반전 (Tier2)
-        "bilateral",          # 양방향 필터 (Tier2)
-        "auto_contrast",      # 자동 대비 (Tier2)
-    ]
+    PREPROCESS_METHODS = OCRConfig.PREPROCESS_METHODS
 
 
 def _deskew_and_otsu(gray):
@@ -1298,15 +1266,8 @@ class PlateEnginePro:
         if HAS_PADDLEOCR:
             paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False, use_gpu=False)
             # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
-            _paddle_model_root = None
-            for _pdir in [
-                Path("C:/paddle_models/.paddleocr/whl"),
-                Path("C:/tools/paddleocr_models"),
-            ]:
-                if _pdir.exists():
-                    _paddle_model_root = _pdir
-                    break
-            if _paddle_model_root is not None:
+            _paddle_model_root = PathConfig.paddle_model_dir()
+            if _paddle_model_root.exists():
                 _det = _paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer"
                 _rec = _paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer"
                 _cls = _paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer"

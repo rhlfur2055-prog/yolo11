@@ -21,10 +21,11 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
 from pipeline_common import (
-    CMD_STOP, CMD_OCR_STOP, CMD_YOLO_READY, DETECT_CONFIG, bbox_iou,
+    CMD_STOP, CMD_OCR_STOP, CMD_YOLO_READY, CMD_FLUSH, DETECT_CONFIG, bbox_iou,
 )
 from cmd5_yolo_worker import yolo_worker_loop, _is_valid_plate_format
 from cmd6_ocr_worker import ocr_worker_loop
+from config import PathConfig
 
 # plate_engine_pro.py에서 트래커 import
 from plate_engine_pro import PlateTracker, PlateValidator, PlateDatabase
@@ -32,8 +33,8 @@ from plate_engine_pro import PlateTracker, PlateValidator, PlateDatabase
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 한글 텍스트 렌더링 (plate_gui.py에서 추출)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-FONT_PATH = "C:/Windows/Fonts/malgunbd.ttf"
-FONT_PATH_FALLBACK = "C:/Windows/Fonts/malgun.ttf"
+FONT_PATH = PathConfig.font_path(bold=True)
+FONT_PATH_FALLBACK = PathConfig.font_path(bold=False)
 _font_cache = {}
 
 
@@ -462,8 +463,28 @@ def display_loop(cap, frame_queue, detect_queue, ocr_queue,
         _new_det_received = False
         try:
             det_result = detect_queue.get_nowait()
-            last_det_result = det_result
-            _new_det_received = True
+            # ━━ CMD_FLUSH 처리: 차량 소멸 시 큐 초기화 ━━
+            if isinstance(det_result, dict) and det_result.get("cmd") == CMD_FLUSH:
+                _flush_fid = det_result.get("frame_id", "?")
+                # ocr_queue 비우기
+                while not ocr_queue.empty():
+                    try:
+                        ocr_queue.get_nowait()
+                    except Empty:
+                        break
+                # cmd6에도 FLUSH 전달
+                try:
+                    cmd_queue_ocr.put_nowait(CMD_FLUSH)
+                except Full:
+                    pass
+                # 대기 중 OCR 추적 초기화
+                _pending_ocr.clear()
+                _pending_tracker_ids.clear()
+                print(f"[CMD12] FLUSH 수신 (frame={_flush_fid}) → ocr_queue/pending 초기화")
+                det_result = None
+            else:
+                last_det_result = det_result
+                _new_det_received = True
         except Empty:
             pass
 
