@@ -56,10 +56,12 @@ def bbox_iou(a, b):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 DETECT_CONFIG = {
     "DETECT_CONF": 0.25,         # YOLO 감지 임계값
-    "ROI_X1": 300,               # ROI 필터 범위
-    "ROI_X2": 800,
-    "ROI_Y1": 150,
-    "ROI_Y2": 700,
+    "ROI_X1": 0.10,              # ROI 필터 범위 (ratio: 프레임 대비 비율)
+    "ROI_X2": 0.90,              # 수평 10%~90%
+    "ROI_Y1": 0.05,              # 수직  5%~95%
+    "ROI_Y2": 0.95,
+    "MAX_DET_DISPLAY": 1,        # 단일 차량 모드: 면적 최대 N개만 표시
+    "MAX_DET": 3,                # YOLO 추론 시 최대 탐지 수
     "MIN_BBOX_WIDTH": 50,        # 최소 bbox 가로 px
     "MIN_BBOX_HEIGHT": 15,       # 최소 bbox 세로 px
     "TRACKER_IOU_THRESHOLD": 0.30,
@@ -113,3 +115,4 @@ class OcrResult(TypedDict):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CMD_STOP = "STOP"
 CMD_OCR_STOP = "OCR_STOP"
+CMD_YOLO_READY = "YOLO_READY"      # YOLO 모델 로딩+warm-up 완료 신호

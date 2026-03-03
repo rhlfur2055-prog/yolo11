@@ -7,13 +7,31 @@ plate_engine_pro.py process_frame()에서 YOLO 탐지 부분만 추출하여
 추출 원본: plate_engine_pro.py L1431-1548
 """
 import os
+import re
+import queue
 import time
 import traceback
 import numpy as np
 from pathlib import Path
 from multiprocessing import Queue
 
-from pipeline_common import bbox_iou, DETECT_CONFIG, CMD_STOP
+from pipeline_common import bbox_iou, DETECT_CONFIG, CMD_STOP, CMD_YOLO_READY
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 번호판 형식 정규식 패턴 (한국 번호판)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+_PLATE_PATTERNS = [
+    re.compile(r'^\d{2}[가-힣]\d{4}$'),           # 12가3456 (신형 2자리)
+    re.compile(r'^\d{3}[가-힣]\d{4}$'),           # 123가4567 (신형 3자리)
+    re.compile(r'^[가-힣]{2}\d{2}[가-힣]\d{4}$'),  # 서울12가3456 (구형)
+    re.compile(r'^[가-힣]{2}\d{3}[가-힣]\d{4}$'),  # 서울123가4567
+    re.compile(r'^[가-힣]{3}\d{2}[가-힣]\d{4}$'),  # 충남12가3456
+]
+
+
+def _is_valid_plate_format(text):
+    """한국 번호판 형식 패턴 매칭"""
+    return any(p.match(text) for p in _PLATE_PATTERNS)
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -86,7 +104,7 @@ def _calc_imgsz(fw):
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 수동 NMS (plate_engine_pro.py L1463-1490 추출)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def _manual_nms(raw_boxes, is_plate_model, cfg):
+def _manual_nms(raw_boxes, is_plate_model, cfg, frame_shape=None):
     """겹치는 bbox 제거 (수동 NMS): IoU > 0.65인 겹침에서 낮은 conf 제거
     YOLO NMS-free 모델이 중복 bbox를 출력하는 경우 대비
 
@@ -94,17 +112,29 @@ def _manual_nms(raw_boxes, is_plate_model, cfg):
         raw_boxes: YOLO detections[0].boxes 리스트
         is_plate_model: 번호판 전용 모델 여부 (ROI 필터 적용 결정)
         cfg: DETECT_CONFIG dict
+        frame_shape: (H, W, C) — ratio→pixel ROI 변환용
     Returns:
         필터된 (bbox, conf, det) 튜플 리스트
     """
+    # ★ ROI: ratio(0~1) → pixel 변환
+    if frame_shape is not None:
+        _fh, _fw = frame_shape[:2]
+        _roi_x1 = int(cfg["ROI_X1"] * _fw)
+        _roi_x2 = int(cfg["ROI_X2"] * _fw)
+        _roi_y1 = int(cfg["ROI_Y1"] * _fh)
+        _roi_y2 = int(cfg["ROI_Y2"] * _fh)
+    else:
+        _roi_x1, _roi_x2 = int(cfg["ROI_X1"]), int(cfg["ROI_X2"])
+        _roi_y1, _roi_y2 = int(cfg["ROI_Y1"]), int(cfg["ROI_Y2"])
+
     _raw = []
     for det in raw_boxes:
         _rb = list(map(int, det.xyxy[0].tolist()))
         _rc = float(det.conf[0])
-        # ★ ROI 필터 적용 (번호판 모델에서 영상 모드용)
+        # ★ ROI 필터 적용 (ratio→pixel 변환 완료)
         cx = (_rb[0] + _rb[2]) / 2
         cy = (_rb[1] + _rb[3]) / 2
-        if not (cfg["ROI_X1"] <= cx <= cfg["ROI_X2"] and cfg["ROI_Y1"] <= cy <= cfg["ROI_Y2"]):
+        if not (_roi_x1 <= cx <= _roi_x2 and _roi_y1 <= cy <= _roi_y2):
             continue
         # 번호판 비율 필터 (w/h: 0.8~7.0 — 1줄+2줄 모두 허용)
         _bw = _rb[2] - _rb[0]
@@ -113,10 +143,18 @@ def _manual_nms(raw_boxes, is_plate_model, cfg):
             continue
         _raw.append((_rb, _rc, det))
 
-    # bbox 면적 큰 순 정렬
-    _raw.sort(key=lambda x: (x[0][2] - x[0][0]) * (x[0][3] - x[0][1]), reverse=True)
+    # ★ 중앙거리 우선 정렬 (NMS 전에 적용 — 중앙 bbox가 NMS에서 먼저 선택됨)
+    _max_det = cfg.get("MAX_DET_DISPLAY", 99)
+    if frame_shape is not None and _max_det <= 2:
+        _fw = frame_shape[1]
+        _center_x = _fw / 2
+        # 중앙 가까운 순 정렬 → NMS에서 중앙 bbox 우선 유지
+        _raw.sort(key=lambda t: abs((t[0][0] + t[0][2]) / 2 - _center_x))
+    else:
+        # bbox 면적 큰 순 정렬 (기존 동작)
+        _raw.sort(key=lambda x: (x[0][2] - x[0][0]) * (x[0][3] - x[0][1]), reverse=True)
 
-    # IoU > 0.65 억제
+    # IoU > 0.65 억제 (중앙 bbox가 먼저 _keep에 들어감)
     _keep = []
     for _rb, _rc, _det in _raw:
         _suppressed = False
@@ -126,6 +164,10 @@ def _manual_nms(raw_boxes, is_plate_model, cfg):
                 break
         if not _suppressed:
             _keep.append((_rb, _rc, _det))
+
+    # MAX_DET_DISPLAY 제한
+    if len(_keep) > _max_det:
+        _keep = _keep[:_max_det]
 
     return _keep
 
@@ -224,6 +266,116 @@ def _crop_roi(crop_src, bbox, cfg):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Fast OCR용 ROI 업스케일 (cmd6 _upscale_roi 동일 로직)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _parse_paddle_result(paddle_result, validator):
+    """PaddleOCR 결과 파싱 → (text, conf) 또는 ("", 0.0)"""
+    if not paddle_result or not paddle_result[0]:
+        return "", 0.0
+    lines = sorted(paddle_result[0], key=lambda l: l[0][0][1])
+    texts = [l[1][0] for l in lines]
+    confs = [l[1][1] for l in lines]
+    if not texts:
+        return "", 0.0
+    raw_text = "".join(texts)
+    raw_conf = float(np.mean(confs))
+    cleaned = validator.clean_ocr_text(raw_text)
+    if not validator.is_valid_length(cleaned):
+        return "", 0.0
+    is_valid, final = validator.validate(cleaned)
+    if is_valid:
+        return final, raw_conf
+    return "", 0.0
+
+
+def _upscale_roi_fast(roi, cv2=None):
+    """ROI를 500px 목표로 업스케일 + 선명화 + 흰색 패딩
+    cv2는 워커 프로세스 내부에서 전달 (모듈 레벨 import 시 DLL 충돌 방지)
+    """
+    if cv2 is None:
+        import cv2
+    roi_h, roi_w = roi.shape[:2]
+    target_w = 500
+    if roi_w < target_w:
+        scale = target_w / roi_w
+        if roi_w < 60:
+            scale = max(scale, 9.0)
+        elif roi_w < 120:
+            scale = max(scale, 4.0)
+    else:
+        scale = 1.0
+
+    if scale > 1.0:
+        _interp = cv2.INTER_LANCZOS4 if roi_w < 80 else cv2.INTER_CUBIC
+        roi_up = cv2.resize(roi, None, fx=scale, fy=scale, interpolation=_interp)
+        if roi_w < 80:
+            kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
+        else:
+            kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        roi_up = cv2.filter2D(roi_up, -1, kernel)
+    else:
+        roi_up = roi
+
+    pad = max(10, int(roi_up.shape[0] * 0.15))
+    roi_up = cv2.copyMakeBorder(
+        roi_up, pad, pad, pad, pad,
+        cv2.BORDER_CONSTANT, value=(255, 255, 255)
+    )
+    return roi_up
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# Fast OCR 엔진 초기화 (cmd6 _init_ocr_engines PaddleOCR 부분 동일)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+def _init_fast_ocr():
+    """Fast OCR용 PaddleOCR 엔진 초기화 (프로세스 시작 시 1회)
+
+    Returns:
+        PaddleOCR 인스턴스 또는 None (초기화 실패 시)
+    """
+    try:
+        from paddleocr import PaddleOCR
+    except Exception:
+        print("[CMD5] PaddleOCR 미설치 — Fast OCR 비활성")
+        return None
+
+    paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False, use_gpu=False)
+    # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
+    _paddle_model_root = None
+    for _pdir in [
+        Path("C:/paddle_models/.paddleocr/whl"),
+        Path("C:/tools/paddleocr_models"),
+    ]:
+        if _pdir.exists():
+            _paddle_model_root = _pdir
+            break
+    if _paddle_model_root is not None:
+        _det = _paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer"
+        _rec = _paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer"
+        _cls = _paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer"
+        if _det.exists():
+            paddle_kwargs["det_model_dir"] = str(_det)
+        if _rec.exists():
+            paddle_kwargs["rec_model_dir"] = str(_rec)
+        if _cls.exists():
+            paddle_kwargs["cls_model_dir"] = str(_cls)
+    try:
+        engine = PaddleOCR(**paddle_kwargs)
+        return engine
+    except TypeError:
+        paddle_kwargs.pop("show_log", None)
+        try:
+            engine = PaddleOCR(**paddle_kwargs)
+            return engine
+        except Exception as e:
+            print(f"[CMD5] PaddleOCR 초기화 실패: {e}")
+            return None
+    except Exception as e:
+        print(f"[CMD5] PaddleOCR 초기화 실패: {e}")
+        return None
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 워커 메인 루프 (신규 코드)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
@@ -257,6 +409,36 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
     _mtype = "번호판 전용" if is_plate_model else "범용(COCO)"
     print(f"[CMD5-YOLO] 모델 유형: {_mtype}")
 
+    # ★ YOLO warm-up: 첫 추론은 GPU/CPU 초기화로 느림 → dummy로 선행
+    _dummy = np.zeros((640, 640, 3), dtype=np.uint8)
+    _ready_t0 = time.perf_counter()
+    model(_dummy, conf=0.25, imgsz=640, verbose=False)
+    _warmup_ms = (time.perf_counter() - _ready_t0) * 1000
+    print(f"[CMD5-YOLO] warm-up 완료: {_warmup_ms:.0f}ms")
+
+    # ★ ready 신호 전송 → pipeline_stage2가 영상 재생 시작
+    result_queue.put({"cmd": CMD_YOLO_READY, "warmup_ms": _warmup_ms})
+    print(f"[CMD5-YOLO] ready 신호 전송 완료")
+
+    # ★ Fast OCR 초기화: PaddleOCR + PlateValidator (프로세스 내 1회)
+    # cv2/PaddleOCR/PlateValidator 모두 워커 프로세스 내부에서만 import
+    # (모듈 레벨에서 import하면 DLL 검색 경로 오염 → torch shm.dll 로딩 실패)
+    import cv2 as _cv2
+    from plate_engine_pro import PlateValidator as _PlateValidator
+    fast_ocr_engine = _init_fast_ocr()
+    fast_validator = _PlateValidator() if fast_ocr_engine is not None else None
+    if fast_ocr_engine is not None:
+        _focr_t0 = time.perf_counter()
+        _dummy_ocr = np.ones((100, 300, 3), dtype=np.uint8) * 255
+        try:
+            fast_ocr_engine.ocr(_dummy_ocr, cls=True)
+        except Exception:
+            pass
+        _focr_ms = (time.perf_counter() - _focr_t0) * 1000
+        print(f"[CMD5] Fast OCR(PaddleOCR) 준비 완료 — 워밍업 {_focr_ms:.0f}ms")
+    else:
+        print("[CMD5] Fast OCR 비활성 — PaddleOCR 없음")
+
     while True:
         # 제어 명령 확인 (논블로킹)
         try:
@@ -264,13 +446,13 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
             if cmd == CMD_STOP:
                 print("[CMD5-YOLO] STOP 수신 → 종료")
                 break
-        except Exception:
+        except queue.Empty:
             pass
 
         # 프레임 가져오기 (블로킹, 타임아웃 0.1초)
         try:
             packet = frame_queue.get(timeout=0.1)
-        except Exception:
+        except queue.Empty:
             continue
 
         try:
@@ -289,18 +471,18 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
             _imgsz = _calc_imgsz(_fw)
 
             t0 = time.perf_counter()
-            detections = model(frame, conf=cfg["DETECT_CONF"], imgsz=_imgsz, verbose=False, max_det=3)
+            detections = model(frame, conf=cfg["DETECT_CONF"], imgsz=_imgsz, verbose=False, max_det=cfg["MAX_DET"])
             inference_ms = (time.perf_counter() - t0) * 1000
 
             # 디버그: 탐지 개수 (60프레임마다)
             _raw_count = len(detections[0].boxes) if detections and detections[0].boxes is not None else 0
 
-            # 수동 NMS
-            _keep_dets = _manual_nms(detections[0].boxes, is_plate_model, cfg)
+            # 수동 NMS (ratio→pixel ROI 변환을 위해 frame_shape 전달)
+            _keep_dets = _manual_nms(detections[0].boxes, is_plate_model, cfg, frame_shape=frame.shape)
 
             # NMS 후 개수 (디버그용)
 
-            # 필터 + ROI 크롭
+            # 필터 + ROI 크롭 + Fast OCR
             det_results = []
             for _, _, det in _keep_dets:
                 info = _filter_detection(det, sx, sy, ch_full, is_plate_model, cfg)
@@ -311,6 +493,55 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
                 if roi is None:
                     continue
 
+                # ★ Fast OCR: PaddleOCR 2회 (original + CLAHE+Unsharp) 합의 체크
+                # + Laplacian Variance 블러 프레임 스킵
+                fast_text = ""
+                fast_conf = 0.0
+                fast_ms = 0.0
+                _roi_h_f, _roi_w_f = roi.shape[:2]
+                if fast_ocr_engine is not None and _roi_w_f >= 40 and _roi_h_f >= 15:
+                    _ft0 = time.perf_counter()
+                    try:
+                        # ★ 블러 프레임 스킵: Laplacian Variance < 50이면 너무 흐림
+                        _blur_gray = _cv2.cvtColor(roi, _cv2.COLOR_BGR2GRAY)
+                        _lap_var = _cv2.Laplacian(_blur_gray, _cv2.CV_64F).var()
+                        if _lap_var < 50.0:
+                            # 흐릿한 ROI -- OCR 스킵 (오인식 방지)
+                            fast_ms = (time.perf_counter() - _ft0) * 1000
+                        else:
+                            _up_roi = _upscale_roi_fast(roi, cv2=_cv2)
+
+                            # 1차: original
+                            _result1 = fast_ocr_engine.ocr(_up_roi, cls=True)
+                            _text1, _conf1 = _parse_paddle_result(_result1, fast_validator)
+
+                            # ★ 1차 성공 시 2차 스킵 (속도 2배 향상)
+                            if _text1:
+                                fast_text = _text1
+                                fast_conf = _conf1
+                            else:
+                                # 2차: CLAHE + Unsharp Masking (1차 실패 시에만)
+                                _gray = _cv2.cvtColor(_up_roi, _cv2.COLOR_BGR2GRAY)
+                                _clahe = _cv2.createCLAHE(clipLimit=2.0, tileGridSize=(8, 8))
+                                _clahe_img = _clahe.apply(_gray)
+                                _blur = _cv2.GaussianBlur(_clahe_img, (0, 0), 3)
+                                _sharp = _cv2.addWeighted(_clahe_img, 1.5, _blur, -0.5, 0)
+                                _sharp_bgr = _cv2.cvtColor(_sharp, _cv2.COLOR_GRAY2BGR)
+                                _result2 = fast_ocr_engine.ocr(_sharp_bgr, cls=True)
+                                _text2, _conf2 = _parse_paddle_result(_result2, fast_validator)
+                                if _text2:
+                                    fast_text = _text2
+                                    fast_conf = _conf2
+                            fast_ms = (time.perf_counter() - _ft0) * 1000
+                    except Exception:
+                        pass
+                    if fast_ms == 0.0:
+                        fast_ms = (time.perf_counter() - _ft0) * 1000
+
+                if fast_text:
+                    print(f"[CMD5] frame={frame_id} fast_ocr='{fast_text}' "
+                          f"conf={fast_conf:.2f} time={fast_ms:.1f}ms", flush=True)
+
                 det_results.append({
                     "bbox": info["bbox"],
                     "conf": info["conf"],
@@ -318,6 +549,9 @@ def yolo_worker_loop(frame_queue: Queue, result_queue: Queue, cmd_queue: Queue):
                     "bbox_conf_penalty": info["bbox_conf_penalty"],
                     "is_small_plate": info["is_small_plate"],
                     "aspect_type": info["aspect_type"],
+                    "fast_ocr_text": fast_text,
+                    "fast_ocr_conf": fast_conf,
+                    "fast_ocr_ms": fast_ms,
                 })
 
             # 주기적 로그 (60프레임마다)

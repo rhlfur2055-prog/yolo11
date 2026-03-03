@@ -6,7 +6,6 @@ plate_engine_pro.py process_frame()에서 OCR 파이프라인 부분을 추출�
 
 추출 원본: plate_engine_pro.py L1605-2278, L2468-2522
 """
-import os
 import re
 import time
 import traceback
@@ -26,8 +25,6 @@ from plate_engine_pro import (
     HangulClassifier,
     PlateEngineConfig,
     _CRNNModel,
-    normalize,
-    _deskew_and_otsu,
 )
 
 # OCR 엔진 임포트
@@ -273,24 +270,6 @@ def _make_extra_crops(roi_for_ocr, roi_h, roi_w, is_green_plate):
 
     # 반전 버전
     top_inv = cv2.bitwise_not(top_crop)
-    # CLAHE 강화 버전
-    top_gray = cv2.cvtColor(top_crop, cv2.COLOR_BGR2GRAY)
-    clahe_obj = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
-    top_clahe = clahe_obj.apply(top_gray)
-    top_clahe_bgr = cv2.cvtColor(top_clahe, cv2.COLOR_GRAY2BGR)
-    # HSV V-channel 이진화
-    top_hsv = cv2.cvtColor(top_crop, cv2.COLOR_BGR2HSV)
-    _, _, top_v = cv2.split(top_hsv)
-    _, top_val_mask = cv2.threshold(top_v, 150, 255, cv2.THRESH_BINARY)
-    top_val_bgr = cv2.cvtColor(top_val_mask, cv2.COLOR_GRAY2BGR)
-    # 선명화 800px 버전
-    sc_800 = 800 / top_crop.shape[1] if top_crop.shape[1] < 800 else 1.0
-    if sc_800 > 1.0:
-        top_800 = cv2.resize(top_inv, None, fx=sc_800, fy=sc_800, interpolation=cv2.INTER_CUBIC)
-        sharp_k = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
-        top_sharp800 = cv2.filter2D(top_800, -1, sharp_k)
-    else:
-        top_sharp800 = top_inv
 
     extra_crops = [
         ("top", top_inv),
@@ -318,6 +297,8 @@ def _make_extra_crops(roi_for_ocr, roi_h, roi_w, is_green_plate):
         _, _g_bin = cv2.threshold(_g_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
         extra_crops.append(("top", cv2.cvtColor(_g_bin, cv2.COLOR_GRAY2BGR)))
         # V채널 낮은 임계값
+        top_hsv = cv2.cvtColor(top_crop, cv2.COLOR_BGR2HSV)
+        _, _, top_v = cv2.split(top_hsv)
         _, _v_low = cv2.threshold(top_v, 100, 255, cv2.THRESH_BINARY)
         extra_crops.append(("top", cv2.cvtColor(_v_low, cv2.COLOR_GRAY2BGR)))
         # 하단 반전 추가
@@ -368,10 +349,6 @@ def _run_ocr(engine_name, engine, image, kr_allowlist=None):
                 except Exception:
                     conf = 0.5
                 return text, conf
-        elif engine_name == "crnn":
-            text, conf = engine.recognize(image)
-            if text:
-                return text, conf
     except Exception:
         pass
     return "", 0.0
@@ -399,6 +376,7 @@ def _run_ocr_pipeline(roi_for_ocr, ocr_engines, preprocessor, validator,
     _paddle_engine = ocr_engines.get("paddleocr")
 
     # ── Tier 1: PaddleOCR × 핵심 3개 전처리 ──
+    # ★ 매 iteration 후 합의 체크 → 조기 break
     if _paddle_engine:
         for method in _TIER1_METHODS:
             try:
@@ -423,11 +401,21 @@ def _run_ocr_pipeline(roi_for_ocr, ocr_engines, preprocessor, validator,
                 weight = 4 if _v2_has_region else 1
                 for _ in range(weight):
                     all_candidates.append((final_text, weighted_conf))
+
+                # ★ 매 method 후 즉시 합의 체크 → 조기 종료
+                if len(all_candidates) >= 2:
+                    _t1_counter_early = Counter(t for t, c in all_candidates)
+                    _t1_top_early, _t1_cnt_early = _t1_counter_early.most_common(1)[0]
+                    _t1_confs_early = [c for t, c in all_candidates if t == _t1_top_early]
+                    if _t1_cnt_early >= 2 and float(np.mean(_t1_confs_early)) > 0.6:
+                        tier1_consensus = True
+                        break  # ★ 나머지 전처리 스킵!
+
             except Exception:
                 continue
 
-        # Tier 1 합의 판정
-        if all_candidates:
+        # Tier 1 합의 판정 (조기 break 안 된 경우 최종 체크)
+        if not tier1_consensus and all_candidates:
             _t1_counter = Counter(t for t, c in all_candidates)
             _t1_top, _t1_cnt = _t1_counter.most_common(1)[0]
             _t1_confs = [c for t, c in all_candidates if t == _t1_top]
@@ -695,18 +683,12 @@ def _position_voting(all_candidates, roi_for_ocr, bbox, roi_crop_offset,
     # 신형 번호판 위치별 투표
     if new_parts:
         prefix_counter = Counter()
-        hangul_counter = Counter()
         suffix_counter = Counter()
-        prefix_confs = defaultdict(list)
         hangul_confs = defaultdict(list)
-        suffix_confs = defaultdict(list)
         for pfx, hg, sfx, c in new_parts:
             prefix_counter[pfx] += 1
-            hangul_counter[hg] += 1
             suffix_counter[sfx] += 1
-            prefix_confs[pfx].append(c)
             hangul_confs[hg].append(c)
-            suffix_confs[sfx].append(c)
         best_pfx = prefix_counter.most_common(1)[0][0]
         best_hg = max(hangul_confs.keys(), key=lambda k: sum(hangul_confs[k]))
 
@@ -753,13 +735,11 @@ def _position_voting(all_candidates, roi_for_ocr, bbox, roi_crop_offset,
     if old_parts:
         region_counter = Counter()
         num_counter = Counter()
-        hangul_counter = Counter()
         suffix_counter = Counter()
         hangul_confs_old = defaultdict(list)
         for rg, nm, hg, sfx, c in old_parts:
             region_counter[rg] += 1
             num_counter[nm] += 1
-            hangul_counter[hg] += 1
             suffix_counter[sfx] += 1
             hangul_confs_old[hg].append(c)
         best_rg = region_counter.most_common(1)[0][0]
@@ -975,34 +955,48 @@ def _process_single_ocr(request, ocr_engines, preprocessor, validator,
 
     roi_h, roi_w = roi.shape[:2]
 
+    # ★ Fast OCR 성공 여부 확인 (CMD5에서 전달)
+    _fast_text = request.get("fast_ocr_text", "")
+    _fast_conf = request.get("fast_ocr_conf", 0.0)
+    _fast_shortcut = bool(_fast_text and _fast_conf > 0.7)
+
     # B. ROI 업스케일
     roi_for_ocr, clf_scale, clf_pad = _upscale_roi(roi)
 
     # C. 색상 검증
     color_conf_penalty, is_green_plate = _check_color(roi)
 
-    # D. CRNN
-    crnn_candidates = _run_crnn(crnn_model, roi, validator)
-
-    # E. Extra crops
-    extra_crops = _make_extra_crops(roi_for_ocr, roi_h, roi_w, is_green_plate)
-
-    # G. OCR 파이프라인
+    # G. OCR 파이프라인 (★ Fast OCR 성공 시 Tier1만 실행)
     all_candidates, tier1_consensus, mid_consensus = _run_ocr_pipeline(
         roi_for_ocr, ocr_engines, preprocessor, validator,
         is_green_plate, kr_allowlist
     )
 
-    # H. Extra crops 처리
-    extra_cands = _process_extra_crops(
-        extra_crops, ocr_engines, preprocessor, validator,
-        tier1_consensus, mid_consensus
-    )
-    all_candidates.extend(extra_cands)
+    # ★ Fast OCR 확인용 단축 경로: Tier1 결과만으로 판단
+    # fast_ocr 성공(conf>0.7) + Tier1 합의 → CRNN/Extra/Tier2 전부 스킵
+    if _fast_shortcut and tier1_consensus:
+        pass  # Tier1만으로 충분 — 나머지 전부 스킵
+    elif _fast_shortcut and not tier1_consensus:
+        # Fast OCR는 성공했지만 Tier1 불일치 → Tier2까지만 (CRNN/Extra 스킵)
+        pass
+    elif not tier1_consensus:
+        # Fast OCR 실패 + Tier1 불일치 → 기존 풀 파이프라인
+        # D. CRNN (합의 실패 시에만 실행)
+        crnn_candidates = _run_crnn(crnn_model, roi, validator)
 
-    # I. CRNN 가중치
-    crnn_extra = _adjust_crnn_weight(crnn_candidates, all_candidates)
-    all_candidates.extend(crnn_extra)
+        # E. Extra crops (합의 실패 시에만 생성)
+        extra_crops = _make_extra_crops(roi_for_ocr, roi_h, roi_w, is_green_plate)
+
+        # H. Extra crops 처리
+        extra_cands = _process_extra_crops(
+            extra_crops, ocr_engines, preprocessor, validator,
+            tier1_consensus, mid_consensus
+        )
+        all_candidates.extend(extra_cands)
+
+        # I. CRNN 가중치
+        crnn_extra = _adjust_crnn_weight(crnn_candidates, all_candidates)
+        all_candidates.extend(crnn_extra)
 
     # J. 위치별 투표
     best_text, best_conf = _position_voting(
@@ -1098,6 +1092,33 @@ def ocr_worker_loop(ocr_queue: Queue, result_queue: Queue, cmd_queue: Queue):
         try:
             request = ocr_queue.get(timeout=0.1)
         except Exception:
+            continue
+
+        # ★ timestamp 기반 stale 요청 폐기: 3초 이상 지난 항목은 처리하지 않고 버림
+        # (Heavy OCR 기회 확보를 위해 2.0→3.0초로 완화)
+        _req_ts = request.get("timestamp", 0)
+        _age = time.time() - _req_ts
+        if _age > 3.0:
+            print(f"[CMD6-OCR] stale 요청 폐기: frame={request.get('frame_id', '?')} "
+                  f"age={_age:.2f}s > 3.0s", flush=True)
+            # 빈 결과 전송 (메인 프로세스 _pending_ocr 정리용)
+            result_queue.put({
+                "frame_id": request.get("frame_id", -1),
+                "det_index": request.get("det_index", -1),
+                "best_text": "",
+                "best_conf": 0.0,
+                "bbox": request.get("bbox", [0, 0, 0, 0]),
+                "is_small_plate": request.get("is_small_plate", False),
+                "det_w": request.get("det_w", 0),
+                "is_green_plate": False,
+                "plate_type": "",
+                "vehicle_type": "",
+                "plate_lines": 1,
+                "plate_color": "흰색바탕_검은글씨",
+                "is_valid_format": False,
+                "ocr_ms": 0.0,
+                "timestamp": time.time(),
+            })
             continue
 
         try:

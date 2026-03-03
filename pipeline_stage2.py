@@ -10,6 +10,7 @@ CMD 12: 메인 프로세스 - 영상 읽기 + YOLO 결과 + OCR 결과 + 표시
 """
 import argparse
 import os
+import re
 import time
 import sys
 import cv2
@@ -20,9 +21,9 @@ from collections import defaultdict
 from PIL import Image, ImageDraw, ImageFont
 
 from pipeline_common import (
-    CMD_STOP, CMD_OCR_STOP, DETECT_CONFIG,
+    CMD_STOP, CMD_OCR_STOP, CMD_YOLO_READY, DETECT_CONFIG, bbox_iou,
 )
-from cmd5_yolo_worker import yolo_worker_loop
+from cmd5_yolo_worker import yolo_worker_loop, _is_valid_plate_format
 from cmd6_ocr_worker import ocr_worker_loop
 
 # plate_engine_pro.py에서 트래커 import
@@ -263,23 +264,35 @@ def _update_tracker_with_ocr(tracker, ocr_result, matched_trk, is_new_track,
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # C. 결과 그리기 (확장)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-def draw_results(frame, results, inference_ms, display_fps, ocr_count=0):
-    """bbox + 번호판 텍스트 + 신뢰도 표시 (한글 1회 PIL 변환)
+def _display_nms(results, iou_threshold=0.5):
+    """display_results에서 IoU 높은 중복 제거 — conf 높은 것만 유지"""
+    if not results:
+        return results
+    sorted_results = sorted(results, key=lambda r: r.get("confidence", 0), reverse=True)
+    keep = []
+    for r in sorted_results:
+        bbox = r.get("bbox", [0, 0, 0, 0])
+        is_dup = False
+        for k in keep:
+            if bbox_iou(bbox, k.get("bbox", [0, 0, 0, 0])) > iou_threshold:
+                is_dup = True
+                break
+        if not is_dup:
+            keep.append(r)
+    return keep
 
-    Args:
-        frame: 표시할 프레임 (in-place 수정)
-        results: 표시용 result dict 리스트
-        inference_ms: YOLO 추론 시간
-        display_fps: 표시 FPS
-        ocr_count: 누적 OCR 처리 수
-    """
-    # 상단 정보 텍스트 (영문만 → cv2.putText OK)
+
+def draw_results(frame, results, inference_ms, display_fps, ocr_count=0):
+    """bbox + 번호판 텍스트 + 신뢰도 표시 (NMS + 크기필터 + 겹침방지)"""
+    # ★ NMS 적용 — 중복 bbox 제거
+    results = _display_nms(results)
+
     info_text = f"FPS: {display_fps:.1f} | YOLO: {inference_ms:.0f}ms | Det: {len(results)} | OCR: {ocr_count}"
     cv2.putText(frame, info_text, (10, 30),
                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 0), 2)
 
-    # bbox는 cv2로 먼저 그리고, 한글 텍스트는 모아서 1회 PIL 변환
-    korean_labels = []  # (label, x, y, font_sz, color_bgr)
+    korean_labels = []
+    _drawn_label_ys = []  # ★ 겹침 방지용 y좌표 기록
 
     for i, res in enumerate(results):
         bbox = res["bbox"]
@@ -287,26 +300,40 @@ def draw_results(frame, results, inference_ms, display_fps, ocr_count=0):
         conf = res.get("confidence", 0)
         x1, y1, x2, y2 = bbox
 
+        # ★ 원거리 차량 스킵 (너무 작은 bbox는 그리지 않음)
+        _bw = x2 - x1
+        _bh = y2 - y1
+        if _bw < 80 or _bh < 25:
+            continue
+
         if text:
-            color = (0, 255, 0)  # 초록: 인식 성공
+            color = (0, 255, 0)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 2)
-            label = f"{text} {conf:.2f}"
-            font_sz = max(18, min(28, (x2 - x1) // 4))
+            label = f"{text} ({conf*100:.0f}%)"
+            font_sz = max(18, min(28, _bw // 4))
+
+            # ★ 텍스트 겹침 방지 — 이미 그린 라벨과 겹치면 위로 밀기
             label_y = max(0, y1 - font_sz - 6)
+            for dy in _drawn_label_ys:
+                if abs(label_y - dy) < 35:
+                    label_y = dy - 35
+            label_y = max(0, label_y)
+            _drawn_label_ys.append(label_y)
+
             korean_labels.append((label, x1 + 2, label_y, font_sz, color))
         else:
-            color = (0, 165, 255)  # 주황: 탐지만 (OCR 미완)
+            color = (0, 165, 255)
             cv2.rectangle(frame, (x1, y1), (x2, y2), color, 1)
 
-    # 한글 텍스트가 있으면 1회 PIL 변환으로 모두 그리기
     if korean_labels:
         pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
         draw = ImageDraw.Draw(pil_img)
         for label, x, y, font_sz, color_bgr in korean_labels:
             font = _get_font(font_sz)
             rgb_color = (color_bgr[2], color_bgr[1], color_bgr[0])
-            for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1)]:
-                draw.text((x + dx, y + dy), label, font=font, fill=(0, 0, 0))
+            # ★ 배경 박스 (가독성 향상)
+            _bbox = draw.textbbox((x, y), label, font=font)
+            draw.rectangle([_bbox[0]-2, _bbox[1]-2, _bbox[2]+2, _bbox[3]+2], fill=(0, 0, 0))
             draw.text((x, y), label, font=font, fill=rgb_color)
         result = cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
         np.copyto(frame, result)
@@ -333,7 +360,8 @@ def open_video(source):
 # D. 메인 표시 루프 (비동기 OCR)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def display_loop(cap, frame_queue, detect_queue, ocr_queue,
-                 ocr_result_queue, cmd_queue_yolo, cmd_queue_ocr):
+                 ocr_result_queue, cmd_queue_yolo, cmd_queue_ocr,
+                 headless=False):
     """메인 루프: 프레임 → YOLO → OCR 스킵 판단 → OCR 요청/결과 → 표시"""
     cfg = DETECT_CONFIG
 
@@ -355,25 +383,43 @@ def display_loop(cap, frame_queue, detect_queue, ocr_queue,
     display_fps = 0.0
     total_ocr_count = 0
 
-    # _pending_ocr: (frame_id, det_index) → (matched_trk, is_new_track, det_info)
+    # _pending_ocr: (frame_id, det_index) → (tracker_id, matched_trk, is_new_track, timestamp)
     _pending_ocr = {}
-    # 보류 결과 최대 보관 시간 (초) — OCR 엔진 초기 로딩 + 처리 시간 고려
-    _PENDING_TIMEOUT = 60.0
+    # tracker_id → ocr_key 역매핑 (동일 트래커 중복 OCR 요청 방지)
+    _pending_tracker_ids = {}
+    # 트랙 고유 ID 카운터 (단조 증가)
+    _next_track_id = 0
+    # 보류 결과 최대 보관 시간 (초) — dedup으로 누적 감소하여 단축
+    _PENDING_TIMEOUT = 15.0
 
     # 현재 표시할 결과 목록 (각 항목에 "_last_seen" 프레임 번호 저장)
     display_results = []
-    _DISPLAY_TTL = 45  # 45프레임(~1.5초) 미감지 시 표시 제거
+    _DISPLAY_TTL = 12  # 12프레임(~0.4초) — Heavy OCR 도착 여유 확보
+
+    # ★ 연속 Det=0 카운터 (잔상 즉시 클리어용)
+    _zero_det_streak = 0
+
+    # ★ 트래커별 번호판 투표 카운터 (오인식 방지)
+    _plate_votes = {}  # {tid: {text: count}}
+
+    # ★ 스크린샷 저장 설정
+    _screenshot_dir = "test_results/screenshots"
+    os.makedirs(_screenshot_dir, exist_ok=True)
+    _prev_det_count = 0          # 이전 프레임 탐지 수 (Det=0 직전 감지용)
+    _ss_pending_fast = []        # Fast OCR 성공 시 지연 저장 목록: [(frame_id, text)]
+    _ss_saved_count = 0          # 총 저장 수 (로그용)
 
     # 영상 정보
     video_fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
     frame_interval = 1.0 / video_fps  # 프레임 간격 (초)
     _last_frame_time = time.time()
 
-    # cv2 창 초기화 (WINDOW_AUTOSIZE: 프레임 크기에 맞춤)
+    # cv2 창 초기화 (headless 모드에서는 생략)
     _win_name = "Pipeline Stage 2 - YOLO + OCR"
-    cv2.namedWindow(_win_name, cv2.WINDOW_AUTOSIZE)
+    if not headless:
+        cv2.namedWindow(_win_name, cv2.WINDOW_AUTOSIZE)
 
-    print("[CMD12] 표시 루프 시작 (q: 종료)")
+    print(f"[CMD12] 표시 루프 시작 ({'headless' if headless else 'q: 종료'})")
 
     while True:
         ret, frame = cap.read()
@@ -390,17 +436,27 @@ def display_loop(cap, frame_queue, detect_queue, ocr_queue,
             "frame_id": frame_id,
             "camera_id": "CAM01",
         }
-        try:
-            frame_queue.put_nowait(packet)
-        except Full:
+        if headless:
+            # ★ Headless: 블로킹 put — YOLO 처리 속도에 맞춤 (프레임 드롭 최소화)
             try:
-                frame_queue.get_nowait()
-            except Empty:
-                pass
+                frame_queue.put(packet, timeout=5.0)
+            except Full:
+                try:
+                    frame_queue.get_nowait()
+                except Empty:
+                    pass
+        else:
             try:
                 frame_queue.put_nowait(packet)
             except Full:
-                pass
+                try:
+                    frame_queue.get_nowait()
+                except Empty:
+                    pass
+                try:
+                    frame_queue.put_nowait(packet)
+                except Full:
+                    pass
 
         # 2. YOLO 결과 수신 (논블로킹)
         _new_det_received = False
@@ -418,47 +474,124 @@ def display_loop(cap, frame_queue, detect_queue, ocr_queue,
                 total_ocr_count += 1
                 key = (ocr_result["frame_id"], ocr_result["det_index"])
                 trk_state = _pending_ocr.pop(key, None)
-                if trk_state is not None and ocr_result["best_text"]:
-                    matched_trk, is_new, _ = trk_state
-                    # 트래커 업데이트
-                    result = _update_tracker_with_ocr(
-                        tracker, ocr_result, matched_trk, is_new,
-                        consecutive_required, validator, db
-                    )
-                    if result:
-                        result["_last_seen"] = frame_id
-                        print(f"[CMD12] OCR: '{ocr_result['best_text']}' "
-                              f"conf={ocr_result['best_conf']:.2f}", flush=True)
-                        # 기존 표시 결과에서 같은 번호판 교체
-                        _replaced = False
+                if trk_state is None:
+                    continue  # 이미 드레인/타임아웃으로 폐기된 요청
+                tid, matched_trk, is_new, _ts = trk_state
+                # 역매핑 정리
+                _pending_tracker_ids.pop(tid, None)
+
+                if not ocr_result["best_text"]:
+                    continue
+
+                # ★ 트래커 생존 확인 — 사망 시 트랙 부활 안 함 (좀비 방지)
+                # 단, 결과 자체는 TTL 기한부로 표시 (OCR 지연 대응)
+                _tracker_alive = matched_trk in tracker.tracks
+                print(f"[DEBUG-OCR-RECV] frame={frame_id} text={ocr_result['best_text']} "
+                      f"tracker_alive={_tracker_alive} tid={tid}", flush=True)
+                if not _tracker_alive:
+                    # ★ 트래커 사망 — display에 추가하지 않음 (잔상 방지)
+                    # 기존 display에 같은 tid가 있으면 교체만 허용 (이미 표시 중인 건)
+                    if ocr_result["best_text"]:
+                        print(f"[CMD12] OCR(dead): '{ocr_result['best_text']}' "
+                              f"conf={ocr_result['best_conf']:.2f} tid={tid}", flush=True)
+                        # 기존 display에 같은 tid가 있으면 Heavy 결과로 교체 (정확도 향상)
                         for idx, existing in enumerate(display_results):
-                            if existing.get("plate") == result["plate"]:
-                                display_results[idx] = result
-                                _replaced = True
+                            if existing.get("_tracker_id") == tid:
+                                existing["plate"] = ocr_result["best_text"]
+                                existing["confidence"] = ocr_result["best_conf"]
+                                existing["plate_number"] = ocr_result["best_text"]
+                                existing.pop("is_fast_ocr", None)
                                 break
-                        if not _replaced:
-                            display_results.append(result)
+                    continue
+
+                # 트래커 업데이트
+                result = _update_tracker_with_ocr(
+                    tracker, ocr_result, matched_trk, is_new,
+                    consecutive_required, validator, db
+                )
+                if result:
+                    result["_last_seen"] = frame_id
+                    result["_tracker_id"] = tid
+
+                    # ★ C-2: Heavy OCR 결과를 투표 카운터에 가중 반영 (+5)
+                    _heavy_text = ocr_result["best_text"]
+                    if tid not in _plate_votes:
+                        _plate_votes[tid] = {}
+                    _plate_votes[tid][_heavy_text] = _plate_votes[tid].get(_heavy_text, 0) + 5
+
+                    # ★ 기존 표시 결과에서 같은 tracker_id 또는 같은 번호판 교체
+                    _replaced = False
+                    for idx, existing in enumerate(display_results):
+                        if existing.get("_tracker_id") == tid or existing.get("plate") == result["plate"]:
+                            # fast_ocr → heavy 교체 로그
+                            if existing.get("is_fast_ocr"):
+                                print(f"[CMD12] Heavy→Fast교체: '{existing.get('plate')}' → "
+                                      f"'{result['plate']}' conf={ocr_result['best_conf']:.2f} "
+                                      f"tid={tid}", flush=True)
+                            else:
+                                print(f"[CMD12] OCR: '{ocr_result['best_text']}' "
+                                      f"conf={ocr_result['best_conf']:.2f} tid={tid}", flush=True)
+                            display_results[idx] = result
+                            _replaced = True
+                            break
+                    if not _replaced:
+                        print(f"[CMD12] OCR: '{ocr_result['best_text']}' "
+                              f"conf={ocr_result['best_conf']:.2f} tid={tid}", flush=True)
+                        display_results.append(result)
             except Empty:
                 break
 
         # 4. YOLO 탐지 처리 (새 결과가 도착할 때마다)
-        # ★ YOLO 결과 도착 시 즉시 처리 (frame_id 정확 매칭 불필요)
-        # YOLO는 비동기이므로 결과의 frame_id가 현재 표시 frame_id와 다를 수 있음
         if _new_det_received and last_det_result is not None:
-            _det_frame_id = last_det_result["frame_id"]  # YOLO 결과의 원본 프레임 번호
+            _det_frame_id = last_det_result["frame_id"]
+
+            # ★ 연속 Det=0 카운터 관리 → 잔상 즉시 클리어
+            if len(last_det_result["detections"]) == 0:
+                _zero_det_streak += 1
+                if _zero_det_streak >= 3:
+                    display_results.clear()
+                    _plate_votes.clear()  # 투표 카운터도 리셋
+            else:
+                _zero_det_streak = 0
+
             new_display = []
             tracker.begin_frame()
 
             for det_idx, det in enumerate(last_det_result["detections"]):
                 bbox = det["bbox"]
+                fast_text = det.get("fast_ocr_text", "")
+                fast_conf = det.get("fast_ocr_conf", 0.0)
+
                 skip, matched_trk, is_new, cached = _should_skip_ocr(
                     tracker, bbox, consecutive_required
                 )
+
+                # 모든 트랙에 고유 _pipeline_id 할당
+                if "_pipeline_id" not in matched_trk:
+                    matched_trk["_pipeline_id"] = _next_track_id
+                    _next_track_id += 1
+                tid = matched_trk["_pipeline_id"]
+
                 if skip and cached:
-                    cached["_last_seen"] = frame_id
-                    new_display.append(cached)
-                elif not skip:
-                    # ROI가 있으면 OCR 요청 전송
+                    # ★ bbox IoU 체크 — 같은 차인지 확인
+                    _cached_bbox = cached.get("bbox", [0, 0, 0, 0])
+                    _cache_iou = bbox_iou(_cached_bbox, bbox)
+                    if _cache_iou < 0.3:
+                        # 다른 차 → 캐시 무효화, 새 OCR 요청으로 전환
+                        skip = False
+                        cached = None
+                    else:
+                        # ★ 같은 차 — 캐시에 fast_ocr가 더 높은 conf면 교체
+                        if fast_text and fast_conf > cached.get("confidence", 0):
+                            cached["plate"] = fast_text
+                            cached["confidence"] = fast_conf
+                            cached["plate_number"] = fast_text
+                            cached["is_fast_ocr"] = True
+                        cached["_last_seen"] = frame_id
+                        cached["_tracker_id"] = tid
+                        new_display.append(cached)
+                if not skip:
+                    # ROI가 있으면 Heavy OCR 요청 전송 (기존 로직 유지)
                     roi = det.get("roi")
                     if roi is not None and roi.size > 0:
                         ox1, oy1, ox2, oy2 = bbox
@@ -480,62 +613,148 @@ def display_loop(cap, frame_queue, detect_queue, ocr_queue,
                             "is_small_plate": det["is_small_plate"],
                             "aspect_type": det["aspect_type"],
                             "timestamp": time.time(),
+                            "fast_ocr_text": fast_text,
+                            "fast_ocr_conf": fast_conf,
                         }
 
-                        # ocr_queue: Full이면 오래된 요청 버림
-                        try:
-                            ocr_queue.put_nowait(ocr_request)
-                        except Full:
-                            try:
-                                ocr_queue.get_nowait()
-                            except Empty:
-                                pass
+                        # ★ 이미 이 tracker에 대한 OCR 대기 중이면 스킵
+                        if tid in _pending_tracker_ids:
+                            pass
+                        else:
                             try:
                                 ocr_queue.put_nowait(ocr_request)
                             except Full:
-                                pass
+                                while True:
+                                    try:
+                                        _old = ocr_queue.get_nowait()
+                                        _old_key = (_old["frame_id"], _old["det_index"])
+                                        _old_state = _pending_ocr.pop(_old_key, None)
+                                        if _old_state is not None:
+                                            _pending_tracker_ids.pop(_old_state[0], None)
+                                    except Empty:
+                                        break
+                                try:
+                                    ocr_queue.put_nowait(ocr_request)
+                                except Full:
+                                    pass
 
-                        # 트래커 상태 보관 (OCR request의 frame_id와 동일한 키 사용)
-                        _pending_ocr[(_det_frame_id, det_idx)] = (
-                            matched_trk, is_new, {"timestamp": time.time()}
-                        )
+                            ocr_key = (_det_frame_id, det_idx)
+                            _pending_ocr[ocr_key] = (
+                                tid, matched_trk, is_new, time.time()
+                            )
+                            _pending_tracker_ids[tid] = ocr_key
 
-                    # 아직 OCR 결과 없는 탐지는 bbox만 표시
-                    new_display.append({
-                        "plate": "",
-                        "confidence": 0,
-                        "bbox": bbox,
-                        "is_alert": False,
-                        "alert_info": None,
-                        "plate_number": "",
-                        "confidence_level": "",
-                        "plate_type": "",
-                        "vehicle_type": "",
-                        "plate_lines": 1,
-                        "plate_color": "",
-                        "bbox_area": 0,
-                        "frame_count": 0,
-                        "is_valid_format": False,
-                        "rejection_reason": None,
-                    })
+                    # ★ Fast OCR 결과가 있으면 투표 후 즉시 display에 추가
+                    if fast_text and fast_conf > 0.3:
+                        # ★ 트래커별 투표: 동일 tid에서 여러 프레임 결과 누적
+                        # 정규식(한국 번호판 패턴) 완벽 일치 시 가중치 2배
+                        if tid not in _plate_votes:
+                            _plate_votes[tid] = {}
+                        _vote_w = 2 if _is_valid_plate_format(fast_text) else 1
+                        _plate_votes[tid][fast_text] = _plate_votes[tid].get(fast_text, 0) + _vote_w
+
+                        # 최다 투표 텍스트를 display에 사용
+                        _best_voted = max(_plate_votes[tid], key=_plate_votes[tid].get)
+                        _best_voted_count = _plate_votes[tid][_best_voted]
+                        # 투표 2회 이상이면 최다 텍스트, 아니면 현재 결과 사용
+                        _display_text = _best_voted if _best_voted_count >= 2 else fast_text
+                        _display_conf = fast_conf
+
+                        _bw = bbox[2] - bbox[0]
+                        _bh = bbox[3] - bbox[1]
+                        fast_result = {
+                            "plate": _display_text,
+                            "confidence": _display_conf,
+                            "bbox": bbox,
+                            "is_alert": False,
+                            "alert_info": None,
+                            "plate_number": _display_text,
+                            "confidence_level": "",
+                            "plate_type": "",
+                            "vehicle_type": "",
+                            "plate_lines": 1,
+                            "plate_color": "",
+                            "bbox_area": _bw * _bh,
+                            "frame_count": _best_voted_count,
+                            "is_valid_format": True,
+                            "rejection_reason": None,
+                            "_last_seen": frame_id,
+                            "_tracker_id": tid,
+                            "is_fast_ocr": True,
+                        }
+                        new_display.append(fast_result)
+
+                        # ★ 트래커에도 fast 결과 저장 (다음 프레임 skip 판단용)
+                        matched_trk["_best_text"] = _display_text
+                        matched_trk["_best_conf"] = _display_conf
+
+                        print(f"[CMD12] Fast OCR 즉시표시: '{_display_text}' "
+                              f"conf={_display_conf:.2f} tid={tid} "
+                              f"votes={_plate_votes[tid]}", flush=True)
+
+                        # ★ 스크린샷: Fast OCR 성공 시 지연 저장 예약
+                        _ss_pending_fast.append((frame_id, _display_text))
+                    else:
+                        # Fast OCR 없음 — bbox만 표시 (Heavy OCR 대기)
+                        new_display.append({
+                            "plate": "",
+                            "confidence": 0,
+                            "bbox": bbox,
+                            "is_alert": False,
+                            "alert_info": None,
+                            "plate_number": "",
+                            "confidence_level": "",
+                            "plate_type": "",
+                            "vehicle_type": "",
+                            "plate_lines": 1,
+                            "plate_color": "",
+                            "bbox_area": 0,
+                            "frame_count": 0,
+                            "is_valid_format": False,
+                            "rejection_reason": None,
+                            "_tracker_id": tid,
+                        })
 
             tracker.end_frame()
 
-            # 기존 OCR 결과 유지 (TTL 이내 + 같은 번호판이 new_display에 없는 것만)
+            # ★ 기존 OCR 결과 유지 — TTL 이내 + 고스트 체크
             for prev in display_results:
-                if prev.get("plate"):
-                    _age = frame_id - prev.get("_last_seen", 0)
-                    if _age > _DISPLAY_TTL:
-                        continue  # TTL 만료 → 제거
-                    found = False
+                if not prev.get("plate"):
+                    continue
+                _prev_tid = prev.get("_tracker_id")
+                _age = frame_id - prev.get("_last_seen", 0)
+
+                # TTL 만료 → 즉시 제거
+                if _age > _DISPLAY_TTL:
+                    continue
+
+                # 같은 tracker_id/텍스트가 이미 new_display에 있으면 스킵
+                found = False
+                for nd in new_display:
+                    if _prev_tid is not None and nd.get("_tracker_id") == _prev_tid:
+                        found = True
+                        break
+                    if nd.get("plate") == prev["plate"]:
+                        found = True
+                        break
+                if not found:
+                    # 고스트 체크: 같은 위치에 다른 텍스트의 새 탐지 → 제거
+                    prev_bbox = prev.get("bbox", [0, 0, 0, 0])
+                    _is_ghost = False
                     for nd in new_display:
-                        if nd.get("plate") == prev["plate"]:
-                            found = True
-                            break
-                    if not found:
+                        if nd.get("plate") and nd.get("plate") != prev["plate"]:
+                            if bbox_iou(prev_bbox, nd.get("bbox", [0,0,0,0])) > 0.20:
+                                _is_ghost = True
+                                break
+                    if not _is_ghost:
                         new_display.append(prev)
 
             display_results = new_display
+
+            # ★ display_results 갱신 로그
+            _plate_texts = [p.get('plate', '') for p in display_results if p.get('plate')]
+            if _plate_texts:
+                print(f"[DEBUG-DISPLAY] plates={len(_plate_texts)} texts={_plate_texts}", flush=True)
 
             # ★ 디버그 (30프레임마다 또는 상태 변화 시)
             if frame_id % 30 == 0:
@@ -545,38 +764,126 @@ def display_loop(cap, frame_queue, detect_queue, ocr_queue,
                       f"plates={_plates} pending={_pending} "
                       f"ocr={total_ocr_count}", flush=True)
 
-        # _pending_ocr 타임아웃 정리
+        # ★ YOLO 결과 없는 프레임에서도 TTL 기반 잔상 제거
+        if not _new_det_received and display_results:
+            display_results = [
+                d for d in display_results
+                if d.get("plate") and (frame_id - d.get("_last_seen", 0)) <= _DISPLAY_TTL
+            ]
+
+        # _pending_ocr 타임아웃 정리 (4-tuple: tid, matched_trk, is_new, timestamp)
         now = time.time()
-        expired = [k for k, (_, _, det) in _pending_ocr.items()
-                   if now - det.get("timestamp", now) > _PENDING_TIMEOUT]
+        expired = [k for k, (tid, _trk, _new, ts) in _pending_ocr.items()
+                   if now - ts > _PENDING_TIMEOUT]
         for k in expired:
-            del _pending_ocr[k]
+            _exp_state = _pending_ocr.pop(k, None)
+            if _exp_state is not None:
+                _pending_tracker_ids.pop(_exp_state[0], None)
 
-        # 5. 표시
-        display_frame = frame.copy()
+        # 5. 표시 (headless 모드에서는 렌더링/대기 생략 → Max FPS)
+        if not headless:
+            display_frame = frame.copy()
 
-        # FPS 계산
-        fps_counter += 1
-        if now - fps_time >= 1.0:
-            display_fps = fps_counter / (now - fps_time)
-            fps_counter = 0
-            fps_time = now
+            # FPS 계산
+            fps_counter += 1
+            if now - fps_time >= 1.0:
+                display_fps = fps_counter / (now - fps_time)
+                fps_counter = 0
+                fps_time = now
 
-        inference_ms = last_det_result["inference_ms"] if last_det_result else 0.0
-        draw_results(display_frame, display_results, inference_ms, display_fps, total_ocr_count)
+            inference_ms = last_det_result["inference_ms"] if last_det_result else 0.0
+            draw_results(display_frame, display_results, inference_ms, display_fps, total_ocr_count)
 
-        cv2.imshow(_win_name, display_frame)
+            # ★ 스크린샷 저장 (draw_results 이후 — bbox+텍스트가 그려진 상태)
+            # 1. Fast OCR 성공 시
+            if _ss_pending_fast:
+                for _ss_fid, _ss_text in _ss_pending_fast:
+                    _ss_safe_text = re.sub(r'[\\/:*?"<>|]', '_', _ss_text)
+                    _ss_path = f"{_screenshot_dir}/frame_{_ss_fid:05d}_fast_{_ss_safe_text}.jpg"
+                    cv2.imwrite(_ss_path, display_frame)
+                    _ss_saved_count += 1
+                _ss_pending_fast.clear()
 
-        # 프레임 레이트 제한: 원본 FPS에 맞춰 대기
-        _elapsed = time.time() - _last_frame_time
-        _wait_ms = max(1, int((frame_interval - _elapsed) * 1000))
-        _last_frame_time = time.time()
-        key = cv2.waitKey(_wait_ms) & 0xFF
-        if key == ord('q') or key == 27:
-            print("[CMD12] 사용자 종료 요청")
-            break
+            # 2. Det=0 직전 (이전에 탐지 있었는데 현재 0)
+            _cur_det_count = len(last_det_result["detections"]) if last_det_result else 0
+            if _new_det_received and _cur_det_count == 0 and _prev_det_count > 0:
+                _ss_path = f"{_screenshot_dir}/frame_{frame_id:05d}_leaving.jpg"
+                cv2.imwrite(_ss_path, display_frame)
+                _ss_saved_count += 1
+            _prev_det_count = _cur_det_count if _new_det_received else _prev_det_count
 
-    cv2.destroyAllWindows()
+            # 3. 30프레임마다 정기 저장
+            if frame_id % 30 == 0:
+                _ss_path = f"{_screenshot_dir}/frame_{frame_id:05d}_periodic.jpg"
+                cv2.imwrite(_ss_path, display_frame)
+                _ss_saved_count += 1
+
+            cv2.imshow(_win_name, display_frame)
+
+            # 프레임 레이트 제한: 원본 FPS에 맞춰 대기
+            _elapsed = time.time() - _last_frame_time
+            _wait_ms = max(1, int((frame_interval - _elapsed) * 1000))
+            _last_frame_time = time.time()
+            key = cv2.waitKey(_wait_ms) & 0xFF
+            if key == ord('q') or key == 27:
+                print("[CMD12] 사용자 종료 요청")
+                break
+        else:
+            # ★ Headless: 렌더링/대기 생략 — 미사용 리스트만 클리어
+            _ss_pending_fast.clear()
+
+    # ★ Headless: 잔여 YOLO/OCR 결과 드레인 (파이프라인 처리 완료 대기)
+    if headless:
+        _drain_deadline = time.time() + 15
+        while time.time() < _drain_deadline:
+            _drain_activity = False
+
+            # YOLO 잔여 결과 수신 + Fast OCR 로그
+            try:
+                _dr_det = detect_queue.get(timeout=0.5)
+                if isinstance(_dr_det, dict) and "detections" in _dr_det:
+                    _drain_activity = True
+                    for _dd in _dr_det.get("detections", []):
+                        _ft = _dd.get("fast_ocr_text", "")
+                        _fc = _dd.get("fast_ocr_conf", 0.0)
+                        if _ft and _fc > 0.3:
+                            _drain_tid = _next_track_id
+                            _next_track_id += 1
+                            print(f"[CMD12] Fast OCR 즉시표시: '{_ft}' "
+                                  f"conf={_fc:.2f} tid={_drain_tid} "
+                                  f"votes={{'{_ft}': 1}}", flush=True)
+            except Empty:
+                pass
+
+            # OCR 잔여 결과 수신 + alive/dead 로그
+            while True:
+                try:
+                    _dr_ocr = ocr_result_queue.get_nowait()
+                    total_ocr_count += 1
+                    _drain_activity = True
+                    if _dr_ocr.get("best_text"):
+                        _dk = (_dr_ocr["frame_id"], _dr_ocr["det_index"])
+                        _ds = _pending_ocr.pop(_dk, None)
+                        if _ds:
+                            _dt, _dm, _, _ = _ds
+                            _pending_tracker_ids.pop(_dt, None)
+                            _da = _dm in tracker.tracks
+                            if _da:
+                                print(f"[CMD12] OCR: '{_dr_ocr['best_text']}' "
+                                      f"conf={_dr_ocr['best_conf']:.2f} tid={_dt}", flush=True)
+                            else:
+                                print(f"[CMD12] OCR(dead): '{_dr_ocr['best_text']}' "
+                                      f"conf={_dr_ocr['best_conf']:.2f} tid={_dt}", flush=True)
+                except Empty:
+                    break
+
+            if not _drain_activity and not _pending_ocr:
+                break
+
+    if _ss_saved_count > 0:
+        print(f"[CMD12] 스크린샷 {_ss_saved_count}장 저장 → {_screenshot_dir}/", flush=True)
+    if not headless:
+        cv2.destroyAllWindows()
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
@@ -587,6 +894,8 @@ def main():
     parser = argparse.ArgumentParser(description="2단계 파이프라인: YOLO + OCR 분리")
     parser.add_argument("--input", type=str, default="movie/hiway.mp4",
                         help="입력 소스 (파일 경로 또는 웹캠 인덱스)")
+    parser.add_argument("--headless", action="store_true", default=False,
+                        help="헤드리스 모드 (cv2 표시 없이 최대 속도 실행)")
     args = parser.parse_args()
 
     source = args.input
@@ -625,35 +934,72 @@ def main():
     print("[CMD12] OCR 워커 시작...")
     ocr_worker.start()
 
+    # ★ YOLO 모델 로딩 + warm-up 완료 대기 (영상 재생 전 필수)
+    print("[CMD12] YOLO ready 대기 중...")
+    _yolo_ready = False
+    _ready_deadline = time.time() + 30  # 최대 30초 대기
+    while not _yolo_ready and time.time() < _ready_deadline:
+        try:
+            _sig = detect_queue.get(timeout=1.0)
+            if isinstance(_sig, dict) and _sig.get("cmd") == CMD_YOLO_READY:
+                _yolo_ready = True
+                _wms = _sig.get("warmup_ms", 0)
+                print(f"[CMD12] YOLO ready 수신 (warm-up: {_wms:.0f}ms)")
+            else:
+                # ready가 아닌 일반 결과 → 다시 큐에 넣기
+                try:
+                    detect_queue.put_nowait(_sig)
+                except Full:
+                    pass
+        except Empty:
+            pass
+    if not _yolo_ready:
+        print("[CMD12] YOLO ready 타임아웃 — 강제 시작")
+
     try:
         display_loop(cap, frame_queue, detect_queue, ocr_queue,
-                     ocr_result_queue, cmd_queue_yolo, cmd_queue_ocr)
+                     ocr_result_queue, cmd_queue_yolo, cmd_queue_ocr,
+                     headless=args.headless)
     finally:
         print("[CMD12] 워커 프로세스 종료 중...")
-        # YOLO 워커 종료
-        try:
-            cmd_queue_yolo.put_nowait(CMD_STOP)
-        except Full:
-            pass
-        # OCR 워커 종료
-        try:
-            cmd_queue_ocr.put_nowait(CMD_OCR_STOP)
-        except Full:
-            pass
+
+        # 1. 종료 신호 전송 (큐가 가득 차면 비우고 재시도)
+        for _cq, _cmd in [(cmd_queue_yolo, CMD_STOP), (cmd_queue_ocr, CMD_OCR_STOP)]:
+            for _ in range(3):
+                try:
+                    _cq.put_nowait(_cmd)
+                    break
+                except Full:
+                    try:
+                        _cq.get_nowait()
+                    except Empty:
+                        pass
+
+        # 2. 데이터 큐 드레인 (워커가 put에서 블로킹되지 않도록)
+        for _dq in [frame_queue, detect_queue, ocr_queue, ocr_result_queue]:
+            try:
+                while True:
+                    _dq.get_nowait()
+            except Empty:
+                pass
 
         cap.release()
 
-        yolo_worker.join(timeout=5)
-        if yolo_worker.is_alive():
-            print("[CMD12] YOLO 워커 강제 종료")
-            yolo_worker.terminate()
-            yolo_worker.join(timeout=2)
+        # 3. 워커 join (타임아웃 후 강제 종료)
+        for _w, _name in [(yolo_worker, "YOLO"), (ocr_worker, "OCR")]:
+            _w.join(timeout=5)
+            if _w.is_alive():
+                print(f"[CMD12] {_name} 워커 강제 종료")
+                _w.terminate()
+                _w.join(timeout=3)
 
-        ocr_worker.join(timeout=5)
-        if ocr_worker.is_alive():
-            print("[CMD12] OCR 워커 강제 종료")
-            ocr_worker.terminate()
-            ocr_worker.join(timeout=2)
+        # 4. 큐 feeder thread 데드락 방지
+        for _q in [frame_queue, detect_queue, ocr_queue, ocr_result_queue,
+                   cmd_queue_yolo, cmd_queue_ocr]:
+            try:
+                _q.cancel_join_thread()
+            except Exception:
+                pass
 
         print("[CMD12] 파이프라인 종료 완료")
 

@@ -249,26 +249,13 @@ class PlateEngineConfig:
     DB_PATH = "plate_records.db"
 
     PREPROCESS_METHODS = [
-        "original",
-        "clahe",
-        "adaptive_threshold",
-        "gray_threshold",
-        "sharpen",
-        "denoise",
-        "otsu_inv",
-        "gamma_bright",
-        "deskew",
-        "bilateral",
-        "morphology",
-        "median_blur",
-        "adaptive_mean",
-        "deskew_otsu",
-        "brightness_boost",
-        "hist_equalize",
-        "gamma_dark",
-        "deblur",
-        "unsharp_mask",
-        "auto_contrast",
+        # ★ 실사용 6개만 유지 (cmd6 Tier1+Tier2)
+        "original",           # 원본 (Tier1)
+        "clahe",              # CLAHE 대비 강화 (Tier1)
+        "sharpen",            # 선명화 (Tier1)
+        "_inverted",          # 색상 반전 (Tier2)
+        "bilateral",          # 양방향 필터 (Tier2)
+        "auto_contrast",      # 자동 대비 (Tier2)
     ]
 
 

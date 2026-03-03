@@ -1,0 +1,1262 @@
+================================================================================
+  YOLO26 파이프라인 함수 단위 매핑
+  목적: CMD 12분할을 위한 함수별 스테이지 분류
+================================================================================
+
+총 19개 Python 파일 분석
+
+
+======================================================================
+  analyze_project.py  (597줄)
+======================================================================
+
+  [FUNC] def collect_py_files(root)  [S?_미분류]  L31-41 (11줄)
+    설명: 모든 .py 파일 수집 (SKIP_DIRS 제외)
+    호출: endswith, relpath, walk
+
+  [FUNC] def analyze_file(filepath)  [S9_출력GUI]  L46-189 (144줄)
+    설명: 단일 .py 파일을 AST로 파싱하여 정보 추출
+    호출: defaultdict, dump, iter_child_nodes, parse, read, search, startswith, walk
+
+  [FUNC] def classify_role(relpath, info)  [S3_YOLO탐지 + S9_출력GUI]  L194-253 (60줄)
+    설명: 파일의 역할을 자동 분류
+    호출: basename, fromkeys
+
+  [FUNC] def find_duplicates(all_info)  [S9_출력GUI]  L258-273 (16줄)
+    설명: 함수명/클래스명 중복 탐지
+    호출: defaultdict, startswith
+
+  [FUNC] def trace_pipeline(all_info)  [S1_입력 + S2_전처리 + S3_YOLO탐지 + S4_ROI크롭]  L278-306 (29줄)
+    설명: 전처리 → YOLO → OCR → 후처리 파이프라인 파일 매핑
+
+  [FUNC] def detect_bottlenecks(all_info)  [S1_입력]  L311-333 (23줄)
+    설명: 실시간 처리 병목이 될 수 있는 패턴 탐지
+
+  [FUNC] def find_orphan_files(all_info)  [S?_미분류]  L338-362 (25줄)
+    설명: 다른 파일에서 import 되지 않고, 진입점도 아닌 파일
+    호출: add, basename, splitext
+
+  [FUNC] def collect_other_files(root)  [S?_미분류]  L367-385 (19줄)
+    설명: 주요 비-Python 파일 수집 (.bat, .yaml, .json, .sh, .cfg, .pt 등)
+    호출: basename, clear, getsize, relpath, splitext, walk
+
+  [FUNC] def main()  [S3_YOLO탐지]  L390-593 (204줄)
+    호출: TextIOWrapper, analyze_file, classify_role, collect_other_files, collect_py_files, detect_bottlenecks, find_duplicates, find_orphan_files, out, sum, trace_pipeline, write
+
+======================================================================
+  extract_pipeline.py  (326줄)
+======================================================================
+
+  [FUNC] def collect_all_py(root)  [S?_미분류]  L35-46 (12줄)
+    설명: 루트 + scripts/ 의 모든 .py
+    호출: endswith, isdir, listdir
+
+  [FUNC] def extract_functions_and_classes(filepath)  [S9_출력GUI]  L51-138 (88줄)
+    설명: 파일에서 모든 함수/클래스를 줄번호와 함께 추출
+    호출: add, dump, iter_child_nodes, parse, read, walk
+
+  [FUNC] def classify_function_stage(func_name, source_snippet)  [S?_미분류]  L155-164 (10줄)
+    설명: 함수가 어느 파이프라인 스테이지에 속하는지 분류
+    호출: fromkeys, search
+
+  [FUNC] def main()  [S3_YOLO탐지]  L169-321 (153줄)
+    호출: classify_function_stage, collect_all_py, extract_functions_and_classes, isfile, p, read, startswith, sum, write
+
+======================================================================
+  plate_engine_pro.py  (2755줄)
+======================================================================
+
+  [CLASS] _CRNNModel  (L102-188, 87줄)
+    def __init__(self, model_path)  [S9_출력GUI]  L105-149 (45줄)
+        호출: BatchNorm2d, CRNN, Conv2d, LSTM, Linear, MaxPool2d, ReLU, Sequential, cnn, device, eval, fc, is_available, load, load_state_dict
+    def recognize(self, bgr_image)  [S2_전처리]  L151-188 (38줄)
+        호출: FloatTensor, astype, concatenate, cvtColor, item, mean, model, no_grad, ones, resize, size, softmax, to, unsqueeze
+
+  [CLASS] PlateEngineConfig  (L191-272, 82줄)
+
+  [CLASS] ImagePreprocessor  (L316-473, 158줄)
+    def gray_threshold(img)  [S2_전처리]  L320-323 (4줄)
+        호출: cvtColor, threshold
+    def adaptive_threshold(img)  [S2_전처리]  L326-332 (7줄)
+        호출: adaptiveThreshold, cvtColor
+    def clahe(img)  [S2_전처리]  L335-341 (7줄)
+        호출: apply, createCLAHE, cvtColor, merge
+    def denoise(img)  [S2_전처리]  L344-346 (3줄)
+        호출: bilateralFilter
+    def deblur(img)  [S2_전처리]  L349-351 (3줄)
+        호출: array, filter2D
+    def gamma_bright(img, gamma)  [S?_미분류]  L354-356 (3줄)
+        호출: LUT, array, astype
+    def gamma_dark(img, gamma)  [S?_미분류]  L359-361 (3줄)
+        호출: LUT, array, astype
+    def bilateral(img)  [S2_전처리]  L364-365 (2줄)
+        호출: bilateralFilter
+    def morphology(img)  [S2_전처리]  L368-372 (5줄)
+        호출: cvtColor, getStructuringElement, morphologyEx
+    def deskew(img)  [S2_전처리 + S4_ROI크롭]  L375-391 (17줄)
+        호출: Canny, HoughLinesP, arctan2, cvtColor, degrees, getRotationMatrix2D, median, warpAffine
+    def sharpen(img)  [S2_전처리]  L396-399 (4줄)
+        호출: array, filter2D
+    def median_blur(img)  [S2_전처리]  L402-406 (5줄)
+        호출: cvtColor, medianBlur
+    def otsu_inv(img)  [S2_전처리]  L409-415 (7줄)
+        호출: bitwise_not, cvtColor, threshold
+    def upscale_2x(img)  [S2_전처리]  L418-421 (4줄)
+        호출: resize
+    def brightness_boost(img)  [S2_전처리]  L424-426 (3줄)
+        호출: convertScaleAbs
+    def hist_equalize(img)  [S2_전처리]  L429-433 (5줄)
+        호출: cvtColor, equalizeHist
+    def adaptive_mean(img)  [S2_전처리]  L436-442 (7줄)
+        호출: adaptiveThreshold, cvtColor
+    def deskew_otsu(img)  [S2_전처리]  L445-449 (5줄)
+        호출: cvtColor
+    def unsharp_mask(img)  [S2_전처리]  L452-455 (4줄)
+        호출: GaussianBlur, addWeighted
+    def auto_contrast(img)  [S2_전처리]  L458-473 (16줄)
+        호출: apply, createCLAHE, cvtColor, mean, merge
+
+  [CLASS] PlateValidator  (L476-785, 310줄)
+    def __init__(self)  [S?_미분류]  L479-482 (4줄)
+        호출: compile
+    def _try_patterns(self, text)  [S?_미분류]  L526-542 (17줄)
+        호출: match
+    def validate(self, text)  [S?_미분류]  L547-595 (49줄)
+        호출: group, match
+    def _fix_region_name(self, text)  [S?_미분류]  L597-624 (28줄)
+        호출: group, match, sum
+    def _normalize_for_validation(self, text)  [S?_미분류]  L626-631 (6줄)
+        호출: compile, match, sub
+    def clean_ocr_text(self, text)  [S?_미분류]  L639-691 (53줄)
+        호출: bool, clean_ocr_text_v2, correct_hangul_similarity, correct_ocr_hangul, match, sub, validate_plate_format
+    def _fix_invalid_hangul(self, text)  [S?_미분류]  L702-720 (19줄)
+        호출: group, match
+    def _should_be_digit(self, text, pos)  [S?_미분류]  L722-727 (6줄)
+        호출: isdigit
+    def is_valid_length(self, text)  [S?_미분류]  L729-731 (3줄)
+    def classify_plate_type(text)  [S?_미분류]  L740-762 (23줄)
+        호출: group, match
+    def classify_vehicle_type(cls, text)  [S?_미분류]  L765-775 (11줄)
+        호출: group, search
+    def get_confidence_level(conf)  [S?_미분류]  L778-785 (8줄)
+
+  [CLASS] HangulClassifier  (L788-1020, 233줄)
+    def __init__(self)  [S?_미분류]  L812-813 (2줄)
+    def _decompose(ch)  [S?_미분류]  L816-821 (6줄)
+        호출: ord
+    def _compose(ini, med, fin)  [S?_미분류]  L824-826 (3줄)
+        호출: chr
+    def _structural_bieup_check(crop_bgr)  [S2_전처리 + S4_ROI크롭]  L829-923 (95줄)
+        호출: cvtColor, sum, threshold
+    def check_override(self, voted_hg, crop_bgr, paddle_engine, ocr_engines)  [S2_전처리 + S4_ROI크롭 + S5_OCR인식 + S6_후처리 + S9_출력GUI]  L925-1020 (96줄)
+        호출: apply, array, bitwise_not, createCLAHE, cvtColor, filter2D, image_to_string, ocr, resize, sum
+
+  [CLASS] PlateDatabase  (L1023-1090, 68줄)
+    def __init__(self, db_path)  [S8_DB저장]  L1026-1029 (4줄)
+        호출: connect
+    def _create_tables(self)  [S8_DB저장]  L1031-1058 (28줄)
+        호출: commit, execute
+    def record_plate(self, plate_number, confidence, camera_id, image_path)  [S8_DB저장]  L1060-1075 (16줄)
+        호출: commit, execute, fetchone
+    def add_alert(self, plate_number, alert_type, description)  [S8_DB저장]  L1077-1083 (7줄)
+        호출: commit, execute
+    def search_plates(self, query, limit)  [S?_미분류]  L1085-1090 (6줄)
+        호출: execute, fetchall
+
+  [CLASS] PlateTracker  (L1117-1273, 157줄)
+    def __init__(self, iou_threshold, ttl_frames)  [S2_전처리]  L1132-1136 (5줄)
+    def _bbox_area(bbox)  [S4_ROI크롭]  L1139-1141 (3줄)
+    def _bbox_iou(self, a, b)  [S4_ROI크롭]  L1143-1151 (9줄)
+    def _should_reset_texts(self, trk, new_bbox)  [S2_전처리 + S4_ROI크롭]  L1153-1173 (21줄)
+    def _reset_track_texts(self, trk)  [S?_미분류]  L1175-1181 (7줄)
+        호출: defaultdict
+    def begin_frame(self)  [S?_미분류]  L1183-1187 (5줄)
+    def match(self, bbox)  [S4_ROI크롭]  L1189-1244 (56줄)
+        호출: defaultdict
+    def end_frame(self)  [S3_YOLO탐지]  L1246-1268 (23줄)
+    def reset(self)  [S?_미분류]  L1270-1273 (4줄)
+        호출: clear
+
+  [CLASS] PlateEnginePro  (L1276-2606, 1331줄)
+    def __init__(self, config)  [S2_전처리 + S3_YOLO탐지 + S8_DB저장]  L1285-1411 (127줄)
+        호출: HangulClassifier, ImagePreprocessor, PaddleOCR, Path, PlateDatabase, PlateEngineConfig, PlateTracker, PlateValidator, Reader, YOLO, any, defaultdict, deque, exists, get_languages
+    def reset_state(self)  [S7_추적 + S9_출력GUI]  L1413-1420 (8줄)
+        호출: clear, reset
+    def _composite_multiframe(self, crops)  [S2_전처리 + S4_ROI크롭]  L1422-1429 (8줄)
+        호출: astype, median, resize, stack
+    def process_frame(self, frame, camera_id, use_multiframe, full_frame)  [S2_전처리 + S3_YOLO탐지 + S4_ROI크롭]  L1431-2455 (1025줄)
+        호출: Counter, Path, add, apply, array, begin_frame, bitwise_not, bool, check_override, classify_plate_type, classify_vehicle_type, clean_ocr_text, clear, compile, copy
+    def _bbox_iou(a, b)  [S4_ROI크롭]  L2458-2466 (9줄)
+    def _run_ocr(self, engine_name, engine, image)  [S2_전처리 + S5_OCR인식]  L2468-2522 (55줄)
+        호출: cvtColor, image_to_data, image_to_string, mean, ocr, readtext, recognize
+    def _trigger_alert(self, plate_number, alert_info)  [S?_미분류]  L2524-2530 (7줄)
+        호출: now, strftime
+    def process_video(self, source, camera_id, show, save)  [S1_입력]  L2532-2606 (75줄)
+        호출: VideoCapture, VideoWriter, VideoWriter_fourcc, destroyAllWindows, imshow, isOpened, now, ord, process_frame, putText, read, rectangle, release, strftime, time
+
+  [CLASS] PlateEngineFast  (L2612-2682, 71줄)
+    def __init__(self)  [S?_미분류]  L2615-2634 (20줄)
+        호출: ALPR, Pipeline, PlateValidator, callable
+    def available(self)  [S?_미분류]  L2637-2638 (2줄)
+    def process_frame(self, frame, camera_id)  [S4_ROI크롭]  L2640-2682 (43줄)
+        호출: clean_ocr_text, detect, is_valid_length, run, time, validate
+
+  [FUNC] def _load_best_model()  [S3_YOLO탐지]  L19-28 (10줄)
+    설명: 우선순위에 따라 가장 좋은 모델 자동 로드
+    호출: YOLO, exists
+
+  [FUNC] def _deskew_and_otsu(gray)  [S2_전처리]  L275-298 (24줄)
+    설명: 기울기 보정 후 Otsu 이진화
+    호출: column_stack, getRotationMatrix2D, minAreaRect, threshold, warpAffine, where
+
+  [FUNC] def normalize(text)  [S?_미분류]  L301-313 (13줄)
+    설명: OCR 혼동 문자 교정 (숫자 자리에서 O→0, I→1 등)
+
+  [FUNC] def _resolve_plate_model(config)  [S3_YOLO탐지]  L1093-1110 (18줄)
+    설명: 프로젝트(스크립트) 폴더 기준으로 번호판용 YOLO 모델 경로를 찾는다. 없으면 None.
+    호출: Path, exists, resolve
+
+  [FUNC] def process_frame_unified(frame, camera_id, engine_pro, engine_fast, engine_mode)  [S?_미분류]  L2685-2727 (43줄)
+    설명: Pro / Fast 병렬 실행 후 engine_mode에 따라 결과 반환.
+    engine_mode: "pro" | "fast" | "auto"(높은 confidence 채택)
+    반환: (results, process_ms_pro, process_ms_fast
+    호출: process_frame, time
+
+======================================================================
+  plate_gui.py  (1385줄)
+======================================================================
+
+  [CLASS] PlateTracker  (L115-417, 303줄)
+    def __init__(self, iou_threshold, max_ttl)  [S2_전처리 + S7_추적]  L150-154 (5줄)
+    def calculate_iou(box1, box2)  [S4_ROI크롭]  L157-174 (18줄)
+    def update(self, detections, frame_idx)  [S7_추적]  L176-356 (181줄)
+        호출: add, calculate_iou, sort
+    def _text_similar_quick(t1, t2)  [S?_미분류]  L359-383 (25줄)
+        호출: isdigit, sum
+    def _nms_output(self, output)  [S4_ROI크롭 + S6_후처리 + S9_출력GUI]  L385-412 (28줄)
+        호출: add, calculate_iou, sort
+    def reset(self)  [S?_미분류]  L414-417 (4줄)
+        호출: clear
+
+  [CLASS] VideoReader  (L464-548, 85줄)
+    def __init__(self, video_path, display_queue, detection_queue, playing)  [S1_입력 + S9_출력GUI]  L467-487 (21줄)
+        호출: Event, Lock, VideoCapture
+    def seek(self, frame_idx)  [S?_미분류]  L489-491 (3줄)
+    def stop(self)  [S?_미분류]  L493-494 (2줄)
+    def run(self)  [S?_미분류]  L496-548 (53줄)
+        호출: get_nowait, is_set, put_nowait, read, release, sleep, time, wait
+
+  [CLASS] DetectionWorker  (L583-731, 149줄)
+    def __init__(self, detection_queue, results_queue, recognizer_kwargs)  [S?_미분류]  L587-605 (19줄)
+        호출: Event, pop
+    def run(self)  [S?_미분류]  L607-728 (122줄)
+        호출: PlateEngineFast, PlateEnginePro, PlateRecognizer, abspath, detect_only, dirname, get_nowait, insert, is_set, process_frame, put_nowait, time
+    def stop(self)  [S?_미분류]  L730-731 (2줄)
+
+  [CLASS] PlateGUIApp  (L738-1329, 592줄)
+    def __init__(self, cli_args)  [S3_YOLO탐지 + S9_출력GUI]  L739-781 (43줄)
+        호출: Event, Lock, PlateTracker, abspath, after, configure, dirname, geometry, makedirs, minsize, protocol, title
+    def _log(self, msg)  [S?_미분류]  L785-793 (9줄)
+        호출: now, strftime, write
+    def _build_ui(self)  [S2_전처리]  L797-856 (60줄)
+        호출: BooleanVar, Button, Frame, Label, Listbox, StringVar, pack, pack_propagate
+    def _bind_keys(self)  [S?_미분류]  L858-861 (4줄)
+        호출: bind
+    def _on_play(self)  [S?_미분류]  L863-866 (4줄)
+    def _on_pause(self)  [S?_미분류]  L868-870 (3줄)
+        호출: clear
+    def _on_file_open(self)  [S1_입력]  L872-878 (7줄)
+        호출: askopenfilename
+    def _on_save_log(self)  [S8_DB저장]  L880-902 (23줄)
+        호출: asksaveasfilename, dump, showerror, showinfo
+    def _on_api_server_click(self)  [S?_미분류]  L904-921 (18줄)
+        호출: Popen, config, terminate
+    def _open_video(self, path)  [S1_입력 + S7_추적]  L925-989 (65줄)
+        호출: DetectionWorker, Event, Queue, VideoReader, basename, delete, isfile, reset, reset_state, start, title, wait
+    def _refresh_display(self)  [S4_ROI크롭 + S7_추적 + S9_출력GUI]  L993-1076 (84줄)
+        호출: PhotoImage, after, configure, cvtColor, fromarray, get_nowait, is_set, pop, resize, validate_bbox, winfo_height, winfo_width
+    def _draw_overlay(self, frame, detections)  [S4_ROI크롭 + S9_출력GUI]  L1084-1160 (77줄)
+        호출: copy, draw_korean_text, ord, rectangle, sort, startswith, sum
+    def _add_to_history(self, det, timestamp)  [S?_미분류]  L1164-1193 (30줄)
+        호출: insert
+    def _auto_save_plate(self, det)  [S2_전처리 + S8_DB저장 + S9_출력GUI]  L1195-1223 (29줄)
+        호출: dump, imwrite, isfile, load
+    def _levenshtein(s1, s2)  [S?_미분류]  L1226-1237 (12줄)
+    def _text_similar(self, t1, t2)  [S?_미분류]  L1239-1249 (11줄)
+    def _refresh_history_list(self)  [S?_미분류]  L1251-1277 (27줄)
+        호출: delete, insert, startswith
+    def _update_stats(self, frame_idx, ts)  [S?_미분류]  L1281-1305 (25줄)
+        호출: divmod, sum
+    def _stop_threads(self)  [S?_미분류]  L1309-1318 (10줄)
+        호출: stop
+    def _on_close(self)  [S?_미분류]  L1320-1329 (10줄)
+        호출: destroy, terminate
+
+  [FUNC] def validate_bbox(bbox, frame_shape, confidence)  [S3_YOLO탐지 + S4_ROI크롭]  L72-108 (37줄)
+    설명: YOLO bbox가 번호판으로 유효한지 검증.
+    엠블럼, 그릴, 프레임 가장자리 등 오탐지를 필터링한다.
+
+  [FUNC] def _get_font(size)  [S?_미분류]  L427-437 (11줄)
+    호출: load_default, truetype
+
+  [FUNC] def draw_korean_text(frame, text, pos, font_size, color)  [S2_전처리 + S9_출력GUI]  L440-457 (18줄)
+    설명: BGR 프레임 위에 한글 텍스트를 렌더링한다. frame을 복사해 반환.
+    호출: Draw, array, cvtColor, fromarray, text
+
+  [FUNC] def _pro_engine_results_to_gui(pro_results, frame)  [S4_ROI크롭]  L555-580 (26줄)
+    설명: Pro/Fast/Unified 결과를 GUI 형식으로 변환.
+    호출: bool, copy
+
+  [FUNC] def main()  [S1_입력]  L1342-1380 (39줄)
+    호출: ArgumentParser, PlateGUIApp, add_argument, after, check_ytdlp, download_youtube, exit, mainloop, parse_args
+
+======================================================================
+  plate_ocr_postfilter.py  (264줄)
+======================================================================
+
+  [FUNC] def _levenshtein(a, b)  [S?_미분류]  L42-60 (19줄)
+    설명: 편집 거리 (Levenshtein distance).
+
+  [FUNC] def is_valid_korean_plate(text)  [S6_후처리]  L63-106 (44줄)
+    설명: 한국 번호판 형식 검증.
+    - 정규식 매칭
+    - 한글 정확히 1자 + VALID_HANGUL 내 문자
+    - 앞 숫자 2~3자리, 뒤 숫자 4자리
+    호출: any, group, isdigit, match, next, sub
+
+  [FUNC] def _immediate_reject(text)  [S?_미분류]  L109-138 (30줄)
+    설명: 즉시 거부 조건: 영문만, 숫자만 4자 이하, 한글 2자 이상 연속 등.
+    호출: any, match, next, sub
+
+  [FUNC] def filter_plates(results)  [S2_전처리 + S6_후처리]  L141-255 (115줄)
+    설명: 번호판 결과 필터링 파이프라인.
+
+    입력 results: plate_recognition_4k 형식
+      - text (또는 plate), ocr_confidence (또는 ocr), pattern_score (또는 pattern),
+      - detec
+    호출: add, defaultdict, is_valid_korean_plate, sort, startswith
+
+  [FUNC] def apply_postfilter(results)  [S6_후처리]  L258-263 (6줄)
+    설명: plate_recognition_4k 결과에 그대로 적용.
+    results 내 각 항목에 text, ocr_confidence, pattern_score, detection_method, sharpness 가 있으면 됨.
+    호출: filter_plates
+
+======================================================================
+  plate_ocr_postfilter_v2.py  (976줄)
+======================================================================
+
+  [FUNC] def _jamo_decompose(ch)  [S?_미분류]  L343-351 (9줄)
+    설명: 한글 1글자를 초성/중성/종성 인덱스로 분해.
+    호출: ord
+
+  [FUNC] def _find_nearest_valid_hangul(ch)  [S?_미분류]  L361-381 (21줄)
+    설명: 자모 유사도 기반으로 가장 가까운 유효 번호판 한글 반환.
+    1차: 초성 불일치=3, 중성 불일치=2, 종성 불일치=1 (거리 ≤5만 교정)
+    2차: 동점 시 자모 절대 거리로 타이브레이크 (가장 비슷한 글자 선택)
+
+  [FUNC] def correct_hangul_char(ch)  [S?_미분류]  L388-392 (5줄)
+    설명: 영문 → 한글 교정 (한글 위치)
+
+  [FUNC] def correct_num_char(ch)  [S?_미분류]  L395-399 (5줄)
+    설명: 영문 → 숫자 교정 (숫자 위치)
+    호출: isdigit
+
+  [FUNC] def _fix_num(s)  [S?_미분류]  L402-404 (3줄)
+    설명: 숫자 필드 내 모든 문자 교정: 'O060' → '0060'
+    호출: correct_num_char
+
+  [FUNC] def _fix_hangul_confusion(ch)  [S?_미분류]  L407-421 (15줄)
+    설명: 한글→한글 혼동 교정. 유효 한글이면 그대로, 아니면 테이블 → 자모 폴백.
+
+  [FUNC] def _apply_ocr_correction(text)  [S?_미분류]  L424-470 (47줄)
+    설명: 숫자/영문/한글 혼용 패턴 통합 교정
+
+    1단계: 영문 → 한글 교정 (한글 위치: 양쪽에 숫자)
+    2단계: 자모(ㅇ,ㅣ) → 숫자 교정 (숫자 위치)
+    3단계: 중복 한글 → 숫자 교정 (한글이 2개 이상이면 숫자 위치의 한글을 숫자로)
+
+    예:
+    호출: correct_hangul_char, isalpha, isdigit
+
+  [FUNC] def _try_reverse_plate(text)  [S2_전처리 + S5_OCR인식]  L477-532 (56줄)
+    설명: PaddleOCR이 2줄 번호판을 아래→위로 읽는 경우 복원.
+
+    실제 패턴:
+      939255시 → 55저9392  (뒤4자리 + 앞2자리 + 한글)
+      959958두 → 58두9599
+      6393705  → 70버6393  (한글 누락)
+ 
+    호출: correct_hangul_char, group, match, sub
+
+  [FUNC] def _parse_plate_core(text)  [S?_미분류]  L539-593 (55줄)
+    설명: 번호판 핵심 부분 파싱 + 교정 (역순 감지 포함)
+
+    지원 구조:
+      - 숫자2~3 + 한글1 + 숫자4  (일반: 01나8060, 123가4567)
+      - 한글1 + 숫자4            (지역판 앞숫자 누락: 바9203)
+      - 역
+    호출: correct_hangul_char, group, isdigit, match, search
+
+  [FUNC] def _parse_plate_core_simple(text)  [S?_미분류]  L596-602 (7줄)
+    설명: 단순 패턴 매칭 (재귀 방지용)
+    호출: group, search
+
+  [FUNC] def _extract_region(text)  [S?_미분류]  L609-645 (37줄)
+    설명: 텍스트 앞부분에서 지역명을 퍼지 매칭으로 추출.
+    반환: (지역명, 나머지) 또는 (None, 원본)
+    호출: group, match, startswith
+
+  [FUNC] def clean_ocr_text_v2(raw_text)  [S?_미분류]  L652-721 (70줄)
+    설명: 완전 개선된 OCR 후처리 함수 V3
+    plate_engine_pro.py의 clean_ocr_text() 교체용
+
+    처리:
+      1. 특수문자/공백 제거
+      2. 역순 OCR 텍스트 감지 및 복원
+      3. 지역명 퍼지 매칭
+      4
+    호출: sub
+
+  [FUNC] def _strip_leading_junk(text)  [S?_미분류]  L724-736 (13줄)
+    설명: 앞부분 잡문자 제거: 숫자2~3+한글+숫자4 패턴이 나올 때까지 건너뛰기.
+    호출: search, start
+
+  [FUNC] def _pick_best_candidate(candidates)  [S?_미분류]  L739-748 (10줄)
+    설명: 후보 중 가장 완성도 높은 번호판 선택.
+
+  [FUNC] def _plate_score(plate)  [S?_미분류]  L751-781 (31줄)
+    설명: 번호판 패턴 완성도 점수 (높을수록 좋음).
+    호출: group, match, startswith
+
+  [FUNC] def ensemble_vote_v2(ocr_results_list)  [S2_전처리 + S5_OCR인식 + S6_후처리 + S9_출력GUI]  L788-843 (56줄)
+    설명: 개선된 앙상블 투표 V3
+
+    모든 OCR 원본 텍스트에 clean_ocr_text_v2 적용 후 투표.
+    호출: clean_ocr_text_v2
+
+  [FUNC] def _merge_similar_votes(scores, threshold)  [S2_전처리 + S6_후처리]  L846-869 (24줄)
+    설명: 편집거리 기반 유사 번호판 병합
+    호출: SequenceMatcher, add, ratio
+
+  [FUNC] def parse_ocr_multiline(ocr_lines)  [S2_전처리 + S5_OCR인식]  L873-882 (10줄)
+    설명: PaddleOCR 멀티라인 결과 처리
+    ocr_lines: [("경기 76", 0.9), ("바 7789", 0.85)]
+    호출: clean_ocr_text_v2, sum
+
+======================================================================
+  plate_recognition_4k.py  (2926줄)
+======================================================================
+
+  [CLASS] NumpyEncoder  (L74-82, 9줄)
+    def default(self, obj)  [S?_미분류]  L75-82 (8줄)
+        호출: default, tolist
+
+  [CLASS] CaptureState  (L195-205, 11줄)
+
+  [CLASS] PlateRecognizer  (L732-2833, 2102줄)
+    def __init__(self, model_path, model_size, confidence_threshold, use_sahi)  [S2_전처리 + S3_YOLO탐지]  L747-800 (54줄)
+    def set_roi_polygon(self, pts_norm)  [S4_ROI크롭]  L803-807 (5줄)
+    def _point_in_polygon(nx, ny, poly)  [S?_미분류]  L810-823 (14줄)
+    def _bbox_center_in_roi(self, bbox, frame_w, frame_h)  [S4_ROI크롭]  L825-834 (10줄)
+    def _load_models(self, model_path)  [S3_YOLO탐지]  L838-944 (107줄)
+        호출: YOLO, abspath, any, basename, dirname, hf_hub_download, isfile
+    def _load_coco_fallback(self)  [S3_YOLO탐지]  L946-959 (14줄)
+        호출: YOLO, abspath, dirname, isfile
+    def _init_ocr(self)  [S2_전처리 + S5_OCR인식 + S9_출력GUI]  L961-1038 (78줄)
+        호출: PaddleOCR, Reader, get_tesseract_version, isfile, pop
+    def _determine_strategy(self, w, h)  [S?_미분류]  L1042-1054 (13줄)
+    def _detect_with_sahi(self, frame)  [S3_YOLO탐지]  L1058-1108 (51줄)
+        호출: from_pretrained, get_sliced_prediction
+    def _detect_direct(self, frame)  [S2_전처리 + S3_YOLO탐지 + S6_후처리]  L1110-1159 (50줄)
+        호출: cpu, numpy, predict, tolist
+    def _detect_coco_fallback(self, frame)  [S2_전처리 + S3_YOLO탐지]  L1161-1198 (38줄)
+        호출: cpu, numpy, predict, tolist
+    def detect_plates(self, frame)  [S3_YOLO탐지]  L1200-1217 (18줄)
+    def _crop_region(self, frame, box_xyxy, padding_ratio, padding_left)  [S2_전처리 + S4_ROI크롭]  L1221-1247 (27줄)
+        호출: copy
+    def _upscale_if_small(self, img)  [S2_전처리]  L1249-1269 (21줄)
+        호출: GaussianBlur, addWeighted, astype, clip, resize
+    def _extract_plate_from_vehicle(self, vehicle_img)  [S2_전처리 + S4_ROI크롭]  L1271-1325 (55줄)
+        호출: Canny, bilateralFilter, boundingRect, contourArea, cvtColor, findContours, minAreaRect
+    def _deskew_plate(self, img)  [S2_전처리]  L1327-1373 (47줄)
+        호출: Canny, HoughLines, cvtColor, degrees, findNonZero, getRotationMatrix2D, median, minAreaRect, threshold, warpAffine
+    def _normalize_plate_size(self, img, min_height)  [S2_전처리 + S6_후처리]  L1375-1392 (18줄)
+        호출: GaussianBlur, addWeighted, astype, clip, resize
+    def _preprocess_plate(self, plate_img)  [S2_전처리]  L1394-1419 (26줄)
+        호출: GaussianBlur, adaptiveThreshold, addWeighted, apply, astype, clip, copy, createCLAHE, cvtColor
+    def _preprocess_plate_enhanced(self, plate_img)  [S2_전처리]  L1421-1440 (20줄)
+        호출: GaussianBlur, addWeighted, apply, astype, clip, createCLAHE, cvtColor, merge
+    def _preprocess_plate_soft(self, plate_img)  [S2_전처리]  L1442-1459 (18줄)
+        호출: apply, array, copy, createCLAHE, cvtColor, filter2D
+    def _preprocess_plate_deblur(self, plate_img)  [S2_전처리]  L1461-1489 (29줄)
+        호출: GaussianBlur, addWeighted, apply, astype, clip, copy, createCLAHE, cvtColor, medianBlur
+    def _preprocess_plate_deblur_strong(self, plate_img)  [S2_전처리]  L1491-1522 (32줄)
+        호출: GaussianBlur, addWeighted, apply, astype, clip, copy, createCLAHE, cvtColor, morphologyEx, ones, threshold
+    def _preprocess_plate_stretch(self, plate_img)  [S2_전처리]  L1524-1548 (25줄)
+        호출: apply, astype, copy, createCLAHE, cvtColor
+    def _preprocess_plate_gamma(self, plate_img, gamma)  [S2_전처리]  L1550-1572 (23줄)
+        호출: LUT, apply, array, copy, createCLAHE, cvtColor
+    def _ocr_plate_tesseract(self, img)  [S5_OCR인식 + S9_출력GUI]  L1574-1615 (42줄)
+        호출: cvtColor, image_to_data, image_to_string, isfile, sub, sum
+    def _ocr_plate(self, img, use_allowlist)  [S2_전처리 + S5_OCR인식]  L1619-1651 (33줄)
+        호출: cvtColor, readtext, sort, sum
+    def _ocr_plate_paddle(self, img)  [S2_전처리 + S5_OCR인식]  L1653-1700 (48줄)
+        호출: cvtColor, ocr
+    def _ocr_plate_easyocr(self, img, use_allowlist)  [S2_전처리 + S5_OCR인식]  L1702-1735 (34줄)
+        호출: readtext, sort
+    def _has_korean(text)  [S?_미분류]  L1738-1740 (3줄)
+        호출: any
+    def _clean_en_text(text)  [S?_미분류]  L1743-1745 (3줄)
+        호출: sub
+    def _detect_plate_country(text)  [S3_YOLO탐지]  L1759-1765 (7줄)
+        호출: any
+    def _reassemble_plate(self, ocr_entries)  [S4_ROI크롭 + S9_출력GUI]  L1767-1849 (83줄)
+        호출: findall, groups, search, sort, start, sub, sum
+    def _run_paddle_ocr(self, img)  [S2_전처리 + S4_ROI크롭 + S5_OCR인식]  L1851-1872 (22줄)
+        호출: cvtColor, ocr
+    def _run_easy_ocr(self, img)  [S2_전처리 + S3_YOLO탐지 + S4_ROI크롭 + S5_OCR인식]  L1874-1891 (18줄)
+        호출: readtext
+    def _postprocess_ocr_text(self, text, conf)  [S6_후처리]  L1893-1911 (19줄)
+        호출: any, correct_hangul_similarity, correct_ocr_hangul, sub, validate_korean_plate, validate_plate_format
+    def _ocr_korean_plate(self, plate_img)  [S2_전처리 + S4_ROI크롭 + S5_OCR인식]  L1913-1997 (85줄)
+        호출: any, cvtColor
+    def _ocr_english_plate(self, plate_img)  [S2_전처리 + S5_OCR인식]  L1999-2041 (43줄)
+        호출: bool, correct_ocr_uk, cvtColor, match, readtext, sort, sum, validate_korean_plate
+    def _ocr_with_validation(self, plate_img)  [S2_전처리 + S5_OCR인식]  L2043-2084 (42줄)
+    def _ensemble_vote(self, candidates)  [S6_후처리]  L2086-2130 (45줄)
+        호출: sort, sub, sum
+    def _levenshtein(s1, s2)  [S?_미분류]  L2135-2152 (18줄)
+    def _track_plate(self, text, frame_idx, result)  [S2_전처리 + S9_출력GUI]  L2154-2260 (107줄)
+        호출: Counter, most_common, setdefault, sub
+    def get_confirmed_plates(self)  [S?_미분류]  L2262-2279 (18줄)
+    def _calculate_sharpness(image)  [S2_전처리]  L2282-2288 (7줄)
+        호출: Laplacian, cvtColor, var
+    def _is_gpu_available()  [S?_미분류]  L2291-2296 (6줄)
+        호출: is_available
+    def _bbox_iou(a, b)  [S4_ROI크롭]  L2301-2311 (11줄)
+    def _find_bbox_cache(self, xyxy, frame_idx)  [S4_ROI크롭]  L2313-2320 (8줄)
+        호출: reversed
+    def _update_bbox_cache(self, xyxy, frame_idx, result)  [S4_ROI크롭]  L2322-2334 (13줄)
+    def _ocr_log_region(self, frame, frame_idx)  [S2_전처리 + S5_OCR인식]  L2340-2412 (73줄)
+        호출: correct_hangul_similarity, correct_ocr_hangul, finditer, group, ocr
+    def process_frame(self, frame, frame_idx)  [S?_미분류]  L2416-2427 (12줄)
+    def _process_frame_inner(self, frame, frame_idx)  [S2_전처리 + S3_YOLO탐지 + S4_ROI크롭]  L2429-2615 (187줄)
+        호출: any, detect_plates, match, sub
+    def _reset_state_machine(self)  [S?_미분류]  L2619-2624 (6줄)
+    def process_video(self, video_path, output_dir, progress_callback)  [S1_입력 + S7_추적]  L2628-2786 (159줄)
+        호출: FileNotFoundError, VideoCapture, apply_postfilter, isOpened, process_frame, progress_callback, read, release, time
+    def _save_results(self, results, output_dir)  [S2_전처리 + S8_DB저장 + S9_출력GUI]  L2790-2833 (44줄)
+        호출: dump, imwrite, makedirs
+
+  [FUNC] def _load_best_model()  [S3_YOLO탐지]  L63-72 (10줄)
+    설명: 우선순위에 따라 가장 좋은 모델 자동 로드
+    호출: YOLO, exists
+
+  [FUNC] def download_plate_model(size, cache_dir)  [S3_YOLO탐지]  L212-258 (47줄)
+    설명: HuggingFace에서 번호판 전용 YOLO 모델 다운로드 (캐시 지원)
+
+    Args:
+        size: 모델 크기 (n/s/m/l/x)
+        cache_dir: 캐시 디렉토리 (None이면 기본 HF 캐시)
+
+    Returns:
+      
+    호출: ValueError, hf_hub_download, isfile
+
+  [FUNC] def validate_korean_plate(text)  [S?_미분류]  L265-307 (43줄)
+    설명: 번호판 패턴 검증 및 정규화 (한국 + 국제 형식 지원)
+
+    Args:
+        text: OCR 인식 텍스트
+
+    Returns:
+        (is_valid, normalized_text, pattern_score)
+        - is_vali
+    호출: group, search, sub
+
+  [FUNC] def correct_ocr_hangul(text)  [S?_미분류]  L353-377 (25줄)
+    설명: 신형 번호판 패턴(숫자+한글+숫자)에서 한글 자리 오인식 보정.
+
+    예: "3929665" → "39가9665" (가 자리에서 2 오인식 보정)
+    호출: group, match, sub
+
+  [FUNC] def correct_hangul_similarity(text)  [S?_미분류]  L380-397 (18줄)
+    설명: 번호판 텍스트 내 한글↔한글 유사 문자 보정.
+
+    correct_ocr_hangul과 달리 모든 패턴에 적용 (앞뒤 숫자 확인).
+    예: "54시555" → "54저555", "54차555" → "54저555", "에447" → "아447"
+    호출: isdigit
+
+  [FUNC] def _jamo_decompose(ch)  [S?_미분류]  L501-509 (9줄)
+    설명: 한글 1글자를 초성/중성/종성 인덱스로 분해.
+    호출: ord
+
+  [FUNC] def _find_nearest_valid_hangul(ch)  [S?_미분류]  L519-533 (15줄)
+    설명: 자모 유사도 기반으로 가장 가까운 유효 번호판 한글 반환.
+
+  [FUNC] def _correct_region(text)  [S?_미분류]  L587-591 (5줄)
+    설명: 지역명 2자 교정
+
+  [FUNC] def _find_region_in_text(text)  [S?_미분류]  L594-603 (10줄)
+    설명: 텍스트에서 지역명(2자) 후보 찾기
+    호출: findall
+
+  [FUNC] def _correct_single_hangul(ch)  [S?_미분류]  L618-622 (5줄)
+    설명: 한글 1자 교정: 유효 번호판 한글이면 그대로, 아니면 교정 테이블 참조
+
+  [FUNC] def validate_plate_format(text)  [S6_후처리]  L630-678 (49줄)
+    설명: 한국 번호판 형식 엄격 교정.
+
+    검증 규칙:
+    1. 신형 (2019~): 숫자2-3 + 한글1 + 숫자4  (예: 123가4567)
+       - 한글 위치가 유효 번호판 한글인지 확인
+       - 유효하지 않으면 교정 테이블로 보정
+    2. 구형
+    호출: all, group, match
+
+  [FUNC] def correct_ocr_uk(text)  [S?_미분류]  L703-725 (23줄)
+    설명: UK/국제 영문 번호판 OCR 오인식 보정.
+
+    영문/숫자 혼동 패턴을 UK 번호판 형식에 맞게 정규화:
+    - 위치 1-2 (영문 자리): 숫자→영문 변환 (예: 0→O, 1→I)
+    - 위치 3-4 (숫자 자리): 영문→숫자 변환 (예: O→0, I→1
+    호출: group, match, sub
+
+  [FUNC] def main()  [S3_YOLO탐지 + S5_OCR인식 + S8_DB저장]  L2840-2921 (82줄)
+    호출: ArgumentParser, PlateRecognizer, add_argument, exit, isfile, parse_args, process_video, sum
+
+======================================================================
+  scripts\aihub_highway_check.py  (170줄)
+======================================================================
+
+  [FUNC] def get_video_files(folder)  [S?_미분류]  L25-37 (13줄)
+    설명: 폴더 내 .mp4, .avi 목록 + 크기(MB) 반환
+    호출: Path, isdir, rglob, stat
+
+  [FUNC] def analyze_first_frame(video_path)  [S1_입력]  L40-114 (75줄)
+    설명: 첫 프레임 캡처 후 해상도/각도/차선수/번호판 분석
+    호출: Canny, HoughLinesP, VideoCapture, YOLO, arctan2, argmax, cvtColor, degrees, exists, gradient, isOpened, mean, model, read, release
+
+  [FUNC] def main()  [S?_미분류]  L117-165 (49줄)
+    호출: analyze_first_frame, get_video_files, makedirs
+
+======================================================================
+  scripts\bench_accuracy.py  (224줄)
+======================================================================
+
+  [FUNC] def extract_gt(filename)  [S?_미분류]  L51-55 (5줄)
+    설명: 파일명에서 정답 번호판 추출 (확장자, -2 등 제거)
+    호출: Path, sub
+
+  [FUNC] def ocr_image(img, preprocessor, validator, config)  [S2_전처리 + S5_OCR인식 + S9_출력GUI]  L58-113 (56줄)
+    설명: 19종 전처리 × (PaddleOCR + EasyOCR) → 앙상블 투표
+    호출: Counter, clean_ocr_text, copy, mean, most_common, ocr, proc_func, readtext, sum
+
+  [FUNC] def normalize_for_compare(text)  [S?_미분류]  L116-118 (3줄)
+    설명: 비교용 정규화: 공백/특수문자 제거, 대문자
+    호출: sub
+
+  [FUNC] def main()  [S2_전처리]  L121-219 (99줄)
+    호출: ImagePreprocessor, PlateEngineConfig, PlateValidator, extract_gt, fromfile, imdecode, iterdir, normalize_for_compare, ocr_image, perf_counter, resize, sample, seed
+
+======================================================================
+  scripts\list_videos.py  (104줄)
+======================================================================
+
+  [FUNC] def main()  [S?_미분류]  L28-99 (72줄)
+    호출: rglob, sort, stat
+
+======================================================================
+  scripts\run_headless_plate_test.py  (115줄)
+======================================================================
+
+  [FUNC] def find_test_video()  [S1_입력]  L26-36 (11줄)
+    호출: exists, rglob, stat
+
+  [FUNC] def main()  [S?_미분류]  L39-110 (72줄)
+    호출: PlateEnginePro, VideoCapture, endswith, find_test_video, isOpened, isfile, perf_counter, process_frame, read, release, startswith
+
+======================================================================
+  scripts\run_retest_pro.py  (110줄)
+======================================================================
+
+  [FUNC] def get_video_size_mb(path)  [S?_미분류]  L31-35 (5줄)
+    호출: getsize
+
+  [FUNC] def find_first_small_video()  [S?_미분류]  L38-50 (13줄)
+    설명: 100MB 이하 첫 .mp4/.avi 찾기 (제외 목록 적용)
+    호출: rglob, stat
+
+  [FUNC] def main()  [S?_미분류]  L53-105 (53줄)
+    호출: PlateEnginePro, VideoCapture, basename, find_first_small_video, get_video_size_mb, isOpened, isfile, process_frame, read, release, sum
+
+======================================================================
+  scripts\verify_integrations.py  (110줄)
+======================================================================
+
+  [FUNC] def find_video()  [S?_미분류]  L22-32 (11줄)
+    호출: rglob, stat
+
+  [FUNC] def main()  [S1_입력 + S3_YOLO탐지]  L35-105 (71줄)
+    호출: Request, VideoCapture, YOLO, basename, exists, find_video, getsize, isOpened, isfile, model, perf_counter, read, release, urlopen
+
+======================================================================
+  test_benchmark.py  (429줄)
+======================================================================
+
+  [FUNC] def get_memory_mb()  [S?_미분류]  L62-69 (8줄)
+    설명: 현재 프로세스 RSS 메모리 (MB) 반환
+    호출: Process, getpid, memory_info
+
+  [FUNC] def load_test_images()  [S1_입력]  L72-82 (11줄)
+    설명: 22/ 폴더에서 테스트 이미지 로드
+    호출: imread
+
+  [FUNC] def bench_ocr_latency(engine, images)  [S?_미분류]  L88-136 (49줄)
+    설명: 각 테스트 이미지에 대해 process_frame 1회 호출 시간 측정.
+    - 매 이미지마다 reset_state() 호출 (독립 측정)
+    - 결과: 개별 시간 + 평균/최대/최소
+    호출: collect, perf_counter, process_frame, reset_state, sum
+
+  [FUNC] def bench_fps(engine, images)  [S1_입력]  L142-241 (100줄)
+    설명: 연속 프레임 처리 FPS 측정.
+    - 영상 파일 있으면 실제 영상 사용, 없으면 테스트 이미지 순환
+    - FPS_FRAME_COUNT 프레임 처리 후 총 시간으로 FPS 계산
+    호출: VideoCapture, basename, exists, isOpened, perf_counter, process_frame, read, release, reset_state, sum
+
+  [FUNC] def bench_memory(engine, images)  [S?_미분류]  L247-315 (69줄)
+    설명: 메모리 사용량 측정.
+    - 엔진 로드 후 기본 메모리
+    - 12장 이미지 처리 후 메모리
+    - 피크 메모리 (연속 처리 중)
+    호출: collect, get_memory_mb, process_frame, reset_state
+
+  [FUNC] def main()  [S3_YOLO탐지]  L321-424 (104줄)
+    호출: PlateEnginePro, all, bench_fps, bench_memory, bench_ocr_latency, cpu_count, get_device_name, is_available, load_test_images, perf_counter, sum, virtual_memory
+
+======================================================================
+  test_ghost_detection.py  (350줄)
+======================================================================
+
+  [FUNC] def normalize_plate(text)  [S6_후처리]  L40-46 (7줄)
+    설명: 비교용 정규화
+    호출: sub
+
+  [FUNC] def load_image(filename)  [S1_입력]  L49-55 (7줄)
+    설명: 22/ 폴더에서 이미지 로드
+    호출: FileNotFoundError, imread
+
+  [FUNC] def extract_plates(detections)  [S4_ROI크롭 + S6_후처리]  L58-62 (5줄)
+    설명: 검출 결과에서 번호판 텍스트 목록 추출
+    호출: normalize_plate
+
+  [FUNC] def test_ghost_sequential(engine, frames_per_vehicle, gap_frames)  [S?_미분류]  L65-133 (69줄)
+    설명: 테스트 1: 연속 차량 시퀀스 (reset 없이)
+    - 각 차량을 frames_per_vehicle 프레임 반복
+    - gap_frames 만큼 빈 프레임 삽입 (TTL 소진 시뮬레이션)
+    - 다음 차량 프레임에서 이전 번호판 잔존 여부 확인
+    호출: copy, extract_plates, load_image, normalize_plate, process_frame, reset_state
+
+  [FUNC] def test_ghost_same_position(engine)  [S1_입력 + S4_ROI크롭]  L136-183 (48줄)
+    설명: 테스트 2: 동일 위치에 다른 차량 (worst case)
+    - 같은 크기로 리사이즈하여 bbox가 동일 위치에 오도록 시뮬레이션
+    - 트래커가 IoU 매칭으로 같은 트랙에 할당할 가능성이 높음
+    - 이전 번호판 텍스트가 우선되면 Ghost
+    호출: extract_plates, load_image, normalize_plate, process_frame, reset_state, resize
+
+  [FUNC] def test_ghost_ttl_expiry(engine)  [S1_입력 + S7_추적]  L186-221 (36줄)
+    설명: 테스트 3: TTL 만료 후 트랙 제거 확인
+    - 차량 A를 N프레임 → TTL+1 프레임 빈 화면 → 트랙이 사라졌는지 확인
+    호출: copy, load_image, process_frame, reset_state
+
+  [FUNC] def test_four_vehicle_sequence(engine)  [S?_미분류]  L224-282 (59줄)
+    설명: 테스트 4: 연속 4대 차량 전체 시나리오
+    시나리오:
+        1번 차량: 서울70바9203 (버스)
+        2번 차량: 경기91바6286 (트럭)
+        3번 차량: 01나8060 (SUV)
+        4번 차량: 58두9599 (KIA
+    호출: add, extract_plates, load_image, normalize_plate, process_frame, reset_state
+
+  [FUNC] def main()  [S9_출력GUI]  L285-345 (61줄)
+    호출: PlateEnginePro, all, sum, test_four_vehicle_sequence, test_ghost_same_position, test_ghost_sequential, test_ghost_ttl_expiry, time
+
+======================================================================
+  test_ocr_accuracy.py  (143줄)
+======================================================================
+
+  [FUNC] def normalize_plate(text)  [S6_후처리]  L41-47 (7줄)
+    설명: 비교용 정규화: 공백/특수문자 제거, 대문자 변환
+    호출: sub
+
+  [FUNC] def plates_match(ocr_text, gt_text)  [S6_후처리]  L50-52 (3줄)
+    설명: 정답과 OCR 결과 비교 (정규화 후)
+    호출: normalize_plate
+
+  [FUNC] def main()  [S?_미분류]  L55-138 (84줄)
+    호출: PlateEnginePro, exists, imread, normalize_plate, plates_match, process_frame, reset_state, time
+
+======================================================================
+  test_realtime_stability.py  (262줄)
+======================================================================
+
+  [FUNC] def normalize_plate(text)  [S6_후처리]  L29-34 (6줄)
+    호출: sub
+
+  [FUNC] def calculate_iou(box1, box2)  [S4_ROI크롭]  L37-46 (10줄)
+
+  [FUNC] def main()  [S1_입력 + S7_추적]  L49-257 (209줄)
+    호출: PlateEnginePro, PlateTracker, VideoCapture, bool, calculate_iou, isfile, normalize_plate, process_frame, read, release, sum, time, validate_bbox
+
+======================================================================
+  train_plate_ocr.py  (494줄)
+======================================================================
+
+  [CLASS] PlateOCRDataset  (L200-255, 56줄)
+    def __init__(self, crops_and_labels, aug_per_image, img_h, img_w)  [S4_ROI크롭]  L203-210 (8줄)
+    def __len__(self)  [S?_미분류]  L212-213 (2줄)
+    def __getitem__(self, idx)  [S2_전처리]  L215-241 (27줄)
+        호출: FloatTensor, IntTensor, astype, augment_image, copy, cvtColor, unsqueeze
+    def _resize_pad(self, img)  [S2_전처리]  L243-255 (13줄)
+        호출: concatenate, ones, resize
+
+  [CLASS] CRNN  (L270-316, 47줄)
+    def __init__(self, num_classes, img_h, hidden, n_layers)  [S9_출력GUI]  L273-303 (31줄)
+        호출: BatchNorm2d, Conv2d, LSTM, Linear, MaxPool2d, ReLU, Sequential
+    def forward(self, x)  [S9_출력GUI]  L305-316 (12줄)
+        호출: cnn, fc, permute, rnn, size, squeeze
+
+  [FUNC] def extract_plate_crops()  [S1_입력 + S3_YOLO탐지 + S4_ROI크롭]  L77-107 (31줄)
+    설명: 12장 이미지에서 YOLO로 번호판 ROI를 추출.
+    호출: PlateEnginePro, fromfile, imdecode, model, tolist
+
+  [FUNC] def augment_image(img)  [S?_미분류]  L113-194 (82줄)
+    설명: 단일 이미지에 랜덤 증강 적용.
+    호출: GaussianBlur, apply, astype, bitwise_not, choice, clip, convertScaleAbs, copy, createCLAHE, cvtColor, filter2D, float32, getPerspectiveTransform, getRotationMatrix2D, imdecode
+
+  [FUNC] def collate_fn(batch)  [S?_미분류]  L258-264 (7줄)
+    설명: 가변 길이 레이블 배치 처리.
+    호출: IntTensor, cat, stack
+
+  [FUNC] def ctc_greedy_decode(output, idx2char)  [S?_미분류]  L322-338 (17줄)
+    설명: CTC greedy decoding: 연속 중복 제거 + blank 제거.
+    호출: item, size, transpose
+
+  [FUNC] def train()  [S4_ROI크롭 + S9_출력GUI]  L344-489 (146줄)
+    호출: Adam, CRNN, CTCLoss, CosineAnnealingLR, DataLoader, PlateOCRDataset, backward, clip_grad_norm_, criterion, ctc_greedy_decode, eval, extract_plate_crops, full, get_last_lr, isinf
+
+======================================================================
+  youtube_helper.py  (150줄)
+======================================================================
+
+  [FUNC] def check_ytdlp()  [S1_입력]  L25-31 (7줄)
+    설명: yt-dlp 설치 여부 확인.
+
+  [FUNC] def download_youtube(url, resolution)  [S1_입력]  L34-110 (77줄)
+    설명: YouTube URL → 로컬 mp4 파일 다운로드.
+
+    Args:
+        url: YouTube 영상 URL
+        resolution: 해상도 ("best", "1080", "720", "480")
+
+    Returns:
+        다운로드
+    호출: ImportError, RuntimeError, YoutubeDL, abspath, check_ytdlp, extract_info, glob, isfile, makedirs, sanitize_filename
+
+  [FUNC] def _progress_hook(d)  [S1_입력]  L113-122 (10줄)
+    설명: yt-dlp 진행률 콜백.
+
+
+================================================================================
+  스테이지별 함수 집계 (CMD 분할 기준)
+================================================================================
+
+  S1_입력 (21개 함수, 총 1111줄)
+  ────────────────────────────────────────────────────────────
+    main                                           209줄  (test_realtime_stability.py)
+    PlateRecognizer.process_video                  159줄  (plate_recognition_4k.py)
+    bench_fps                                      100줄  (test_benchmark.py)
+    download_youtube                                77줄  (youtube_helper.py)
+    PlateEnginePro.process_video                    75줄  (plate_engine_pro.py)
+    analyze_first_frame                             75줄  (scripts\aihub_highway_check.py)
+    main                                            71줄  (scripts\verify_integrations.py)
+    PlateGUIApp._open_video                         65줄  (plate_gui.py)
+    test_ghost_same_position                        48줄  (test_ghost_detection.py)
+    main                                            39줄  (plate_gui.py)
+    test_ghost_ttl_expiry                           36줄  (test_ghost_detection.py)
+    extract_plate_crops                             31줄  (train_plate_ocr.py)
+    trace_pipeline                                  29줄  (analyze_project.py)
+    detect_bottlenecks                              23줄  (analyze_project.py)
+    VideoReader.__init__                            21줄  (plate_gui.py)
+    find_test_video                                 11줄  (scripts\run_headless_plate_test.py)
+    load_test_images                                11줄  (test_benchmark.py)
+    _progress_hook                                  10줄  (youtube_helper.py)
+    PlateGUIApp._on_file_open                        7줄  (plate_gui.py)
+    load_image                                       7줄  (test_ghost_detection.py)
+    check_ytdlp                                      7줄  (youtube_helper.py)
+
+  S2_전처리 (71개 함수, 총 3503줄)
+  ────────────────────────────────────────────────────────────
+    PlateEnginePro.process_frame                  1025줄  (plate_engine_pro.py)
+    PlateRecognizer._process_frame_inner           187줄  (plate_recognition_4k.py)
+    PlateEnginePro.__init__                        127줄  (plate_engine_pro.py)
+    filter_plates                                  115줄  (plate_ocr_postfilter.py)
+    PlateRecognizer._track_plate                   107줄  (plate_recognition_4k.py)
+    main                                            99줄  (scripts\bench_accuracy.py)
+    HangulClassifier.check_override                 96줄  (plate_engine_pro.py)
+    HangulClassifier._structural_bieup_check        95줄  (plate_engine_pro.py)
+    PlateRecognizer._ocr_korean_plate               85줄  (plate_recognition_4k.py)
+    PlateRecognizer._init_ocr                       78줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_log_region                 73줄  (plate_recognition_4k.py)
+    PlateGUIApp._build_ui                           60줄  (plate_gui.py)
+    _try_reverse_plate                              56줄  (plate_ocr_postfilter_v2.py)
+    ensemble_vote_v2                                56줄  (plate_ocr_postfilter_v2.py)
+    ocr_image                                       56줄  (scripts\bench_accuracy.py)
+    PlateEnginePro._run_ocr                         55줄  (plate_engine_pro.py)
+    PlateRecognizer._extract_plate_from_vehicle     55줄  (plate_recognition_4k.py)
+    PlateRecognizer.__init__                        54줄  (plate_recognition_4k.py)
+    PlateRecognizer._detect_direct                  50줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_plate_paddle               48줄  (plate_recognition_4k.py)
+    PlateRecognizer._deskew_plate                   47줄  (plate_recognition_4k.py)
+    PlateRecognizer._save_results                   44줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_english_plate              43줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_with_validation            42줄  (plate_recognition_4k.py)
+    _CRNNModel.recognize                            38줄  (plate_engine_pro.py)
+    PlateRecognizer._detect_coco_fallback           38줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_plate_easyocr              34줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_plate                      33줄  (plate_recognition_4k.py)
+    PlateRecognizer._preprocess_plate_deblur_strong   32줄  (plate_recognition_4k.py)
+    trace_pipeline                                  29줄  (analyze_project.py)
+    PlateGUIApp._auto_save_plate                    29줄  (plate_gui.py)
+    PlateRecognizer._preprocess_plate_deblur        29줄  (plate_recognition_4k.py)
+    PlateRecognizer._crop_region                    27줄  (plate_recognition_4k.py)
+    PlateOCRDataset.__getitem__                     27줄  (train_plate_ocr.py)
+    PlateRecognizer._preprocess_plate               26줄  (plate_recognition_4k.py)
+    PlateRecognizer._preprocess_plate_stretch       25줄  (plate_recognition_4k.py)
+    _deskew_and_otsu                                24줄  (plate_engine_pro.py)
+    _merge_similar_votes                            24줄  (plate_ocr_postfilter_v2.py)
+    PlateRecognizer._preprocess_plate_gamma         23줄  (plate_recognition_4k.py)
+    PlateRecognizer._run_paddle_ocr                 22줄  (plate_recognition_4k.py)
+    PlateTracker._should_reset_texts                21줄  (plate_engine_pro.py)
+    PlateRecognizer._upscale_if_small               21줄  (plate_recognition_4k.py)
+    PlateRecognizer._preprocess_plate_enhanced      20줄  (plate_recognition_4k.py)
+    draw_korean_text                                18줄  (plate_gui.py)
+    PlateRecognizer._normalize_plate_size           18줄  (plate_recognition_4k.py)
+    PlateRecognizer._preprocess_plate_soft          18줄  (plate_recognition_4k.py)
+    PlateRecognizer._run_easy_ocr                   18줄  (plate_recognition_4k.py)
+    ImagePreprocessor.deskew                        17줄  (plate_engine_pro.py)
+    ImagePreprocessor.auto_contrast                 16줄  (plate_engine_pro.py)
+    PlateOCRDataset._resize_pad                     13줄  (train_plate_ocr.py)
+    parse_ocr_multiline                             10줄  (plate_ocr_postfilter_v2.py)
+    PlateEnginePro._composite_multiframe             8줄  (plate_engine_pro.py)
+    ImagePreprocessor.adaptive_threshold             7줄  (plate_engine_pro.py)
+    ImagePreprocessor.clahe                          7줄  (plate_engine_pro.py)
+    ImagePreprocessor.otsu_inv                       7줄  (plate_engine_pro.py)
+    ImagePreprocessor.adaptive_mean                  7줄  (plate_engine_pro.py)
+    PlateRecognizer._calculate_sharpness             7줄  (plate_recognition_4k.py)
+    ImagePreprocessor.morphology                     5줄  (plate_engine_pro.py)
+    ImagePreprocessor.median_blur                    5줄  (plate_engine_pro.py)
+    ImagePreprocessor.hist_equalize                  5줄  (plate_engine_pro.py)
+    ImagePreprocessor.deskew_otsu                    5줄  (plate_engine_pro.py)
+    PlateTracker.__init__                            5줄  (plate_engine_pro.py)
+    PlateTracker.__init__                            5줄  (plate_gui.py)
+    ImagePreprocessor.gray_threshold                 4줄  (plate_engine_pro.py)
+    ImagePreprocessor.sharpen                        4줄  (plate_engine_pro.py)
+    ImagePreprocessor.upscale_2x                     4줄  (plate_engine_pro.py)
+    ImagePreprocessor.unsharp_mask                   4줄  (plate_engine_pro.py)
+    ImagePreprocessor.denoise                        3줄  (plate_engine_pro.py)
+    ImagePreprocessor.deblur                         3줄  (plate_engine_pro.py)
+    ImagePreprocessor.brightness_boost               3줄  (plate_engine_pro.py)
+    ImagePreprocessor.bilateral                      2줄  (plate_engine_pro.py)
+
+  S3_YOLO탐지 (27개 함수, 총 2618줄)
+  ────────────────────────────────────────────────────────────
+    PlateEnginePro.process_frame                  1025줄  (plate_engine_pro.py)
+    main                                           204줄  (analyze_project.py)
+    PlateRecognizer._process_frame_inner           187줄  (plate_recognition_4k.py)
+    main                                           153줄  (extract_pipeline.py)
+    PlateEnginePro.__init__                        127줄  (plate_engine_pro.py)
+    PlateRecognizer._load_models                   107줄  (plate_recognition_4k.py)
+    main                                           104줄  (test_benchmark.py)
+    main                                            82줄  (plate_recognition_4k.py)
+    main                                            71줄  (scripts\verify_integrations.py)
+    classify_role                                   60줄  (analyze_project.py)
+    PlateRecognizer.__init__                        54줄  (plate_recognition_4k.py)
+    PlateRecognizer._detect_with_sahi               51줄  (plate_recognition_4k.py)
+    PlateRecognizer._detect_direct                  50줄  (plate_recognition_4k.py)
+    download_plate_model                            47줄  (plate_recognition_4k.py)
+    PlateGUIApp.__init__                            43줄  (plate_gui.py)
+    PlateRecognizer._detect_coco_fallback           38줄  (plate_recognition_4k.py)
+    validate_bbox                                   37줄  (plate_gui.py)
+    extract_plate_crops                             31줄  (train_plate_ocr.py)
+    trace_pipeline                                  29줄  (analyze_project.py)
+    PlateTracker.end_frame                          23줄  (plate_engine_pro.py)
+    _resolve_plate_model                            18줄  (plate_engine_pro.py)
+    PlateRecognizer.detect_plates                   18줄  (plate_recognition_4k.py)
+    PlateRecognizer._run_easy_ocr                   18줄  (plate_recognition_4k.py)
+    PlateRecognizer._load_coco_fallback             14줄  (plate_recognition_4k.py)
+    _load_best_model                                10줄  (plate_engine_pro.py)
+    _load_best_model                                10줄  (plate_recognition_4k.py)
+    PlateRecognizer._detect_plate_country            7줄  (plate_recognition_4k.py)
+
+  S4_ROI크롭 (36개 함수, 총 2453줄)
+  ────────────────────────────────────────────────────────────
+    PlateEnginePro.process_frame                  1025줄  (plate_engine_pro.py)
+    PlateRecognizer._process_frame_inner           187줄  (plate_recognition_4k.py)
+    train                                          146줄  (train_plate_ocr.py)
+    HangulClassifier.check_override                 96줄  (plate_engine_pro.py)
+    HangulClassifier._structural_bieup_check        95줄  (plate_engine_pro.py)
+    PlateRecognizer._ocr_korean_plate               85줄  (plate_recognition_4k.py)
+    PlateGUIApp._refresh_display                    84줄  (plate_gui.py)
+    PlateRecognizer._reassemble_plate               83줄  (plate_recognition_4k.py)
+    PlateGUIApp._draw_overlay                       77줄  (plate_gui.py)
+    PlateTracker.match                              56줄  (plate_engine_pro.py)
+    PlateRecognizer._extract_plate_from_vehicle     55줄  (plate_recognition_4k.py)
+    test_ghost_same_position                        48줄  (test_ghost_detection.py)
+    PlateEngineFast.process_frame                   43줄  (plate_engine_pro.py)
+    validate_bbox                                   37줄  (plate_gui.py)
+    extract_plate_crops                             31줄  (train_plate_ocr.py)
+    trace_pipeline                                  29줄  (analyze_project.py)
+    PlateTracker._nms_output                        28줄  (plate_gui.py)
+    PlateRecognizer._crop_region                    27줄  (plate_recognition_4k.py)
+    _pro_engine_results_to_gui                      26줄  (plate_gui.py)
+    PlateRecognizer._run_paddle_ocr                 22줄  (plate_recognition_4k.py)
+    PlateTracker._should_reset_texts                21줄  (plate_engine_pro.py)
+    PlateTracker.calculate_iou                      18줄  (plate_gui.py)
+    PlateRecognizer._run_easy_ocr                   18줄  (plate_recognition_4k.py)
+    ImagePreprocessor.deskew                        17줄  (plate_engine_pro.py)
+    PlateRecognizer._update_bbox_cache              13줄  (plate_recognition_4k.py)
+    PlateRecognizer._bbox_iou                       11줄  (plate_recognition_4k.py)
+    PlateRecognizer._bbox_center_in_roi             10줄  (plate_recognition_4k.py)
+    calculate_iou                                   10줄  (test_realtime_stability.py)
+    PlateTracker._bbox_iou                           9줄  (plate_engine_pro.py)
+    PlateEnginePro._bbox_iou                         9줄  (plate_engine_pro.py)
+    PlateEnginePro._composite_multiframe             8줄  (plate_engine_pro.py)
+    PlateRecognizer._find_bbox_cache                 8줄  (plate_recognition_4k.py)
+    PlateOCRDataset.__init__                         8줄  (train_plate_ocr.py)
+    PlateRecognizer.set_roi_polygon                  5줄  (plate_recognition_4k.py)
+    extract_plates                                   5줄  (test_ghost_detection.py)
+    PlateTracker._bbox_area                          3줄  (plate_engine_pro.py)
+
+  S5_OCR인식 (18개 함수, 총 929줄)
+  ────────────────────────────────────────────────────────────
+    HangulClassifier.check_override                 96줄  (plate_engine_pro.py)
+    PlateRecognizer._ocr_korean_plate               85줄  (plate_recognition_4k.py)
+    main                                            82줄  (plate_recognition_4k.py)
+    PlateRecognizer._init_ocr                       78줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_log_region                 73줄  (plate_recognition_4k.py)
+    _try_reverse_plate                              56줄  (plate_ocr_postfilter_v2.py)
+    ensemble_vote_v2                                56줄  (plate_ocr_postfilter_v2.py)
+    ocr_image                                       56줄  (scripts\bench_accuracy.py)
+    PlateEnginePro._run_ocr                         55줄  (plate_engine_pro.py)
+    PlateRecognizer._ocr_plate_paddle               48줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_english_plate              43줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_plate_tesseract            42줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_with_validation            42줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_plate_easyocr              34줄  (plate_recognition_4k.py)
+    PlateRecognizer._ocr_plate                      33줄  (plate_recognition_4k.py)
+    PlateRecognizer._run_paddle_ocr                 22줄  (plate_recognition_4k.py)
+    PlateRecognizer._run_easy_ocr                   18줄  (plate_recognition_4k.py)
+    parse_ocr_multiline                             10줄  (plate_ocr_postfilter_v2.py)
+
+  S6_후처리 (17개 함수, 총 578줄)
+  ────────────────────────────────────────────────────────────
+    filter_plates                                  115줄  (plate_ocr_postfilter.py)
+    HangulClassifier.check_override                 96줄  (plate_engine_pro.py)
+    ensemble_vote_v2                                56줄  (plate_ocr_postfilter_v2.py)
+    PlateRecognizer._detect_direct                  50줄  (plate_recognition_4k.py)
+    validate_plate_format                           49줄  (plate_recognition_4k.py)
+    PlateRecognizer._ensemble_vote                  45줄  (plate_recognition_4k.py)
+    is_valid_korean_plate                           44줄  (plate_ocr_postfilter.py)
+    PlateTracker._nms_output                        28줄  (plate_gui.py)
+    _merge_similar_votes                            24줄  (plate_ocr_postfilter_v2.py)
+    PlateRecognizer._postprocess_ocr_text           19줄  (plate_recognition_4k.py)
+    PlateRecognizer._normalize_plate_size           18줄  (plate_recognition_4k.py)
+    normalize_plate                                  7줄  (test_ghost_detection.py)
+    normalize_plate                                  7줄  (test_ocr_accuracy.py)
+    apply_postfilter                                 6줄  (plate_ocr_postfilter.py)
+    normalize_plate                                  6줄  (test_realtime_stability.py)
+    extract_plates                                   5줄  (test_ghost_detection.py)
+    plates_match                                     3줄  (test_ocr_accuracy.py)
+
+  S7_추적 (8개 함수, 총 747줄)
+  ────────────────────────────────────────────────────────────
+    main                                           209줄  (test_realtime_stability.py)
+    PlateTracker.update                            181줄  (plate_gui.py)
+    PlateRecognizer.process_video                  159줄  (plate_recognition_4k.py)
+    PlateGUIApp._refresh_display                    84줄  (plate_gui.py)
+    PlateGUIApp._open_video                         65줄  (plate_gui.py)
+    test_ghost_ttl_expiry                           36줄  (test_ghost_detection.py)
+    PlateEnginePro.reset_state                       8줄  (plate_engine_pro.py)
+    PlateTracker.__init__                            5줄  (plate_gui.py)
+
+  S8_DB저장 (9개 함수, 총 360줄)
+  ────────────────────────────────────────────────────────────
+    PlateEnginePro.__init__                        127줄  (plate_engine_pro.py)
+    main                                            82줄  (plate_recognition_4k.py)
+    PlateRecognizer._save_results                   44줄  (plate_recognition_4k.py)
+    PlateGUIApp._auto_save_plate                    29줄  (plate_gui.py)
+    PlateDatabase._create_tables                    28줄  (plate_engine_pro.py)
+    PlateGUIApp._on_save_log                        23줄  (plate_gui.py)
+    PlateDatabase.record_plate                      16줄  (plate_engine_pro.py)
+    PlateDatabase.add_alert                          7줄  (plate_engine_pro.py)
+    PlateDatabase.__init__                           4줄  (plate_engine_pro.py)
+
+  S9_출력GUI (25개 함수, 총 1473줄)
+  ────────────────────────────────────────────────────────────
+    train                                          146줄  (train_plate_ocr.py)
+    analyze_file                                   144줄  (analyze_project.py)
+    PlateRecognizer._track_plate                   107줄  (plate_recognition_4k.py)
+    HangulClassifier.check_override                 96줄  (plate_engine_pro.py)
+    extract_functions_and_classes                   88줄  (extract_pipeline.py)
+    PlateGUIApp._refresh_display                    84줄  (plate_gui.py)
+    PlateRecognizer._reassemble_plate               83줄  (plate_recognition_4k.py)
+    PlateRecognizer._init_ocr                       78줄  (plate_recognition_4k.py)
+    PlateGUIApp._draw_overlay                       77줄  (plate_gui.py)
+    main                                            61줄  (test_ghost_detection.py)
+    classify_role                                   60줄  (analyze_project.py)
+    ensemble_vote_v2                                56줄  (plate_ocr_postfilter_v2.py)
+    ocr_image                                       56줄  (scripts\bench_accuracy.py)
+    _CRNNModel.__init__                             45줄  (plate_engine_pro.py)
+    PlateRecognizer._save_results                   44줄  (plate_recognition_4k.py)
+    PlateGUIApp.__init__                            43줄  (plate_gui.py)
+    PlateRecognizer._ocr_plate_tesseract            42줄  (plate_recognition_4k.py)
+    CRNN.__init__                                   31줄  (train_plate_ocr.py)
+    PlateGUIApp._auto_save_plate                    29줄  (plate_gui.py)
+    PlateTracker._nms_output                        28줄  (plate_gui.py)
+    VideoReader.__init__                            21줄  (plate_gui.py)
+    draw_korean_text                                18줄  (plate_gui.py)
+    find_duplicates                                 16줄  (analyze_project.py)
+    CRNN.forward                                    12줄  (train_plate_ocr.py)
+    PlateEnginePro.reset_state                       8줄  (plate_engine_pro.py)
+
+  S?_미분류 (107개 함수, 총 2205줄)
+  ────────────────────────────────────────────────────────────
+    DetectionWorker.run                            122줄  (plate_gui.py)
+    main                                            84줄  (test_ocr_accuracy.py)
+    augment_image                                   82줄  (train_plate_ocr.py)
+    main                                            72줄  (scripts\list_videos.py)
+    main                                            72줄  (scripts\run_headless_plate_test.py)
+    clean_ocr_text_v2                               70줄  (plate_ocr_postfilter_v2.py)
+    bench_memory                                    69줄  (test_benchmark.py)
+    test_ghost_sequential                           69줄  (test_ghost_detection.py)
+    test_four_vehicle_sequence                      59줄  (test_ghost_detection.py)
+    _parse_plate_core                               55줄  (plate_ocr_postfilter_v2.py)
+    PlateValidator.clean_ocr_text                   53줄  (plate_engine_pro.py)
+    VideoReader.run                                 53줄  (plate_gui.py)
+    main                                            53줄  (scripts\run_retest_pro.py)
+    PlateValidator.validate                         49줄  (plate_engine_pro.py)
+    main                                            49줄  (scripts\aihub_highway_check.py)
+    bench_ocr_latency                               49줄  (test_benchmark.py)
+    _apply_ocr_correction                           47줄  (plate_ocr_postfilter_v2.py)
+    process_frame_unified                           43줄  (plate_engine_pro.py)
+    validate_korean_plate                           43줄  (plate_recognition_4k.py)
+    _extract_region                                 37줄  (plate_ocr_postfilter_v2.py)
+    _plate_score                                    31줄  (plate_ocr_postfilter_v2.py)
+    PlateGUIApp._add_to_history                     30줄  (plate_gui.py)
+    _immediate_reject                               30줄  (plate_ocr_postfilter.py)
+    PlateValidator._fix_region_name                 28줄  (plate_engine_pro.py)
+    PlateGUIApp._refresh_history_list               27줄  (plate_gui.py)
+    find_orphan_files                               25줄  (analyze_project.py)
+    PlateTracker._text_similar_quick                25줄  (plate_gui.py)
+    PlateGUIApp._update_stats                       25줄  (plate_gui.py)
+    correct_ocr_hangul                              25줄  (plate_recognition_4k.py)
+    PlateValidator.classify_plate_type              23줄  (plate_engine_pro.py)
+    correct_ocr_uk                                  23줄  (plate_recognition_4k.py)
+    _find_nearest_valid_hangul                      21줄  (plate_ocr_postfilter_v2.py)
+    PlateEngineFast.__init__                        20줄  (plate_engine_pro.py)
+    collect_other_files                             19줄  (analyze_project.py)
+    PlateValidator._fix_invalid_hangul              19줄  (plate_engine_pro.py)
+    DetectionWorker.__init__                        19줄  (plate_gui.py)
+    _levenshtein                                    19줄  (plate_ocr_postfilter.py)
+    PlateGUIApp._on_api_server_click                18줄  (plate_gui.py)
+    PlateRecognizer._levenshtein                    18줄  (plate_recognition_4k.py)
+    PlateRecognizer.get_confirmed_plates            18줄  (plate_recognition_4k.py)
+    correct_hangul_similarity                       18줄  (plate_recognition_4k.py)
+    PlateValidator._try_patterns                    17줄  (plate_engine_pro.py)
+    ctc_greedy_decode                               17줄  (train_plate_ocr.py)
+    _fix_hangul_confusion                           15줄  (plate_ocr_postfilter_v2.py)
+    _find_nearest_valid_hangul                      15줄  (plate_recognition_4k.py)
+    PlateRecognizer._point_in_polygon               14줄  (plate_recognition_4k.py)
+    normalize                                       13줄  (plate_engine_pro.py)
+    _strip_leading_junk                             13줄  (plate_ocr_postfilter_v2.py)
+    PlateRecognizer._determine_strategy             13줄  (plate_recognition_4k.py)
+    get_video_files                                 13줄  (scripts\aihub_highway_check.py)
+    find_first_small_video                          13줄  (scripts\run_retest_pro.py)
+    collect_all_py                                  12줄  (extract_pipeline.py)
+    PlateGUIApp._levenshtein                        12줄  (plate_gui.py)
+    PlateRecognizer.process_frame                   12줄  (plate_recognition_4k.py)
+    collect_py_files                                11줄  (analyze_project.py)
+    PlateValidator.classify_vehicle_type            11줄  (plate_engine_pro.py)
+    PlateGUIApp._text_similar                       11줄  (plate_gui.py)
+    _get_font                                       11줄  (plate_gui.py)
+    find_video                                      11줄  (scripts\verify_integrations.py)
+    classify_function_stage                         10줄  (extract_pipeline.py)
+    PlateGUIApp._stop_threads                       10줄  (plate_gui.py)
+    PlateGUIApp._on_close                           10줄  (plate_gui.py)
+    _pick_best_candidate                            10줄  (plate_ocr_postfilter_v2.py)
+    _find_region_in_text                            10줄  (plate_recognition_4k.py)
+    PlateGUIApp._log                                 9줄  (plate_gui.py)
+    _jamo_decompose                                  9줄  (plate_ocr_postfilter_v2.py)
+    _jamo_decompose                                  9줄  (plate_recognition_4k.py)
+    PlateValidator.get_confidence_level              8줄  (plate_engine_pro.py)
+    NumpyEncoder.default                             8줄  (plate_recognition_4k.py)
+    get_memory_mb                                    8줄  (test_benchmark.py)
+    PlateTracker._reset_track_texts                  7줄  (plate_engine_pro.py)
+    PlateEnginePro._trigger_alert                    7줄  (plate_engine_pro.py)
+    _parse_plate_core_simple                         7줄  (plate_ocr_postfilter_v2.py)
+    collate_fn                                       7줄  (train_plate_ocr.py)
+    PlateValidator._normalize_for_validation         6줄  (plate_engine_pro.py)
+    PlateValidator._should_be_digit                  6줄  (plate_engine_pro.py)
+    HangulClassifier._decompose                      6줄  (plate_engine_pro.py)
+    PlateDatabase.search_plates                      6줄  (plate_engine_pro.py)
+    PlateRecognizer._is_gpu_available                6줄  (plate_recognition_4k.py)
+    PlateRecognizer._reset_state_machine             6줄  (plate_recognition_4k.py)
+    PlateTracker.begin_frame                         5줄  (plate_engine_pro.py)
+    correct_hangul_char                              5줄  (plate_ocr_postfilter_v2.py)
+    correct_num_char                                 5줄  (plate_ocr_postfilter_v2.py)
+    _correct_region                                  5줄  (plate_recognition_4k.py)
+    _correct_single_hangul                           5줄  (plate_recognition_4k.py)
+    extract_gt                                       5줄  (scripts\bench_accuracy.py)
+    get_video_size_mb                                5줄  (scripts\run_retest_pro.py)
+    PlateValidator.__init__                          4줄  (plate_engine_pro.py)
+    PlateTracker.reset                               4줄  (plate_engine_pro.py)
+    PlateTracker.reset                               4줄  (plate_gui.py)
+    PlateGUIApp._bind_keys                           4줄  (plate_gui.py)
+    PlateGUIApp._on_play                             4줄  (plate_gui.py)
+    ImagePreprocessor.gamma_bright                   3줄  (plate_engine_pro.py)
+    ImagePreprocessor.gamma_dark                     3줄  (plate_engine_pro.py)
+    PlateValidator.is_valid_length                   3줄  (plate_engine_pro.py)
+    HangulClassifier._compose                        3줄  (plate_engine_pro.py)
+    VideoReader.seek                                 3줄  (plate_gui.py)
+    PlateGUIApp._on_pause                            3줄  (plate_gui.py)
+    _fix_num                                         3줄  (plate_ocr_postfilter_v2.py)
+    PlateRecognizer._has_korean                      3줄  (plate_recognition_4k.py)
+    PlateRecognizer._clean_en_text                   3줄  (plate_recognition_4k.py)
+    normalize_for_compare                            3줄  (scripts\bench_accuracy.py)
+    HangulClassifier.__init__                        2줄  (plate_engine_pro.py)
+    PlateEngineFast.available                        2줄  (plate_engine_pro.py)
+    VideoReader.stop                                 2줄  (plate_gui.py)
+    DetectionWorker.stop                             2줄  (plate_gui.py)
+    PlateOCRDataset.__len__                          2줄  (train_plate_ocr.py)
+
+
+================================================================================
+  CMD 1 + CMD 2: 전처리 분할 제안
+================================================================================
+
+  위 S2_전처리 함수 목록을 기반으로:
+
+  [CMD 1: 이미지 기본 전처리]
+  - 리사이즈/패딩 (letterbox, resize)
+  - 색공간 변환 (grayscale, BGR→RGB)
+  - 기본 필터링 (blur, denoise)
+
+  [CMD 2: 번호판 특화 전처리]
+  - CLAHE (대비 향상)
+  - 이진화 (threshold, adaptive)
+  - 모폴로지 연산 (dilate, erode)
+  - 번호판 영역 보정 (기울기 보정, 원근 변환)
+
+  ※ 위는 일반적 분할안이며, 실제 코드의 S2 함수 목록을 보고
+     구체적으로 어떤 함수를 어느 CMD에 배치할지 결정해야 합니다.
