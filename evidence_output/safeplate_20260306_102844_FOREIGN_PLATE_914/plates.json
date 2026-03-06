@@ -1,0 +1,51 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-03-06T10:28:44.812061",
+  "system": "SafePlate 4K - YOLO26 Simulation",
+  "scenario": "물피도주 의심 차량 채증",
+  "plate": "FOREIGN_PLATE_914",
+  "shock_event": {
+    "shock_frame_idx": 0,
+    "shock_timestamp_sec": 0.0
+  },
+  "departure_info": {
+    "departure_direction": "right",
+    "departure_time_sec": 3.8371666666666666,
+    "departure_frame": 115,
+    "first_seen_time_sec": 3.8038,
+    "last_seen_time_sec": 3.8038,
+    "detection_count": 2,
+    "confidence": 0.13248813152313232,
+    "first_bbox": [
+      311,
+      322,
+      353,
+      342
+    ],
+    "last_bbox": [
+      311,
+      322,
+      345,
+      337
+    ],
+    "movement_vector": [
+      -4.0,
+      -2.5
+    ]
+  },
+  "evidence": {
+    "total_frames": 116,
+    "total_duration_sec": 3.8705333333333334,
+    "pre_buffer_frames": 1,
+    "post_buffer_frames": 115
+  },
+  "violation_summary": {
+    "type": "물피도주 의심",
+    "description": "충격 감지 후 화면에서 이탈한 차량"
+  },
+  "submission_targets": [
+    "경찰청 112 — 물피도주(뺑소니) 신고",
+    "보험사 — 사고 증거 자료 제출",
+    "안전신문고 (행정안전부) — 교통사고 신고"
+  ]
+}

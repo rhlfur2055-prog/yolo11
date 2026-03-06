@@ -27,10 +27,11 @@ class PathConfig:
 
     # -- YOLO 모델 우선순위 (위에서부터 탐색, 첫 번째 존재하는 파일 사용) --
     YOLO_MODEL_PRIORITY = [
+        "yolo11x_plate.pt",
+        "best.pt",
+        "yolo11n_plate.pt",
         "yolo26n.pt",
         "yolo26s.pt",
-        "yolo11x_plate.pt",
-        "yolo11n_plate.pt",
         "yolo26.pt",
         "yolo11n.pt",
         "yolov8n.pt",
@@ -137,14 +138,14 @@ class PathConfig:
 # 3. 감지/인식 임계값 (ThresholdConfig)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ThresholdConfig:
-    # -- 감지 신뢰도 (두 엔진 통일: 0.45 vs 0.50 → 0.50) --
-    DETECT_CONF: float = 0.50
+    # -- 감지 신뢰도 (낮춰서 더 많은 번호판 탐지) --
+    DETECT_CONF: float = 0.25  # 0.30→0.25: recall 향상 + 오탐 균형
 
     # -- OCR 인식 신뢰도 (두 엔진 통일: 0.60 vs 0.70 → 0.60) --
-    OCR_CONF: float = 0.60
+    OCR_CONF: float = 0.40  # 0.60→0.40: 더 많은 후보 허용 (최종 필터에서 걸러짐)
 
     # -- 탐지 최소 신뢰도 (노이즈 제거) --
-    MIN_DET_CONFIDENCE: float = 0.50
+    MIN_DET_CONFIDENCE: float = 0.35
 
     # -- 프레임 스킵 (영상 처리 시) --
     FRAME_SKIP: int = 5

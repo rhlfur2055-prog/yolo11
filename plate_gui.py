@@ -46,11 +46,12 @@ from config import PathConfig, DisplayConfig
 # 상수
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-VIDEO_DISPLAY_W = 960
-VIDEO_DISPLAY_H = 540
-SIDE_PANEL_W = 300
+VIDEO_DISPLAY_W = 1280
+VIDEO_DISPLAY_H = 720
+SIDE_PANEL_W = 0  # 우측 패널 제거 → 영상 전체 화면
 REFRESH_MS = 33  # ~30 FPS display
 DETECTION_SKIP = 1  # 매 프레임 탐지 (즉시 인식)
+MAX_DETECTION_CARDS = 12  # 우측 패널 최대 카드 수
 
 FONT_PATH = PathConfig.font_path(bold=True)
 FONT_PATH_FALLBACK = PathConfig.font_path(bold=False)
@@ -126,8 +127,8 @@ class PlateTracker:
 
     # 트랙에 OCR 결과가 있을 때, 마지막 OCR 이후 이 프레임 수 이상 지나면
     # 다른 차량이 같은 위치에 들어온 것으로 판단하고 OCR 결과를 지운다.
-    # ★ OCR 처리 500ms+ → 30fps에서 15~20프레임 간격 발생하므로 여유 있게 설정
-    STALE_FRAME_GAP = 20
+    # ★ OCR 처리 1-5초 → 30fps에서 30-150프레임 간격 발생하므로 여유 있게 설정
+    STALE_FRAME_GAP = 15  # 0.5초 (30fps × 0.5) — 즉시 잔상 제거
 
     # bbox 면적 비율이 이 범위를 벗어나면 다른 차량으로 판단
     AREA_RATIO_MIN = 0.5
@@ -143,13 +144,13 @@ class PlateTracker:
     # ── 안정화 파라미터 ──
     # bbox EMA 평활화 계수 (0=이전 유지, 1=새 값 즉시 적용)
     BBOX_SMOOTH_ALPHA = 0.8
-    # OCR 확인된 트랙의 표시 유지 프레임 수 (OCR 미수신 시에도 초록 박스 유지)
-    # ★ 실시간 카메라: 너무 크면 이전 차량 잔존, 너무 작으면 깜빡임
-    DISPLAY_HOLD_FRAMES = 8
+    # OCR 확인된 트랙의 표시 유지 프레임 수
+    # ★ OCR 4-8초 지연 → 그 사이 결과 유지 필요 (30fps 기준 120-240프레임)
+    DISPLAY_HOLD_FRAMES = 30  # 1초 유지 (30fps × 1) — 잔상 최소화
     # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
-    GAP_TOLERANCE = 5
+    GAP_TOLERANCE = 5  # 즉시 차량 교체 감지
 
-    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 20):
+    def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 8):
         self.iou_threshold = iou_threshold
         self.max_ttl = max_ttl
         self.tracks: dict[int, dict] = {}  # track_id → track 정보
@@ -640,35 +641,8 @@ class DetectionWorker(threading.Thread):
             except queue.Empty:
                 continue
 
-            # ══════════════════════════════════════════════════
-            # Phase 1: YOLO 탐지만 → 즉시 빨간 박스 표시 (~50ms)
-            # ══════════════════════════════════════════════════
-            if self.pro_engine is not None and hasattr(self.pro_engine, 'detect_only'):
-                try:
-                    yolo_only = self.pro_engine.detect_only(frame)
-                    if yolo_only:
-                        bbox_gui = []
-                        for r in yolo_only:
-                            x1, y1, x2, y2 = r.get("bbox", [0, 0, 0, 0])
-                            bbox_gui.append({
-                                "text": "",  # OCR 미완료 → 텍스트 없음
-                                "ocr_confidence": r.get("confidence", 0),
-                                "bbox": r.get("bbox", []),
-                                "is_valid_plate": False,  # Phase1 = 빨간/주황 박스
-                                "phase": 1,  # 1단계 표시
-                            })
-                        bbox_data = {
-                            "frame_idx": frame_idx,
-                            "timestamp": ts,
-                            "results": bbox_gui,
-                            "process_ms": 0,  # Phase1은 FPS 계산에서 제외
-                        }
-                        try:
-                            self.results_queue.put_nowait(bbox_data)
-                        except queue.Full:
-                            pass
-                except Exception:
-                    pass
+            # ★ Phase 1은 별도 Fast YOLO 스레드에서 현재 표시 프레임 기반으로 실행
+            # (DetectionWorker는 OCR에 집중)
 
             # ══════════════════════════════════════════════════
             # Phase 2: 전체 OCR 처리 → 초록 박스 + 번호판 텍스트
@@ -743,8 +717,8 @@ class PlateGUIApp(tk.Tk):
         self.cli_args = cli_args
         self.title("YOLO26 번호판 인식")
         self.configure(bg=C_BG)
-        self.geometry(f"{VIDEO_DISPLAY_W}x{VIDEO_DISPLAY_H + 320}")  # 960 x 860
-        self.minsize(900, 600)
+        self.geometry(f"{VIDEO_DISPLAY_W + 15}x{VIDEO_DISPLAY_H + 80}")
+        self.minsize(800, 500)
 
         # 스레드 / 상태
         self.video_reader: Optional[VideoReader] = None
@@ -757,14 +731,27 @@ class PlateGUIApp(tk.Tk):
         # 오버레이 상태
         self._latest_detections: list[dict] = []
         self._detection_lock = threading.Lock()
+        self._detection_ts: float = 0.0  # 마지막 감지 결과 수신 시각
+        self._DETECTION_DISPLAY_TTL: float = 3.0  # Phase 2 유지 시간 (process_frame 결과 표시 시간 확보)
+
+        # ★ Fast YOLO 스레드: 현재 표시 프레임에 대해 실시간 YOLO 탐지
+        self._current_display_frame = None  # 현재 표시 중인 프레임
+        self._phase1_bboxes: list[dict] = []  # Fast YOLO Phase 1 결과
+        self._phase1_lock = threading.Lock()
+        self._fast_yolo_active = False
         self._detection_history: list[dict] = []
-        self._plate_tracker = PlateTracker(iou_threshold=0.35, max_ttl=15)
+        self._plate_tracker = PlateTracker(iou_threshold=0.35, max_ttl=5)
         self._process_ms = 0.0
         self._process_ms_pro = 0.0
         self._process_ms_fast = 0.0
+        self._fast_ms = 0.0  # fast YOLO loop 소요시간 (detect_only)
         self._det_fps_samples: list[float] = []
         self._video_w = 0
         self._video_h = 0
+
+        # CCTV 카드 패널 이미지 참조 (GC 방지)
+        self._card_images: list = []
+        self._card_slots: list = []  # (frame, img_label, text_label, detail_label, time_label)
 
         # 로깅 + 자동 저장
         self._script_dir = os.path.dirname(os.path.abspath(__file__))
@@ -797,43 +784,17 @@ class PlateGUIApp(tk.Tk):
     # ─── UI 빌드 ───
 
     def _build_ui(self) -> None:
-        main = tk.Frame(self, bg=C_BG)
-        main.pack(fill=tk.BOTH, expand=True)
-
-        # ── 상단: 영상 재생 영역 ──
-        video_frame = tk.Frame(main, bg=C_BG)
-        video_frame.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        self.video_label = tk.Label(video_frame, bg="#000000", anchor="center")
-        self.video_label.pack(fill=tk.BOTH, expand=True)
-
-        # ── 하단: Detection Log ──
-        log_frame = tk.Frame(main, bg=C_PANEL, height=200)
-        log_frame.pack(fill=tk.X, padx=5, pady=(0, 5))
-        log_frame.pack_propagate(False)
-
-        tk.Label(log_frame, text="Detection Log  —  인식된 번호판 (동영상 재생 시 즉시 표시)",
-                 bg=C_PANEL, fg=C_DIM, font=("Segoe UI", 10, "bold")).pack(anchor=tk.W, padx=8, pady=(8, 4))
-
-        header = tk.Frame(log_frame, bg=C_SURFACE)
-        header.pack(fill=tk.X, padx=8, pady=0)
-        tk.Label(header, text="시간", width=14, anchor=tk.W, bg=C_SURFACE, fg=C_DIM, font=("Consolas", 9)).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Label(header, text="번호판", width=18, anchor=tk.W, bg=C_SURFACE, fg=C_DIM, font=("Consolas", 9)).pack(side=tk.LEFT, padx=4, pady=4)
-        tk.Label(header, text="신뢰도", width=8, anchor=tk.W, bg=C_SURFACE, fg=C_DIM, font=("Consolas", 9)).pack(side=tk.LEFT, padx=4, pady=4)
-
-        self.history_list = tk.Listbox(
-            log_frame, bg=C_BG, fg=C_TEXT, selectbackground=C_ACCENT,
-            font=("Consolas", 10), borderwidth=0, highlightthickness=0,
-            activestyle="none", height=8,
-        )
-        self.history_list.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
-
-        self.plate_text_var = tk.StringVar(value="---")
-        self.conf_var = tk.StringVar(value="")
-        self.engine_choice_var = tk.StringVar(value="Pro 엔진")
-        self.multiframe_var = tk.BooleanVar(value=False)
-        self.api_server_process = None
-
-        # ── 맨 하단: 컨트롤 바 ──
+        """SARADA STEELHEAD CCTV 스타일 레이아웃:
+        ┌──────────────────┬──────────┐
+        │                  │ Detection │
+        │   Main Video     │  Cards   │
+        │   (CCTV Feed)    │  Panel   │
+        │                  │          │
+        ├──────────────────┴──────────┤
+        │  Control Bar + Status       │
+        └─────────────────────────────┘
+        """
+        # ── 맨 하단: 컨트롤 바 (먼저 pack → 나머지가 위에 채워짐) ──
         bar = tk.Frame(self, bg=C_SURFACE, height=44)
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -849,13 +810,31 @@ class PlateGUIApp(tk.Tk):
         tk.Button(btn_frame, text="\U0001f4be 저장", command=self._on_save_log, bg=C_PANEL, fg=C_TEXT,
                   font=("Segoe UI", 9), relief=tk.FLAT, padx=10, pady=4).pack(side=tk.LEFT, padx=2)
 
-        self.api_btn = tk.Button(btn_frame, text="API 서버 (8765)", command=self._on_api_server_click,
-                                  bg=C_BORDER, fg=C_TEXT, font=("Segoe UI", 9), relief=tk.FLAT, padx=8, pady=4)
-        self.api_btn.pack(side=tk.LEFT, padx=2)
-
         self.stats_var = tk.StringVar(value="동영상 파일을 열어주세요.")
         tk.Label(bar, textvariable=self.stats_var, bg=C_SURFACE, fg=C_DIM,
                  font=("Consolas", 9)).pack(side=tk.LEFT, padx=12, pady=4, fill=tk.X, expand=True)
+
+        # ── 메인 영역: 좌측 영상 + 우측 감지 패널 ──
+        main = tk.Frame(self, bg=C_BG)
+        main.pack(fill=tk.BOTH, expand=True)
+
+        # ── 우측 패널 제거 — 영상 전체 화면 ──
+        self._det_count_var = tk.StringVar(value="0건")
+        self._card_frame = tk.Frame(main, bg=C_PANEL)  # 더미 (호환용)
+
+        # ── 메인 영상 영역 (전체 화면) ──
+        video_frame = tk.Frame(main, bg="#000000")
+        video_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
+        self.video_label = tk.Label(video_frame, bg="#000000", anchor="center")
+        self.video_label.pack(fill=tk.BOTH, expand=True)
+
+        # ── 내부 변수 ──
+        self.plate_text_var = tk.StringVar(value="---")
+        self.conf_var = tk.StringVar(value="")
+        self.engine_choice_var = tk.StringVar(value="Pro 엔진")
+        self.multiframe_var = tk.BooleanVar(value=False)
+        # Listbox 호환 (기존 코드 참조용)
+        self.history_list = None
 
     def _bind_keys(self) -> None:
         self.bind("<q>", lambda e: self._on_close())
@@ -903,25 +882,6 @@ class PlateGUIApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("저장 오류", str(e))
 
-    def _on_api_server_click(self) -> None:
-        if self.api_server_process is not None:
-            try:
-                self.api_server_process.terminate()
-                self.api_server_process = None
-            except Exception:
-                pass
-            self.api_btn.config(text="API 서버 시작 (8765)")
-            return
-        try:
-            import subprocess
-            self.api_server_process = subprocess.Popen(
-                [sys.executable, os.path.join(self._script_dir, "api_server.py"), "--port", "8765"],
-                cwd=self._script_dir, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-            )
-            self.api_btn.config(text="API 서버 중지 (8765)")
-        except Exception as e:
-            self._log(f"API 서버 시작 실패: {e}")
-
     # ─── 영상 열기 (자동 시작) ───
 
     def _open_video(self, path: str) -> None:
@@ -936,7 +896,8 @@ class PlateGUIApp(tk.Tk):
         # ★ 엔진 내부 트래커도 리셋 (이전 영상 트랙 잔존 방지)
         if self.detection_worker and hasattr(self.detection_worker, 'pro_engine') and self.detection_worker.pro_engine:
             self.detection_worker.pro_engine.reset_state()
-        self.history_list.delete(0, tk.END)
+        # 패널 초기화
+        self._det_count_var.set("0건")
         self.plate_text_var.set("---")
         self.conf_var.set("")
 
@@ -985,10 +946,61 @@ class PlateGUIApp(tk.Tk):
             self.stats_var.set("엔진 로딩 타임아웃 - 재생 시작")
         else:
             self.stats_var.set("엔진 로딩 완료! 재생 시작")
+            # ★ 영상 모드 활성화: consecutive_required=2 → imgsz 축소, SAHI 비활성
+            #   Phase 1 (fast loop)은 즉시 표시, Phase 2는 트래커 2프레임 확인 후 표시
+            if self.detection_worker.pro_engine:
+                self.detection_worker.pro_engine.consecutive_required = 2
         self.update()
 
         self.playing_event.set()
         self.stats_var.set(f"Auto-playing {self._video_w}x{self._video_h} @ {self.video_reader.fps:.0f}fps")
+
+        # ★ Fast YOLO 스레드 시작 (현재 표시 프레임에서 실시간 bbox 탐지)
+        self._fast_yolo_active = True
+        _fast_t = threading.Thread(target=self._fast_yolo_loop, daemon=True)
+        _fast_t.start()
+
+    # ─── Fast YOLO 스레드: 현재 표시 프레임에서 ~8fps YOLO 탐지 ───
+
+    def _fast_yolo_loop(self):
+        """현재 표시 프레임: YOLO detect_only → 즉시 bbox 표시 (~3-8fps).
+        ★ OCR은 Worker 전용 (PaddleOCR 공유 블로킹 방지).
+        Fast loop = YOLO bbox만 → Worker = 전체 OCR + 텍스트."""
+        while self._fast_yolo_active:
+            frame = self._current_display_frame
+            if frame is None:
+                time.sleep(0.05)
+                continue
+            try:
+                engine = None
+                if self.detection_worker and self.detection_worker.ready.is_set():
+                    engine = self.detection_worker.pro_engine
+                if engine is None or not hasattr(engine, 'detect_only'):
+                    time.sleep(0.1)
+                    continue
+                # ★ YOLO만 실행 (OCR 없음) → PaddleOCR 블로킹 없이 즉시 bbox
+                t0 = time.time()
+                results = engine.detect_only(frame)
+                _fast_ms = (time.time() - t0) * 1000
+                phase1 = []
+                for r in results:
+                    bbox = r.get("bbox", [])
+                    if len(bbox) < 4:
+                        continue
+                    phase1.append({
+                        "bbox": bbox,
+                        "confidence": r.get("confidence", 0),
+                        "phase": 1,
+                        "text": "",
+                        "is_valid_plate": False,
+                        "ocr_confidence": 0,
+                    })
+                with self._phase1_lock:
+                    self._phase1_bboxes = phase1
+                    self._fast_ms = _fast_ms
+            except Exception:
+                pass
+            time.sleep(0.02)  # YOLO ~200-500ms + 최소 딜레이
 
     # ─── 디스플레이 루프 (30 FPS) ───
 
@@ -1013,8 +1025,18 @@ class PlateGUIApp(tk.Tk):
                     # ── PlateTracker: Ghost Detection 방지 ──
                     tracked = self._plate_tracker.update(validated, frame_idx)
 
-                    # ★ 엔진/트래커 결과를 그대로 반영 (사라진 차 즉시 제거)
-                    self._latest_detections = tracked
+                    # ★ Phase 2 결과가 있을 때만 교체 — 빈 결과로 덮어쓰기 방지
+                    #   (OCR이 빈 결과 반환 시 기존 Phase 2 유지 → TTL로 자연 만료)
+                    _has_phase2 = any(
+                        d.get("is_valid_plate") and d.get("text")
+                        for d in tracked
+                    )
+                    if _has_phase2:
+                        self._latest_detections = tracked
+                        self._detection_ts = time.time()
+                    elif tracked:
+                        # Phase 1만 있는 경우 (OCR 미완료): 기존 Phase 2 유지
+                        pass
 
                     if data["process_ms"] > 0:
                         self._process_ms = data["process_ms"]
@@ -1045,8 +1067,68 @@ class PlateGUIApp(tk.Tk):
         if frame_data is not None:
             frame_idx, frame, ts = frame_data
 
+            # ★ Fast YOLO 스레드용 현재 프레임 저장
+            self._current_display_frame = frame
+
             with self._detection_lock:
-                annotated = self._draw_overlay(frame, self._latest_detections)
+                # ★ 감지 결과 TTL: PlateTracker가 staleness 관리하므로 충분한 시간 유지
+                _det_age = time.time() - self._detection_ts
+                if _det_age > self._DETECTION_DISPLAY_TTL:
+                    self._latest_detections = []
+
+                # ★ Phase 1 (Fast YOLO 실시간 bbox) + Phase 2 (OCR 확정) 결합
+                #   핵심: Phase 1의 현재 프레임 bbox 위치 + Phase 2의 OCR 텍스트
+                phase2_dets = list(self._latest_detections)
+                with self._phase1_lock:
+                    phase1_dets = list(self._phase1_bboxes)
+
+                merged = []
+                used_p2 = set()
+
+                for p1 in phase1_dets:
+                    p1_bbox = p1.get("bbox", [])
+                    if len(p1_bbox) < 4:
+                        continue
+                    # Phase 2 중 가장 가까운 것 찾기 (IoU 또는 중심 거리)
+                    best_idx = -1
+                    best_iou = 0.15  # 최소 IoU (차가 이동해도 약간은 겹침)
+                    p1_cx = (p1_bbox[0] + p1_bbox[2]) / 2
+                    p1_cy = (p1_bbox[1] + p1_bbox[3]) / 2
+                    for i, p2 in enumerate(phase2_dets):
+                        if i in used_p2:
+                            continue
+                        p2_bbox = p2.get("bbox", [])
+                        if len(p2_bbox) < 4:
+                            continue
+                        iou = PlateTracker.calculate_iou(p1_bbox, p2_bbox)
+                        if iou >= best_iou:
+                            best_iou = iou
+                            best_idx = i
+                        elif best_idx < 0:
+                            # IoU 없어도 중심 거리 가까우면 매칭 (차가 이동한 경우)
+                            p2_cx = (p2_bbox[0] + p2_bbox[2]) / 2
+                            p2_cy = (p2_bbox[1] + p2_bbox[3]) / 2
+                            dist = ((p1_cx - p2_cx)**2 + (p1_cy - p2_cy)**2) ** 0.5
+                            if dist < 200:  # 200px 이내면 같은 차량
+                                best_idx = i
+
+                    if best_idx >= 0:
+                        # ★ Phase 1 bbox(현재 위치) + Phase 2 텍스트/데이터 결합
+                        combined = dict(phase2_dets[best_idx])
+                        combined["bbox"] = p1_bbox  # 현재 프레임의 정확한 위치
+                        merged.append(combined)
+                        used_p2.add(best_idx)
+                    else:
+                        # 매칭 없음 → 순수 Phase 1 (탐지중)
+                        merged.append(p1)
+
+                # 매칭 안 된 Phase 2도 추가 (최근 인식이라 화면에 남겨야 할 수도)
+                for i, p2 in enumerate(phase2_dets):
+                    if i not in used_p2:
+                        # 오래된 Phase 2 bbox는 현재 프레임과 안 맞으므로 추가 안 함
+                        pass
+
+                annotated = self._draw_overlay(frame, merged)
 
             # 리사이즈 (종횡비 유지)
             label_w = self.video_label.winfo_width()
@@ -1080,84 +1162,66 @@ class PlateGUIApp(tk.Tk):
     # ─── 오버레이 그리기 (2단계) ───
 
     # 오버레이 최대 표시 개수 (화면 정리용)
-    MAX_PHASE2_DISPLAY = 4   # OCR 확정 박스 최대 표시 수
-    MAX_PHASE1_DISPLAY = 0   # 탐지중 박스 표시 안 함 (OCR 확정만 표시)
+    MAX_PHASE2_DISPLAY = 5   # OCR 확정 박스 최대 표시 수
+    MAX_PHASE1_DISPLAY = 5   # YOLO 탐지 즉시 박스 (OCR 전 노란 박스)
 
     def _draw_overlay(self, frame: np.ndarray, detections: list[dict]) -> np.ndarray:
-        """프레임 위에 OCR 확정 결과만 오버레이:
-        ★ Phase 1 (탐지중) 미표시 — 확정된 번호판만 깔끔하게 표시
-        ★ 라벨: '서울바9203 (72%)' — 등급 태그 제거
-        ★ 최대 4개, 겹침 방지
+        """MareArts ANPR 스타일 오버레이 (속도 극대화 버전)
+        - 좌상단: YOLO26 ANPR + FPS (최소 오버레이)
+        - 초록 bbox + 라벨 (R70 이상만 표시)
+        - frame.copy() 최소화 → FPS 극대화
         """
-        result = frame.copy()
+        result = frame  # ★ copy() 제거 — FPS 극대화 (원본 직접 그리기)
+        h, w = result.shape[:2]
 
-        # ── OCR 확정만 필터 ──
-        phase2_dets = []
+        # ── 좌상단 FPS 패널 (최소한의 오버레이) ──
+        fps = 0
+        if hasattr(self, '_det_fps_samples') and self._det_fps_samples:
+            fps = sum(self._det_fps_samples) / len(self._det_fps_samples)
+        cv2.rectangle(result, (5, 5), (200, 55), (0, 0, 0), -1)
+        cv2.putText(result, "YOLO26 ANPR", (12, 25),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+        cv2.putText(result, f"FPS:{fps:.0f} {w}x{h}", (12, 48),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+
+        # ── R70 이상만 표시 (확실한 인식만) ──
         for det in detections:
             bbox = det.get("bbox", [])
             if len(bbox) < 4:
                 continue
             text = det.get("text") or det.get("plate", "")
             is_valid = det.get("is_valid_plate", False)
-            if is_valid and text:
-                phase2_dets.append(det)
-
-        if not phase2_dets:
-            return result
-
-        # ── 신뢰도 내림차순 정렬 후 상위만 표시 ──
-        phase2_dets.sort(key=lambda d: d.get("ocr_confidence", d.get("confidence", 0)), reverse=True)
-        phase2_dets = phase2_dets[:self.MAX_PHASE2_DISPLAY]
-
-        # 라벨 겹침 방지용 점유 영역 목록 [(y_top, y_bottom, x_left, x_right)]
-        _label_rects = []
-
-        def _find_label_y(x1, base_y, font_sz, label_w):
-            """라벨 Y 위치를 기존 라벨과 겹치지 않게 조정"""
-            y_top = base_y
-            y_bot = base_y + font_sz + 6
-            for _attempt in range(8):
-                overlap = False
-                for (ry1, ry2, rx1, rx2) in _label_rects:
-                    if x1 < rx2 and (x1 + label_w) > rx1 and y_top < ry2 and y_bot > ry1:
-                        overlap = True
-                        y_top = ry2 + 4
-                        y_bot = y_top + font_sz + 6
-                        break
-                if not overlap:
-                    break
-            _label_rects.append((y_top, y_bot, x1, x1 + label_w))
-            return y_top
-
-        for det in phase2_dets:
-            bbox = det.get("bbox", [])
+            ocr_conf = det.get("ocr_confidence", det.get("confidence", 0))
             x1, y1, x2, y2 = [int(v) for v in bbox]
-            text = det.get("text") or det.get("plate", "")
-            conf = det.get("ocr_confidence", det.get("confidence", 0))
 
-            _clevel = det.get("confidence_level", "")
-            if _clevel.startswith("HIGH"):
-                color = (0, 230, 70)    # 초록 (HIGH)
-            elif _clevel.startswith("MEDIUM"):
-                color = (0, 200, 255)   # 주황/노랑 (MEDIUM)
+            if is_valid and text and ocr_conf >= 0.70:
+                # ★ 확실한 인식: 초록 bbox + 번호 라벨
+                det_conf = det.get("pattern_score", ocr_conf)
+                d_val = min(99, int(det_conf * 100))
+                r_val = min(99, int(ocr_conf * 100))
+
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+                label = f"{text} D{d_val}/R{r_val}"
+                font_sz = max(18, min(26, (x2 - x1) // 3))
+                label_y = max(0, y1 - font_sz - 10)
+                lbl_w = len(label) * (font_sz // 2 + 2) + 10
+                # ★ 불투명 검정 배경 (addWeighted 제거 → 속도 향상)
+                cv2.rectangle(result, (x1 - 2, label_y - 2),
+                              (x1 + lbl_w, label_y + font_sz + 4), (0, 0, 0), -1)
+                result = draw_korean_text(result, label, (x1 + 2, label_y),
+                                          font_size=font_sz, color=(0, 255, 0))
+            elif is_valid and text and ocr_conf >= 0.50:
+                # ★ 중간 신뢰: 노란 bbox + 번호만 (D/R 없음)
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 200, 255), 2)
+                label_y = max(0, y1 - 22)
+                cv2.rectangle(result, (x1, label_y - 2),
+                              (x1 + len(text) * 12, label_y + 20), (0, 0, 0), -1)
+                result = draw_korean_text(result, text, (x1 + 2, label_y),
+                                          font_size=18, color=(0, 200, 255))
             else:
-                color = (0, 230, 70)    # 기본 초록
-            thickness = 2
-            cv2.rectangle(result, (x1, y1), (x2, y2), color, thickness)
-
-            # ★ 라벨: 번호판 + 신뢰도만 (등급 태그 제거)
-            label = f"{text} ({conf:.0%})"
-            font_sz = max(18, min(28, (x2 - x1) // 4))
-            # 한글 포함 라벨 너비: 한글=폰트크기, ASCII=폰트크기*0.6
-            est_label_w = sum(font_sz if ord(c) > 127 else int(font_sz * 0.6) for c in label)
-            label_y = _find_label_y(x1, max(0, y1 - font_sz - 6), font_sz, est_label_w)
-            result = draw_korean_text(result, label, (x1, label_y),
-                                      font_size=font_sz, color=color)
-
-            # 신뢰도 바 (얇게)
-            if conf > 0:
-                bar_w = int((x2 - x1) * conf)
-                cv2.rectangle(result, (x1, y2 + 1), (x1 + bar_w, y2 + 4), color, -1)
+                # ★ 저신뢰/미인식: 노란 bbox만 (텍스트 표시 안 함)
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 200, 255), 1)
 
         return result
 
@@ -1239,7 +1303,8 @@ class PlateGUIApp(tk.Tk):
         return prev[-1]
 
     def _text_similar(self, t1: str, t2: str) -> bool:
-        """같은 차량의 유사 인식 결과인지 판단 (levenshtein ≤ 2)."""
+        """같은 차량의 유사 인식 결과인지 판단.
+        전체 levenshtein ≤ 2 또는 숫자부분 levenshtein ≤ 1 이면 동일 차량."""
         t1 = t1.replace(" ", "")
         t2 = t2.replace(" ", "")
         if t1 == t2:
@@ -1248,35 +1313,20 @@ class PlateGUIApp(tk.Tk):
             return False
         if abs(len(t1) - len(t2)) > 2:
             return False
-        return self._levenshtein(t1, t2) <= 2
+        # 전체 텍스트 비교
+        if self._levenshtein(t1, t2) <= 2:
+            return True
+        # ★ 숫자 부분만 비교 (한글 오인식 허용): 숫자가 거의 같으면 같은 차량
+        import re
+        d1 = re.sub(r'[^0-9]', '', t1)
+        d2 = re.sub(r'[^0-9]', '', t2)
+        if len(d1) >= 5 and len(d2) >= 5 and self._levenshtein(d1, d2) <= 1:
+            return True
+        return False
 
     def _refresh_history_list(self) -> None:
-        self.history_list.delete(0, tk.END)
-        for h in self._detection_history[:50]:
-            ts = h.get("timestamp", 0)
-            time_str = f"{int(ts) // 60:02d}:{ts % 60:04.1f}"
-            plate = (h.get("text") or h.get("plate", "")).strip()
-            conf = h.get("ocr_confidence", h.get("confidence", 0))
-            clevel = h.get("confidence_level", "")
-            vtype = h.get("vehicle_type", "")
-            if clevel.startswith("HIGH"):
-                mark = "\U0001f7e2"   # Green circle
-            elif clevel.startswith("MEDIUM"):
-                mark = "\U0001f7e1"   # Yellow circle
-            elif conf >= 0.90:
-                mark = "\U0001f7e2"
-            elif conf >= 0.70:
-                mark = "\U0001f7e1"
-            else:
-                mark = "\U0001f534"   # Red circle
-            # 차량 유형 약어
-            _vt = ""
-            if vtype == "영업용":
-                _vt = " [영]"
-            elif vtype == "렌터카":
-                _vt = " [렌]"
-            line = f"{mark} {time_str:<8} {plate:<14} {conf:.0%}{_vt}"
-            self.history_list.insert(tk.END, line)
+        """인식 기록 카운트만 갱신 (우측 패널 제거됨)."""
+        self._det_count_var.set(f"{len(self._detection_history)}건")
 
     # ─── 상태 표시 ───
 
@@ -1290,9 +1340,9 @@ class PlateGUIApp(tk.Tk):
         mins, secs = divmod(int(ts), 60)
         t_mins, t_secs = divmod(int(total_sec), 60)
 
-        speed_info = f"Proc:{self._process_ms:.0f}ms"
-        if self._process_ms_pro or self._process_ms_fast:
-            speed_info = f"Pro:{self._process_ms_pro:.0f}ms / Fast:{self._process_ms_fast:.0f}ms"
+        # ★ Fast = fast YOLO loop (detect_only), Pro = Worker (process_frame 전체)
+        _fast_display = self._fast_ms if self._fast_ms > 0 else self._process_ms_fast
+        speed_info = f"Pro:{self._process_ms_pro:.0f}ms / Fast:{_fast_display:.0f}ms"
 
         status = (
             f"{mins:02d}:{secs:02d}/{t_mins:02d}:{t_secs:02d}  "
@@ -1321,12 +1371,6 @@ class PlateGUIApp(tk.Tk):
 
     def _on_close(self) -> None:
         self._log(f"=== PlateGUI 종료 === (저장: {self._saved_count}건, 기록: {len(self._detection_history)}건)")
-        if getattr(self, "api_server_process", None) is not None:
-            try:
-                self.api_server_process.terminate()
-                self.api_server_process = None
-            except Exception:
-                pass
         self._stop_threads()
         self.destroy()
 

@@ -1,8 +1,12 @@
 """
-build_dashboard.py - 골든타임 2.0 증거 대시보드 HTML 생성기
+build_dashboard.py - YOLO26 증거 대시보드 HTML 생성기
 
 evidence_output/ 안의 모든 증거 패키지를 스캔하여
 브라우저에서 바로 열 수 있는 단일 HTML 파일을 생성한다.
+
+지원 시나리오:
+    - GoldenTime 2.0: 긴급차량 통행방해 채증 (evidence_YYYYMMDD_...)
+    - SafePlate 4K:   물피도주 의심 차량 채증 (safeplate_YYYYMMDD_...)
 """
 
 import sys
@@ -70,49 +74,44 @@ def scan_packages(base_dir):
     return packages
 
 
-def build_html(packages):
-    """HTML 대시보드 문자열 생성"""
+def _detect_package_type(pkg: dict) -> str:
+    """패키지 유형 판별: 'safeplate' 또는 'goldentime'"""
+    name = pkg.get("name", "")
+    jd = pkg.get("json_data", {})
 
-    # 각 패키지별 카드 HTML
-    cards_html = ""
-    for idx, pkg in enumerate(packages):
-        jd = pkg["json_data"]
-        plate = jd.get("plate", "알 수 없음")
-        gen_at = jd.get("generated_at", "")
-        ev = jd.get("evidence", {})
-        vs = jd.get("violation_summary", {})
-        dv_list = jd.get("distance_violations", [])
-        targets = jd.get("submission_targets", [])
+    if name.startswith("safeplate_"):
+        return "safeplate"
+    if jd.get("scenario", "").startswith("물피도주"):
+        return "safeplate"
+    if "departure_info" in jd:
+        return "safeplate"
+    return "goldentime"
 
-        # 시간 파싱
-        try:
-            dt = datetime.fromisoformat(gen_at)
-            time_str = dt.strftime("%Y-%m-%d %H:%M:%S")
-        except Exception:
-            time_str = gen_at
 
-        has_violation = vs.get("has_distance_violation", False)
-        v_count = vs.get("violation_count", 0)
-        badge_class = "badge-danger" if has_violation else "badge-safe"
-        badge_text = f"위반 {v_count}건" if has_violation else "위반 없음"
+def _build_card_goldentime(idx: int, pkg: dict) -> str:
+    """GoldenTime 증거 카드 HTML 생성"""
+    jd = pkg["json_data"]
+    plate = jd.get("plate", "알 수 없음")
+    gen_at = jd.get("generated_at", "")
+    ev = jd.get("evidence", {})
+    vs = jd.get("violation_summary", {})
+    dv_list = jd.get("distance_violations", [])
+    targets = jd.get("submission_targets", [])
 
-        # 스크린샷 갤러리
-        gallery_html = ""
-        for ss in pkg["screenshots"]:
-            label = ss["name"].replace(".jpg", "").replace("_", " ").title()
-            gallery_html += f'''
-            <div class="thumb-card">
-                <img src="{ss['data_uri']}" alt="{ss['name']}"
-                     onclick="openModal(this.src, '{ss['name']}')" />
-                <div class="thumb-label">{label}</div>
-                <div class="thumb-size">{ss['size_kb']}KB</div>
-            </div>'''
+    time_str = _parse_time(gen_at)
 
-        # 거리 위반 테이블
-        violation_rows = ""
-        if dv_list:
-            for i, dv in enumerate(dv_list, 1):
-                violation_rows += f'''
+    has_violation = vs.get("has_distance_violation", False)
+    v_count = vs.get("violation_count", 0)
+    badge_class = "badge-danger" if has_violation else "badge-safe"
+    badge_text = f"위반 {v_count}건" if has_violation else "위반 없음"
+
+    gallery_html = _build_gallery(pkg)
+
+    # 거리 위반 테이블
+    violation_rows = ""
+    if dv_list:
+        for i, dv in enumerate(dv_list, 1):
+            violation_rows += f'''
                 <tr>
                     <td>{i}</td>
                     <td>F{dv.get('frame_idx', '?')}</td>
@@ -120,25 +119,19 @@ def build_html(packages):
                     <td>{dv.get('close_duration_sec', 0):.1f}초</td>
                     <td>{dv.get('bbox_ratio', 0)*100:.3f}%</td>
                 </tr>'''
-        else:
-            violation_rows = '<tr><td colspan="5" class="no-data">거리 미확보 위반 없음</td></tr>'
+    else:
+        violation_rows = '<tr><td colspan="5" class="no-data">거리 미확보 위반 없음</td></tr>'
 
-        # 제출 대상
-        targets_html = ""
-        for t in targets:
-            targets_html += f'<li>{t}</li>'
+    targets_html = "".join(f'<li>{t}</li>' for t in targets)
+    json_pretty = json.dumps(jd, indent=2, ensure_ascii=False)
+    report_text = pkg["report"]
 
-        # plates.json 원문 (정렬)
-        json_pretty = json.dumps(jd, indent=2, ensure_ascii=False)
-
-        # report.txt 원문
-        report_text = pkg["report"]
-
-        cards_html += f'''
+    return f'''
     <div class="evidence-card" id="pkg-{idx}">
         <div class="card-header">
             <div class="card-title-row">
                 <h2><span class="plate-num">{plate}</span></h2>
+                <span class="badge badge-goldentime">GoldenTime</span>
                 <span class="badge {badge_class}">{badge_text}</span>
             </div>
             <div class="card-meta">
@@ -161,22 +154,16 @@ def build_html(packages):
             <div class="card-folder">{pkg['name']}</div>
         </div>
 
-        <!-- 스크린샷 갤러리 -->
         <div class="section">
             <h3>&#128248; 채증 스크린샷</h3>
             <div class="gallery">{gallery_html}
             </div>
         </div>
 
-        <!-- 증거 데이터 테이블 -->
         <div class="section">
             <h3>&#128202; 증거 데이터</h3>
             <table class="data-table">
-                <thead>
-                    <tr>
-                        <th>항목</th><th>값</th>
-                    </tr>
-                </thead>
+                <thead><tr><th>항목</th><th>값</th></tr></thead>
                 <tbody>
                     <tr><td>번호판</td><td><strong>{plate}</strong></td></tr>
                     <tr><td>생성 시각</td><td>{time_str}</td></tr>
@@ -193,27 +180,19 @@ def build_html(packages):
             </table>
         </div>
 
-        <!-- 거리 위반 내역 -->
         <div class="section">
             <h3>&#9888;&#65039; 거리 미확보 위반</h3>
             <table class="data-table violation-table">
-                <thead>
-                    <tr>
-                        <th>#</th><th>프레임</th><th>거리</th><th>지속시간</th><th>bbox 비율</th>
-                    </tr>
-                </thead>
-                <tbody>{violation_rows}
-                </tbody>
+                <thead><tr><th>#</th><th>프레임</th><th>거리</th><th>지속시간</th><th>bbox 비율</th></tr></thead>
+                <tbody>{violation_rows}</tbody>
             </table>
         </div>
 
-        <!-- 제출 대상 -->
         <div class="section">
             <h3>&#128230; 제출 대상</h3>
             <ul class="target-list">{targets_html}</ul>
         </div>
 
-        <!-- 탭: plates.json / report.txt -->
         <div class="section">
             <h3>&#128196; 원본 데이터</h3>
             <div class="tab-container">
@@ -230,26 +209,191 @@ def build_html(packages):
     </div>
 '''
 
+
+def _build_card_safeplate(idx: int, pkg: dict) -> str:
+    """SafePlate 4K 증거 카드 HTML 생성"""
+    jd = pkg["json_data"]
+    plate = jd.get("plate", "알 수 없음")
+    gen_at = jd.get("generated_at", "")
+    ev = jd.get("evidence", {})
+    dep = jd.get("departure_info", {})
+    shock = jd.get("shock_event", {})
+    targets = jd.get("submission_targets", [])
+
+    time_str = _parse_time(gen_at)
+
+    # 이탈 방향 한글화
+    dir_map = {
+        "left": "좌측 이탈", "right": "우측 이탈",
+        "top": "상방 이탈", "bottom": "하방 이탈",
+        "vanished": "화면 소멸",
+    }
+    direction = dep.get("departure_direction", "unknown")
+    dir_label = dir_map.get(direction, direction)
+
+    gallery_html = _build_gallery(pkg)
+    targets_html = "".join(f'<li>{t}</li>' for t in targets)
+    json_pretty = json.dumps(jd, indent=2, ensure_ascii=False)
+    report_text = pkg["report"]
+
+    return f'''
+    <div class="evidence-card safeplate-card" id="pkg-{idx}">
+        <div class="card-header card-header-safeplate">
+            <div class="card-title-row">
+                <h2><span class="plate-num plate-num-safeplate">{plate}</span></h2>
+                <span class="badge badge-safeplate">SafePlate 4K</span>
+                <span class="badge badge-danger">{dir_label}</span>
+            </div>
+            <div class="card-meta">
+                <span class="meta-item">
+                    <span class="meta-icon">&#128197;</span> {time_str}
+                </span>
+                <span class="meta-item">
+                    <span class="meta-icon">&#127909;</span> {ev.get('total_duration_sec', 0):.0f}초 ({ev.get('total_frames', 0)} 프레임)
+                </span>
+                <span class="meta-item">
+                    <span class="meta-icon">&#128663;</span> 감지 {dep.get('detection_count', 0)}회, 신뢰도 {dep.get('confidence', 0)*100:.0f}%
+                </span>
+                <span class="meta-item">
+                    <span class="meta-icon">&#128190;</span> video.mp4 ({pkg['video_mb']}MB)
+                </span>
+            </div>
+            <div class="card-folder">{pkg['name']}</div>
+        </div>
+
+        <div class="section">
+            <h3>&#128248; 채증 스크린샷</h3>
+            <div class="gallery">{gallery_html}
+            </div>
+        </div>
+
+        <div class="section">
+            <h3>&#128663; 이탈 차량 정보</h3>
+            <table class="data-table">
+                <thead><tr><th>항목</th><th>값</th></tr></thead>
+                <tbody>
+                    <tr><td>번호판</td><td><strong>{plate}</strong></td></tr>
+                    <tr><td>생성 시각</td><td>{time_str}</td></tr>
+                    <tr><td>이탈 방향</td><td><strong style="color:#ff6b6b">{dir_label}</strong></td></tr>
+                    <tr><td>이탈 시각</td><td>영상 {dep.get('departure_time_sec', 0):.1f}초</td></tr>
+                    <tr><td>충격 시각</td><td>영상 {shock.get('shock_timestamp_sec', 0):.1f}초 (프레임 #{shock.get('shock_frame_idx', 0)})</td></tr>
+                    <tr><td>최초 감지</td><td>{dep.get('first_seen_time_sec', 0):.2f}초</td></tr>
+                    <tr><td>마지막 감지</td><td>{dep.get('last_seen_time_sec', 0):.2f}초</td></tr>
+                    <tr><td>감지 횟수</td><td>{dep.get('detection_count', 0)}회</td></tr>
+                    <tr><td>신뢰도</td><td>{dep.get('confidence', 0)*100:.0f}%</td></tr>
+                    <tr><td>이동 벡터</td><td>{dep.get('movement_vector', [0, 0])}</td></tr>
+                    <tr><td>최초 bbox</td><td>{dep.get('first_bbox', [])}</td></tr>
+                    <tr><td>마지막 bbox</td><td>{dep.get('last_bbox', [])}</td></tr>
+                    <tr><td>총 프레임</td><td>{ev.get('total_frames', 0)}</td></tr>
+                    <tr><td>영상 길이</td><td>{ev.get('total_duration_sec', 0):.1f}초</td></tr>
+                    <tr><td>전 버퍼</td><td>{ev.get('pre_buffer_frames', 0)} 프레임</td></tr>
+                    <tr><td>후 버퍼</td><td>{ev.get('post_buffer_frames', 0)} 프레임</td></tr>
+                </tbody>
+            </table>
+        </div>
+
+        <div class="section">
+            <h3>&#128230; 제출 대상</h3>
+            <ul class="target-list">{targets_html}</ul>
+        </div>
+
+        <div class="section">
+            <h3>&#128196; 원본 데이터</h3>
+            <div class="tab-container">
+                <button class="tab-btn active" onclick="switchTab(this, 'json-{idx}')">plates.json</button>
+                <button class="tab-btn" onclick="switchTab(this, 'report-{idx}')">report.txt</button>
+            </div>
+            <div class="tab-content" id="json-{idx}">
+                <pre class="code-block">{json_pretty}</pre>
+            </div>
+            <div class="tab-content" id="report-{idx}" style="display:none;">
+                <pre class="code-block report-block">{report_text}</pre>
+            </div>
+        </div>
+    </div>
+'''
+
+
+def _parse_time(gen_at: str) -> str:
+    """ISO 시간 문자열을 표시용 문자열로 파싱"""
+    try:
+        dt = datetime.fromisoformat(gen_at)
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    except Exception:
+        return gen_at
+
+
+def _build_gallery(pkg: dict) -> str:
+    """스크린샷 갤러리 HTML 생성"""
+    gallery_html = ""
+    for ss in pkg["screenshots"]:
+        label = ss["name"].replace(".jpg", "").replace("_", " ").title()
+        gallery_html += f'''
+            <div class="thumb-card">
+                <img src="{ss['data_uri']}" alt="{ss['name']}"
+                     onclick="openModal(this.src, '{ss['name']}')" />
+                <div class="thumb-label">{label}</div>
+                <div class="thumb-size">{ss['size_kb']}KB</div>
+            </div>'''
+    return gallery_html
+
+
+def build_html(packages):
+    """HTML 대시보드 문자열 생성 — GoldenTime + SafePlate 통합"""
+
+    # 각 패키지별 카드 HTML
+    cards_html = ""
+    safeplate_count = 0
+    goldentime_count = 0
+
+    for idx, pkg in enumerate(packages):
+        pkg_type = _detect_package_type(pkg)
+        if pkg_type == "safeplate":
+            cards_html += _build_card_safeplate(idx, pkg)
+            safeplate_count += 1
+        else:
+            cards_html += _build_card_goldentime(idx, pkg)
+            goldentime_count += 1
+
     # 통계 요약
     total_pkgs = len(packages)
     total_violations = sum(
         p.get("json_data", {}).get("violation_summary", {}).get("violation_count", 0)
         for p in packages
     )
+    total_departures = sum(
+        1 for p in packages if _detect_package_type(p) == "safeplate"
+    )
     total_detections = sum(
         p.get("json_data", {}).get("evidence", {}).get("detection_count", 0)
         for p in packages
     )
+    # SafePlate 패키지는 departure_info에 detection_count가 있음
+    for p in packages:
+        if _detect_package_type(p) == "safeplate":
+            dep = p.get("json_data", {}).get("departure_info", {})
+            total_detections += dep.get("detection_count", 0)
     unique_plates = set(
         p.get("json_data", {}).get("plate", "") for p in packages
     )
+
+    # 타이틀 결정
+    if safeplate_count > 0 and goldentime_count > 0:
+        title = "YOLO26 통합 증거 대시보드"
+        subtitle = "긴급차량 통행방해 + 물피도주 의심 차량 채증"
+    elif safeplate_count > 0:
+        title = "SafePlate 4K"
+        subtitle = "물피도주 의심 차량 자동 채증 대시보드"
+    else:
+        title = "GoldenTime 2.0"
+        subtitle = "긴급차량 통행방해 증거 대시보드"
 
     html = f'''<!DOCTYPE html>
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>GoldenTime 2.0 - 증거 대시보드</title>
+<title>{title} - 증거 대시보드</title>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{
@@ -314,6 +458,31 @@ body {{
 }}
 .stat-card.danger .stat-num {{ color: #ff6b6b; }}
 .stat-card.success .stat-num {{ color: #6bcb77; }}
+.stat-card.warning .stat-num {{ color: #ff9f43; }}
+
+/* SafePlate 테마 */
+.badge-safeplate {{
+    background: rgba(255,159,67,0.15);
+    color: #ff9f43;
+    border: 1px solid rgba(255,159,67,0.3);
+}}
+.badge-goldentime {{
+    background: rgba(77,150,255,0.15);
+    color: #4d96ff;
+    border: 1px solid rgba(77,150,255,0.3);
+}}
+.card-header-safeplate {{
+    background: linear-gradient(135deg, #2a1a0e 0%, #3a2010 50%, #2e1a08 100%) !important;
+    border-bottom: 1px solid #4a2a10 !important;
+}}
+.plate-num-safeplate {{
+    color: #ff9f43 !important;
+    background: rgba(255,159,67,0.1) !important;
+    border-color: rgba(255,159,67,0.3) !important;
+}}
+.safeplate-card {{
+    border-color: #3a2010 !important;
+}}
 
 /* 증거 카드 */
 .evidence-card {{
@@ -570,8 +739,8 @@ body {{
 <div class="dashboard">
     <!-- 헤더 -->
     <div class="header">
-        <h1>GoldenTime 2.0</h1>
-        <div class="subtitle">긴급차량 통행방해 증거 대시보드</div>
+        <h1>{title}</h1>
+        <div class="subtitle">{subtitle}</div>
     </div>
 
     <!-- 통계 바 -->
@@ -592,6 +761,10 @@ body {{
             <div class="stat-num">{total_violations}</div>
             <div class="stat-label">거리 위반</div>
         </div>
+        <div class="stat-card warning">
+            <div class="stat-num">{total_departures}</div>
+            <div class="stat-label">이탈 차량</div>
+        </div>
     </div>
 
     <!-- 증거 카드 -->
@@ -599,7 +772,7 @@ body {{
 
     <!-- 푸터 -->
     <div class="footer">
-        GoldenTime 2.0 Evidence Dashboard &mdash;
+        {title} Evidence Dashboard &mdash;
         생성: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')} &mdash;
         YOLO26 Simulation System
     </div>
@@ -642,7 +815,7 @@ def main():
     output_file = "C:/tool/yolo26-main/evidence_dashboard.html"
 
     print("=" * 60)
-    print("  골든타임 2.0 - 증거 대시보드 생성기")
+    print("  YOLO26 증거 대시보드 생성기 (GoldenTime + SafePlate)")
     print("=" * 60)
     print()
 
