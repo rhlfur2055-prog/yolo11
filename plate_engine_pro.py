@@ -46,17 +46,13 @@ except ImportError:
 
 # ── 개선된 OCR 후처리 v2 ──
 try:
-    from plate_ocr_postfilter_v2 import clean_ocr_text_v2, ensemble_vote_v2
+    from plate_ocr_postfilter_v2 import clean_ocr_text_v2, ensemble_vote_v2, verify_paddle_with_crnn
     HAS_POSTFILTER_V2 = True
 except ImportError:
     HAS_POSTFILTER_V2 = False
 
-# ── OCR 엔진 임포트 ──
-try:
-    import easyocr
-    HAS_EASYOCR = True
-except Exception:
-    HAS_EASYOCR = False
+# ── OCR 엔진 임포트 (PaddleOCR 단독, EasyOCR 제거) ──
+HAS_EASYOCR = False
 
 try:
     from paddleocr import PaddleOCR
@@ -426,6 +422,60 @@ class ImagePreprocessor:
         clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
         l = clahe.apply(l)
         return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    # ── ⑱~㉓ Deblur/형태학 강화 (24종 확장, 12/12 복구용) ──
+    @staticmethod
+    def deblur_laplacian(img):
+        """⑱ Laplacian 엣지 강화 (블러 보상, 야간 전조등 반사 완화)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        lap = cv2.Laplacian(gray, cv2.CV_16S, 3, scale=1, delta=0)
+        lap = cv2.convertScaleAbs(lap)
+        enhanced = cv2.addWeighted(gray, 1.0, lap, 0.3, 0)
+        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def deblur_strong(img):
+        """⑲ 강화 샤프닝 (5x5 커널, 주행 블러 보정)"""
+        kernel = np.array([
+            [-1, -1, -1, -1, -1],
+            [-1, -1, -1, -1, -1],
+            [-1, -1, 25, -1, -1],
+            [-1, -1, -1, -1, -1],
+            [-1, -1, -1, -1, -1],
+        ], dtype=np.float32) / 25.0
+        return cv2.filter2D(img, -1, kernel)
+
+    @staticmethod
+    def morphology_close_strong(img):
+        """⑳ 강화 닫기 (5x5, 자음/모음 붙임 완화)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
+        return cv2.cvtColor(morph, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def morphology_gradient(img):
+        """㉑ 형태학 그라디언트 (엣지 강조)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel)
+        return cv2.cvtColor(grad, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def clahe_aggressive(img):
+        """㉒ 공격적 CLAHE (clipLimit=8, 저조도/반사 강한 경우)"""
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        clahe = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+    @staticmethod
+    def median_strong(img):
+        """㉓ 강화 중앙값 (5x5, 점잡음·반사점 제거)"""
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+        result = cv2.medianBlur(gray, 5)
+        return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
 
 
 class PlateValidator:
@@ -1187,8 +1237,18 @@ class PlateTracker:
                 top_items = sorted(best_trk["texts"].items(), key=lambda x: x[1], reverse=True)[:5]
                 best_trk["texts"] = defaultdict(int, top_items)
 
-            # 기존 트랙 갱신
-            best_trk["_pre_gap"] = self._frame_id - best_trk["last_frame"]  # ★ 매칭 전 갭 저장 (OCR 스킵 판단용)
+            # 기존 트랙 갱신 — 이동 벡터 v = Δpos/Δt, 면적 변화율 Δarea/Δt (고의적 길막 판정용)
+            best_trk["_pre_gap"] = self._frame_id - best_trk["last_frame"]
+            old_bbox = best_trk["bbox"]
+            old_area = self._bbox_area(old_bbox)
+            new_area = self._bbox_area(bbox)
+            dt = max(1, self._frame_id - best_trk["last_frame"])
+            cx_old = (old_bbox[0] + old_bbox[2]) / 2
+            cy_old = (old_bbox[1] + old_bbox[3]) / 2
+            cx_new = (bbox[0] + bbox[2]) / 2
+            cy_new = (bbox[1] + bbox[3]) / 2
+            best_trk["velocity"] = ((cx_new - cx_old) / dt, (cy_new - cy_old) / dt)
+            best_trk["area_rate"] = (new_area - old_area) / dt / max(old_area, 1.0) if old_area > 0 else 0.0
             best_trk["bbox"] = bbox
             best_trk["consecutive"] += 1
             best_trk["_detect_count"] = best_trk.get("_detect_count", 0) + 1
@@ -1201,11 +1261,13 @@ class PlateTracker:
                 "bbox": bbox,
                 "texts": defaultdict(int),
                 "consecutive": 1,
-                "_detect_count": 1,  # 감지된 총 프레임 수 (투표 가중치 무관)
+                "_detect_count": 1,
                 "best_conf": 0,
                 "recorded": False,
                 "last_frame": self._frame_id,
                 "_seen": True,
+                "velocity": (0.0, 0.0),
+                "area_rate": 0.0,
             }
             self.tracks.append(new_trk)
             return new_trk, True
@@ -1300,14 +1362,8 @@ class PlateEnginePro:
                     print(f"[엔진] PaddleOCR 초기화 실패: {e}")
             except Exception as e:
                 print(f"[엔진] PaddleOCR 초기화 실패: {e}")
-        # EasyOCR 활성화 — PaddleOCR + EasyOCR 앙상블 (인식률 최대화)
-        if HAS_EASYOCR:
-            try:
-                self.ocr_engines["easyocr"] = easyocr.Reader(["ko", "en"], gpu=True)
-                print("[엔진] EasyOCR 초기화 완료 (앙상블 모드)")
-            except Exception as e:
-                print(f"[엔진] EasyOCR 초기화 실패: {e}")
-        # 한국 번호판 허용 문자 (EasyOCR allowlist)
+        # PaddleOCR 단독 (EasyOCR 제거 — lean pipeline, Jetson 메모리 절약)
+        # 한국 번호판 허용 문자 (validator/allowlist용)
         self._kr_allowlist = (
             "0123456789"
             "가나다라마바사아자차카타파하"
@@ -1624,6 +1680,7 @@ class PlateEnginePro:
         seen_this_frame = set()
 
         for _kept_bbox, _kept_conf, _kept_det in _keep_dets:
+            self._last_crnn_raw = None  # ROI별 CRNN 교차검증용 (verify_paddle_with_crnn)
             # ★ SAHI 통합: 글로벌 좌표 _kept_bbox 사용 (타일 det.xyxy는 로컬 좌표)
             x1, y1, x2, y2 = _kept_bbox
             conf = _kept_conf
@@ -1807,6 +1864,7 @@ class PlateEnginePro:
             if self._crnn_model is not None:
                 try:
                     crnn_text, crnn_conf = self._crnn_model.recognize(roi)
+                    self._last_crnn_raw = crnn_text or None  # Paddle 교차검증(verify_paddle_with_crnn)용
                     if crnn_text and crnn_conf > 0.3:
                         cleaned = self.validator.clean_ocr_text(crnn_text)
                         if self.validator.is_valid_length(cleaned):
@@ -1948,7 +2006,7 @@ class PlateEnginePro:
 
             # ── 합의 실패 시: 추가 전처리 (인식률 최대화) ──
             # ★ 영상 모드: 경량 Tier2 (inverted 1회만) — 반전 이미지가 가장 효과적
-            # ★ 정적 이미지: EasyOCR 포함 풀 앙상블 (정확도 우선)
+            # ★ 정적 이미지: PaddleOCR 추가 전처리 fallback (정확도 우선)
             if not _tier1_consensus and _is_video_mode and _paddle_engine:
                 # ── 영상 경량 Tier2: inverted 1회 PaddleOCR ──
                 try:
@@ -1967,17 +2025,18 @@ class PlateEnginePro:
                 except Exception:
                     pass
             if not _tier1_consensus and not _is_video_mode:
-                _easy_engine = self.ocr_engines.get("easyocr")
                 _fb_methods = ["original", "clahe", "sharpen", "inverted"]
                 _fb_engines = [("paddleocr", _paddle_engine)]
-                if not _is_video_mode and _easy_engine is not None:
-                    _fb_engines.append(("easyocr", _easy_engine))
                 for _fb_engine_name, _fb_eng in _fb_engines:
                     if _fb_eng is None:
                         continue
-                    # PaddleOCR는 Tier1에서 이미 처리한 메서드 건너뛰기 (추가 전처리)
+                    # PaddleOCR: Tier1 미합의 시 24종 확장 전처리 fallback (Deblur/형태학 6종 포함)
                     if _fb_engine_name == "paddleocr":
-                        _fb_run = ["inverted", "bilateral", "adaptive_threshold", "gamma_bright", "morphology"]
+                        _fb_run = [
+                            "inverted", "bilateral", "adaptive_threshold", "gamma_bright", "morphology",
+                            "deblur_laplacian", "deblur_strong", "morphology_close_strong",
+                            "morphology_gradient", "clahe_aggressive", "median_strong",
+                        ]
                     else:
                         _fb_run = _fb_methods
                     for _fb_name in _fb_run:
@@ -2363,6 +2422,7 @@ class PlateEnginePro:
                             pass
 
                     # [평가기준 20점] 차량번호 인식 표시 (강화 출력 형식)
+                    # velocity/area_rate: 고의적 길막 시맨틱 판정용 (DistanceChecker 등에서 사용)
                     results.append({
                         # ── 기존 호환 필드 (plate_gui.py 등) ──
                         "plate": top_text,
@@ -2370,6 +2430,8 @@ class PlateEnginePro:
                         "bbox": [ox1, oy1, ox2, oy2],
                         "is_alert": bool(is_alert),
                         "alert_info": alert_info,
+                        "velocity": matched_trk.get("velocity", (0.0, 0.0)),
+                        "area_rate": matched_trk.get("area_rate", 0.0),
                         # ── 강화 필드 (LPR 프롬프트 규격) ──
                         "plate_number": top_text,
                         "confidence_level": _conf_level,
@@ -2419,25 +2481,13 @@ class PlateEnginePro:
                     texts = [l[1][0] for l in lines]
                     confs = [l[1][1] for l in lines]
                     if texts:
-                        return "".join(texts), float(np.mean(confs))
-            elif engine_name == "easyocr":
-                # ★ allowlist 적용: 번호판에 나올 수 있는 문자만 인식
-                kr_allow = getattr(self, '_kr_allowlist', None)
-                ocr_kwargs = dict(detail=1, paragraph=False)
-                if kr_allow:
-                    ocr_kwargs["allowlist"] = kr_allow
-                result = engine.readtext(image, **ocr_kwargs)
-                if result:
-                    # y좌표 기준 정렬 (상→하: 지역명 먼저, 번호 나중)
-                    result_sorted = sorted(result, key=lambda r: r[0][0][1])
-                    texts = [r[1] for r in result_sorted]
-                    confs = [r[2] for r in result_sorted]
-                    combined = "".join(texts)
-                    avg_conf = float(np.mean(confs))
-
-                    # ★ EasyOCR 내부 재호출 제거 (속도 최적화)
-                    # 상단 분리/allowlist 재시도는 PaddleOCR + extra_crops에서 이미 처리
-                    return combined, avg_conf
+                        text = "".join(texts)
+                        conf = float(np.mean(confs))
+                        # CRNN 교차검증: 1/i, 니/나 등 혼동 시 신뢰도 보정 (14니3234 오류 완화)
+                        if HAS_POSTFILTER_V2 and getattr(self, "_last_crnn_raw", None):
+                            delta = verify_paddle_with_crnn(clean_ocr_text_v2(text), self._last_crnn_raw)
+                            conf = min(1.0, conf + float(delta))
+                        return text, conf
             elif engine_name == "tesseract":
                 gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
                 # PSM 7 = single text line (번호판 1줄)

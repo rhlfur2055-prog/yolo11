@@ -329,13 +329,20 @@ class EvidenceExport:
         시간복잡도: O(V), V = 위반 건수
         """
         record = evidence_data.get("record", {})
+        pre_frames = evidence_data.get("pre_frames", [])
+        post_frames = evidence_data.get("post_frames", [])
 
-        metadata = {
-            "version": "1.0",
-            "generated_at": datetime.now().isoformat(),
-            "system": "GoldenTime 2.0 - YOLO26 Simulation",
-            "plate": plate,
-            "evidence": {
+        # 블러 점수(Laplacian variance)가 있는 경우: 흐린 프레임 수·채증 품질
+        blur_affected_frames = 0
+        evidence_quality = "normal"
+        BLUR_THRESHOLD = 50.0  # 이하면 흐린 프레임으로 간주
+        for entry in pre_frames + post_frames:
+            if "blur_score" in entry and entry["blur_score"] < BLUR_THRESHOLD:
+                blur_affected_frames += 1
+        if blur_affected_frames > 0:
+            evidence_quality = "contains_blur"
+
+        evidence_obj = {
                 "start_time_sec": evidence_data.get("start_time", 0.0),
                 "end_time_sec": evidence_data.get("end_time", 0.0),
                 "start_frame": evidence_data.get("start_frame", 0),
@@ -347,7 +354,17 @@ class EvidenceExport:
                 "detection_count": record.get("detection_count", 0),
                 "last_confidence": record.get("last_confidence", 0.0),
                 "last_bbox": record.get("last_bbox", []),
-            },
+            }
+        if blur_affected_frames > 0 or any("blur_score" in e for e in pre_frames + post_frames):
+            evidence_obj["blur_affected_frames"] = blur_affected_frames
+            evidence_obj["evidence_quality"] = evidence_quality
+
+        metadata = {
+            "version": "1.0",
+            "generated_at": datetime.now().isoformat(),
+            "system": "GoldenTime 2.0 - YOLO26 Simulation",
+            "plate": plate,
+            "evidence": evidence_obj,
             "distance_violations": [
                 {
                     "timestamp_sec": v.get("timestamp", 0.0),

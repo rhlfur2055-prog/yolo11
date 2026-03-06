@@ -1,13 +1,13 @@
 # YOLO26 한국 차량 번호판 인식 프로젝트
 
 ## 프로젝트 개요
-YOLO 객체 탐지 + 다중 OCR 앙상블 기반 한국 차량 번호판 자동 인식 시스템.
+YOLO 객체 탐지 + PaddleOCR(한국어 특화) 단독 기반 한국 차량 번호판 자동 인식 시스템.
 정적 이미지 12/12 (100%) 정확도 달성. 실시간 영상 Ghost Detection 해결 중.
 
 ## 핵심 아키텍처
 ```
 YOLO 탐지 → ROI 크롭 (35%/40% 마진) → 500px 업스케일
-→ 18가지 전처리 × 2 OCR 엔진 (PaddleOCR + EasyOCR)
+→ 18가지 전처리 × PaddleOCR (한국어 특화 단독)
 → 위치 기반 분해 투표 → PlateValidator → HangulClassifier (초성 교차검증)
 → PlateTracker (IoU 기반 차량 추적, Ghost Detection 방지)
 ```
@@ -62,7 +62,7 @@ YOLO 탐지 → ROI 크롭 (35%/40% 마진) → 500px 업스케일
 ## 의존성
 - Python 3.10+
 - ultralytics (YOLO), opencv-python, numpy, Pillow
-- paddleocr, easyocr (OCR 앙상블)
+- paddleocr (OCR 단독, 한국어 특화)
 - torch, torchvision (CRNN)
 - tkinter (GUI)
 

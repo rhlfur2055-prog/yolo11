@@ -5,12 +5,16 @@ test_safeplate_australia.py — SafePlate 4K 호주 영상 headless 자동 테�
     1. yolo11n.pt (일반 YOLO) conf=0.1 로 emergency_test.mp4 차량 감지
     2. 첫 bbox 감지 시 자동 SHOCK_DETECTED 발행
     3. bbox가 화면에서 사라지면 DEPARTURE_DETECTED (threshold 2초)
-    4. 외국 번호판은 FOREIGN_PLATE_XXX 형식 ID 부여
+    4. 외국 번호판은 FOREIGN_PLATE_XXX 형식 ID 부여 (DepartureDetector 내장)
     5. 증거 패키지 evidence_output/safeplate_*/ 에 저장
 
 참고: best.pt 는 한국 번호판 전용 → 호주 번호판 감지 불가
-      yolo11n.pt 일반 모델로 차량(class=2, car) bbox 감지 후
+      yolo11n.pt 일반 모델로 차량(class=2,5,7) bbox 감지 후
       SafePlate 모듈(ShockSimulator, DepartureDetector, EvidencePackage)에 전달
+
+      dashcam 영상 특성상 차량 bbox가 프레임 경계에 걸리는 경우가 많으므로
+      bbox가 완전히 프레임 내부에 있는 것만 추적 대상으로 전달
+      (경계에 이미 걸려있으면 즉시 이탈 판정 → 노이즈)
 
 기존 코드 수정: 없음
 Mock 데이터: 없음
@@ -33,14 +37,34 @@ from simulation.safeplate.shock_simulator import ShockSimulator
 from simulation.safeplate.departure_detector import DepartureDetector
 from simulation.safeplate.evidence_package import EvidencePackage
 
+# YOLO conf threshold (탐지용)
+YOLO_CONF = 0.1
+# 추적 파이프라인 전달 최소 conf (노이즈 필터)
+TRACKING_MIN_CONF = 0.30
+# 이탈 판정 타임아웃 (초)
+VANISH_TIMEOUT = 2.0
+# bbox 경계 마진 비율 — 이 비율 이내에 bbox 꼭짓점이 있으면 무시 (이미 경계에 있는 bbox)
+EDGE_MARGIN_RATIO = 0.08
+
+
+def _is_inside_frame(bbox, fw, fh, margin_ratio=EDGE_MARGIN_RATIO):
+    """bbox가 프레임 내부에 완전히 있는지 확인 (경계 터치 제외)"""
+    x1, y1, x2, y2 = bbox
+    mx = fw * margin_ratio
+    my = fh * margin_ratio
+    return x1 > mx and y1 > my and x2 < (fw - mx) and y2 < (fh - my)
+
 
 def main():
     video_path = os.path.join(_project_root, "movie", "emergency_test.mp4")
     output_dir = os.path.join(_project_root, "evidence_output")
-    yolo_conf = 0.1
+    yolo_model_path = os.path.join(_project_root, "yolo11n.pt")
 
     if not os.path.exists(video_path):
         print(f"[ERROR] 영상 파일 없음: {video_path}")
+        sys.exit(1)
+    if not os.path.exists(yolo_model_path):
+        print(f"[ERROR] YOLO 모델 없음: {yolo_model_path}")
         sys.exit(1)
 
     print("\n" + "=" * 60)
@@ -62,20 +86,15 @@ def main():
     print(f"  해상도: {frame_width}x{frame_height} @ {fps:.1f}fps")
     print(f"  총 프레임: {total_frames}")
     print(f"  YOLO 모델: yolo11n.pt (일반 객체 탐지)")
-    print(f"  YOLO conf: {yolo_conf}")
-    print(f"  이탈 threshold: 2.0초")
-    print(f"  대상 클래스: car (class=2)")
+    print(f"  YOLO conf: {YOLO_CONF} (추적 필터: >={TRACKING_MIN_CONF})")
+    print(f"  이탈 threshold: {VANISH_TIMEOUT}초")
+    print(f"  경계 마진: {EDGE_MARGIN_RATIO:.0%} (프레임 내부 bbox만 추적)")
+    print(f"  대상 클래스: car/bus/truck (2,5,7)")
 
-    # ── 2. YOLO 일반 모델 로드 (차량 감지용) ──
-    yolo_model_path = os.path.join(_project_root, "yolo11n.pt")
-    if not os.path.exists(yolo_model_path):
-        print(f"[ERROR] YOLO 모델 없음: {yolo_model_path}")
-        sys.exit(1)
-
+    # ── 2. YOLO 일반 모델 로드 ──
     yolo_model = YOLO(yolo_model_path)
-    # 차량 관련 클래스: 2=car, 5=bus, 7=truck
-    vehicle_classes = {2, 5, 7}
-    print(f"  YOLO 모델 로드 완료: {yolo_model_path}")
+    vehicle_classes = {2, 5, 7}  # car, bus, truck
+    print(f"  YOLO 모델 로드 완료")
 
     # ── 3. EventBus + SafePlate 모듈 ──
     event_bus = EventBus()
@@ -91,7 +110,7 @@ def main():
         event_bus=event_bus,
         frame_width=frame_width,
         frame_height=frame_height,
-        vanish_timeout_sec=2.0,
+        vanish_timeout_sec=VANISH_TIMEOUT,
     )
 
     evidence = EvidencePackage(
@@ -104,17 +123,6 @@ def main():
     )
 
     # ── 4. 이벤트 로거 ──
-    detected_plates = []
-
-    def _on_plate(data):
-        plate = data.get("plate", "")
-        conf = data.get("confidence", 0.0)
-        ts = data.get("timestamp", 0.0)
-        detected_plates.append(data)
-        print(f"  [차량] {plate} (신뢰도: {conf:.0%}) @ {ts:.1f}s")
-
-    event_bus.subscribe("plate_recognized", _on_plate)
-
     export_results = []
 
     def _on_export(data):
@@ -123,8 +131,12 @@ def main():
 
     event_bus.subscribe("EVIDENCE_EXPORTED", _on_export)
 
-    # 외국 번호판 카운터
-    foreign_counter = [1]
+    departure_events = []
+
+    def _on_departure(data):
+        departure_events.append(data)
+
+    event_bus.subscribe("DEPARTURE_DETECTED", _on_departure)
 
     print("\n" + "-" * 60)
     print("  자동 시나리오: 첫 bbox → SHOCK / bbox 소멸 → DEPARTURE")
@@ -135,6 +147,8 @@ def main():
     frame_idx = 0
     shock_triggered = False
     first_bbox_frame = None
+    total_vehicle_detections = 0
+    total_raw_detections = 0
 
     while frame_idx < total_frames:
         ret, frame = cap.read()
@@ -150,8 +164,8 @@ def main():
             "timestamp": timestamp,
         })
 
-        # ── YOLO 감지 (일반 모델, 차량 클래스만 필터) ──
-        results = yolo_model(frame, conf=yolo_conf, verbose=False, max_det=20)
+        # ── YOLO 감지 (일반 모델) ──
+        results = yolo_model(frame, conf=YOLO_CONF, verbose=False, max_det=20)
         detections = []
 
         for box in results[0].boxes:
@@ -160,36 +174,34 @@ def main():
                 continue
 
             conf_val = float(box.conf[0])
+            if conf_val < TRACKING_MIN_CONF:
+                continue
+
             bbox = [int(v) for v in box.xyxy[0].tolist()]
+            total_raw_detections += 1
+
+            # 경계에 이미 걸린 bbox 제외 (dashcam 노이즈 방지)
+            if not _is_inside_frame(bbox, frame_width, frame_height):
+                continue
+
             cls_name = yolo_model.names[cls_id]
 
-            # 외국 번호판 ID 부여
-            plate_id = f"FOREIGN_PLATE_{foreign_counter[0]:03d}"
-            foreign_counter[0] += 1
-
+            # plate 비워서 DepartureDetector가 FOREIGN_PLATE_XXX 자동 부여
             detections.append({
-                "plate": plate_id,
+                "plate": "",
                 "confidence": conf_val,
                 "bbox": bbox,
                 "vehicle_class": cls_name,
             })
 
-        # 감지 결과 이벤트 발행
+        total_vehicle_detections += len(detections)
+
+        # 감지 결과 이벤트 발행 → DepartureDetector가 추적
         event_bus.publish("detection_result", {
             "detections": detections,
             "frame_idx": frame_idx,
             "timestamp": timestamp,
         })
-
-        # 개별 인식 이벤트
-        for det in detections:
-            event_bus.publish("plate_recognized", {
-                "plate": det["plate"],
-                "confidence": det["confidence"],
-                "bbox": det["bbox"],
-                "frame_idx": frame_idx,
-                "timestamp": timestamp,
-            })
 
         # ── 자동 SHOCK: 첫 차량 bbox 감지 시 ──
         if not shock_triggered and len(detections) > 0:
@@ -200,13 +212,14 @@ def main():
             shock.trigger_shock(frame_idx=frame_idx, timestamp=timestamp)
             shock_triggered = True
 
-        # 진행률 (200프레임마다)
-        if frame_idx > 0 and frame_idx % 200 == 0:
+        # 진행률 (300프레임마다)
+        if frame_idx > 0 and frame_idx % 300 == 0:
             elapsed = time.time() - start_time
             fps_actual = frame_idx / elapsed if elapsed > 0 else 0
             pct = frame_idx / total_frames * 100
-            det_count = len(detections)
-            print(f"  ... 프레임 {frame_idx}/{total_frames} ({pct:.0f}%) — {fps_actual:.1f} fps | 감지: {det_count}")
+            dep_cnt = len(departure_events)
+            trk_cnt = departure.get_tracking_count()
+            print(f"  ... 프레임 {frame_idx}/{total_frames} ({pct:.0f}%) — {fps_actual:.1f} fps | 추적: {trk_cnt} | 이탈: {dep_cnt}")
 
         frame_idx += 1
 
@@ -225,18 +238,12 @@ def main():
     print("  SafePlate 4K — 호주 영상 테스트 결과")
     print("=" * 60)
 
-    print(f"\n  첫 bbox 프레임: #{first_bbox_frame}" if first_bbox_frame is not None else "\n  bbox 미감지")
-    print(f"  감지된 차량: {len(detected_plates)}건")
-
-    # 유니크 차량 ID
-    unique_plates = {}
-    for p in detected_plates:
-        pid = p.get("plate", "")
-        unique_plates[pid] = unique_plates.get(pid, 0) + 1
-    if unique_plates:
-        print(f"  유니크 차량 ID: {len(unique_plates)}개")
-        for plate, count in sorted(unique_plates.items(), key=lambda x: -x[1])[:10]:
-            print(f"    - {plate} ({count}회)")
+    if first_bbox_frame is not None:
+        print(f"\n  첫 bbox 프레임: #{first_bbox_frame} ({first_bbox_frame / fps:.1f}s)")
+    else:
+        print(f"\n  bbox 미감지")
+    print(f"  총 YOLO 감지: {total_raw_detections}건 (conf>={TRACKING_MIN_CONF})")
+    print(f"  프레임 내부 bbox: {total_vehicle_detections}건 (경계 제외)")
 
     # 추적/이탈 결과
     tracking_count = departure.get_tracking_count()
@@ -257,7 +264,7 @@ def main():
     print(f"\n  증거 패키지: {len(export_results)}건")
     if export_results:
         for i, exp in enumerate(export_results, 1):
-            print(f"    [{i}] {exp['plate']} → {exp['folder']}")
+            print(f"    [{i}] {exp['plate']} → {exp['folder_name']}")
         print(f"\n  [PASS] 증거 패키지 {len(export_results)}건 생성 완료")
     else:
         print(f"  [INFO] 증거 패키지 미생성")
@@ -268,7 +275,7 @@ def main():
     if os.path.exists(output_dir):
         safeplate_dirs = [d for d in os.listdir(output_dir) if d.startswith("safeplate_")]
         if safeplate_dirs:
-            print(f"\n  evidence_output/ 내 safeplate 폴더:")
+            print(f"\n  evidence_output/ 내 safeplate 폴더 (최근 5건):")
             for d in sorted(safeplate_dirs)[-5:]:
                 full = os.path.join(output_dir, d)
                 if os.path.isdir(full):

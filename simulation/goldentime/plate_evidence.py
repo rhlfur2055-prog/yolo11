@@ -37,10 +37,12 @@ DEFAULT_CONFIG = {
     "continuous_threshold_sec": 15.0,   # 채증 대상 판정 기준 (초)
     "pre_buffer_sec": 30.0,             # 채증 시점 이전 버퍼 (초)
     "post_buffer_sec": 30.0,            # 채증 시점 이후 녹화 (초)
-    "gap_tolerance_sec": 2.0,           # 번호판 미감지 허용 간격 (초)
+    "gap_tolerance_sec": 2.0,            # 번호판 미감지 허용 간격 (초)
                                         # 2초 이내 재감지 → 연속으로 간주
                                         # 비유: 가로등 아래 잠깐 안 보여도 같은 차
     "min_confidence": 0.5,              # 최소 신뢰도 (이하는 무시)
+    "compute_blur_score": False,         # True면 프레임 버퍼에 Laplacian variance(블러 점수) 저장
+                                        # evidence_export에서 evidence_quality/blur_affected_frames 반영용
 }
 
 
@@ -247,11 +249,14 @@ class PlateEvidence:
 
         if frame is not None:
             # 순환 버퍼에 프레임 저장 (항상)
-            self.frame_buffer.append({
+            entry = {
                 "frame": frame.copy(),  # 복사 필수 — 원본은 다음 프레임에서 덮어씀
                 "timestamp": self._current_timestamp,
                 "frame_idx": self._current_frame_idx,
-            })
+            }
+            if self.config.get("compute_blur_score"):
+                entry["blur_score"] = self._blur_score(frame)
+            self.frame_buffer.append(entry)
 
             # 진행 중인 채증의 post-buffer에도 추가
             self._update_evidence_recordings(frame)
@@ -322,6 +327,14 @@ class PlateEvidence:
     # 내부 로직
     # ───────────────────────────────────────────
 
+    def _blur_score(self, frame: np.ndarray) -> float:
+        """프레임 블러 점수 (Laplacian variance). 낮을수록 흐림.
+
+        시간복잡도: O(w*h)
+        """
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        return float(cv2.Laplacian(gray, cv2.CV_64F).var())
+
     def _promote_to_evidence(self, record: PlateTrackRecord) -> None:
         """번호판을 채증 대상으로 승격
 
@@ -383,11 +396,14 @@ class PlateEvidence:
 
         for plate_text, recording in self.evidence_recordings.items():
             if recording["remaining_frames"] > 0:
-                recording["post_frames"].append({
+                post_entry = {
                     "frame": frame.copy(),
                     "timestamp": self._current_timestamp,
                     "frame_idx": self._current_frame_idx,
-                })
+                }
+                if self.config.get("compute_blur_score"):
+                    post_entry["blur_score"] = self._blur_score(frame)
+                recording["post_frames"].append(post_entry)
                 recording["remaining_frames"] -= 1
             else:
                 completed.append(plate_text)

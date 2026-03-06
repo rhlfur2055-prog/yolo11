@@ -135,6 +135,21 @@ class PathConfig:
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 2.5. 동적 거리 / 원근 ROI (GoldenTime·SafePlate)
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+# 핀홀 거리 d = (f * W) / w. distance_checker에서 use_pinhole_distance 시 사용.
+# Trapezoid ROI: 화면 지평선(horizon) 기준 원근 다각형. distance_checker에서 전방 도로 영역만 거리 판정.
+class RoadCameraConfig:
+    FOCAL_LENGTH_PX = float(os.environ.get("CAMERA_FOCAL_PX", "0"))   # 1080p 예: 1000~2000, 캘리브레이션 권장
+    PLATE_WIDTH_M = 0.52   # 한국 번호판 실제 폭 (m)
+    CLOSE_DISTANCE_M = 5.0 # 이 거리(m) 이하면 긴급차량 전방 '가까움' 판정
+    # 지평선 기준 Trapezoid ROI (도로 원근 필터)
+    USE_TRAPEZOID_ROI = os.environ.get("USE_TRAPEZOID_ROI", "1") == "1"
+    TRAPEZOID_HORIZON_RATIO = float(os.environ.get("TRAPEZOID_HORIZON_RATIO", "0.35"))  # 지평선 y = H * ratio
+    TRAPEZOID_TOP_MARGIN = float(os.environ.get("TRAPEZOID_TOP_MARGIN", "0.10"))        # 상단 좌우 마진 (폭의 10%)
+
+
+# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. 감지/인식 임계값 (ThresholdConfig)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ThresholdConfig:

@@ -721,6 +721,38 @@ def clean_ocr_text_v2(raw_text):
     return _pick_best_candidate(candidates)
 
 
+def verify_paddle_with_crnn(paddle_cleaned: str, crnn_raw: str) -> float:
+    """
+    PaddleOCR 결과와 plate_ocr_crnn.pth 결과를 교차 검증하여 신뢰도 보정.
+
+    번호판 특유의 자음/모음 분리·오인식을 완화하기 위해 CRNN과 일치 시 신뢰도 상승.
+    plate_engine_pro에서 Paddle + CRNN 둘 다 있을 때 호출 가능.
+
+    Returns:
+        confidence_delta: -0.1 ~ +0.15. 양수면 Paddle 신뢰도에 더해 사용.
+    """
+    if not paddle_cleaned or not crnn_raw:
+        return 0.0
+    crnn_cleaned = clean_ocr_text_v2(crnn_raw.strip())
+    if not crnn_cleaned:
+        return 0.0
+    if len(paddle_cleaned) != len(crnn_cleaned):
+        return 0.0
+    # 마지막 4자리(숫자) 일치 여부가 가장 중요
+    pd_digits = re.sub(r'[^0-9]', '', paddle_cleaned)[-4:]
+    cr_digits = re.sub(r'[^0-9]', '', crnn_cleaned)[-4:]
+    if len(pd_digits) >= 4 and len(cr_digits) >= 4 and pd_digits == cr_digits:
+        return 0.1
+    # 전체 문자 일치율로 부분 보정
+    matches = sum(1 for a, b in zip(paddle_cleaned, crnn_cleaned) if a == b)
+    ratio = matches / max(len(paddle_cleaned), 1)
+    if ratio >= 0.85:
+        return 0.08
+    if ratio >= 0.7:
+        return 0.03
+    return 0.0
+
+
 def _strip_leading_junk(text):
     """앞부분 잡문자 제거: 숫자2~3+한글+숫자4 패턴이 나올 때까지 건너뛰기."""
     # 숫자+한글+숫자4 패턴 위치 찾기

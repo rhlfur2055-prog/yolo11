@@ -19,13 +19,26 @@ import base64
 from datetime import datetime
 
 
-def scan_packages(base_dir):
-    """증거 패키지 디렉토리 스캔"""
+def scan_packages(base_dir, max_packages=20, skip_foreign=True):
+    """증거 패키지 디렉토리 스캔
+
+    Args:
+        base_dir: 증거 패키지 루트 디렉토리
+        max_packages: 최대 스캔 수 (기본 20, 대시보드 크기 제한)
+        skip_foreign: FOREIGN_PLATE 패키지 스킵 (기본 True)
+    """
     packages = []
-    for d in sorted(os.listdir(base_dir)):
+    for d in sorted(os.listdir(base_dir), reverse=True):  # 최신 우선
         pkg_dir = os.path.join(base_dir, d)
         if not os.path.isdir(pkg_dir):
             continue
+
+        # FOREIGN_PLATE 제외 옵션
+        if skip_foreign and "FOREIGN_PLATE" in d:
+            continue
+
+        if len(packages) >= max_packages:
+            break
 
         pkg = {"name": d, "path": pkg_dir}
 

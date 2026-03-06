@@ -23,7 +23,7 @@ Mock 데이터: 없음
 
 이벤트 버스 연동:
     - 수신: "SIREN_DETECTED", "SIREN_ENDED", "detection_result", "frame_read"
-    - 발행: "DISTANCE_VIOLATION", "DISTANCE_STATUS_UPDATE"
+    - 발행: "DISTANCE_VIOLATION", "DISTANCE_STATUS_UPDATE", "YIELD_DETECTED"
 
 검증: python test_ocr_accuracy.py  # 12/12 통과 필수
 """
@@ -63,6 +63,24 @@ DISTANCE_CONFIG = {
     # 비유: 차가 잠깐 차선 변경했다가 다시 앞으로 온 경우
     "gap_tolerance_sec": 2.0,
 
+    # ── 전방 ROI (전방 회피 의무 차량만 대상) ──
+    # 이미지 하단 = 전방(카메라 앞). bbox 중심 y가 이 비율 이상이어야 거리 판정 대상.
+    # 0.0 = 비활성(전체 프레임). 0.3 = 화면 하단 30% 영역(y >= height*0.7)만 전방으로 간주
+    "front_roi_y_min_ratio": 0.0,
+
+    # ── Trapezoid ROI (지평선 기준 원근 다각형) ──
+    # True면 bbox 중심이 사다리꼴(도로 영역) 안에 있을 때만 거리 판정
+    "use_trapezoid_roi": False,
+    "trapezoid_horizon_ratio": 0.35,   # 지평선 y = H * ratio (상단 변)
+    "trapezoid_top_margin": 0.10,      # 상단 좌우 마진 (폭의 10%씩 안쪽)
+
+    # ── 핀홀 카메라 거리 d = (f * W) / w ──
+    # use_pinhole_distance=True 이고 focal_length_px > 0 이면 bbox_ratio 대신 거리(m)로 판정
+    "use_pinhole_distance": False,
+    "focal_length_px": 0.0,       # 픽셀 단위 초점거리 f (1080p: 1000~2000, 캘리브레이션 권장)
+    "plate_width_m": 0.52,       # W: 번호판 실제 폭 (m). 한국 520mm
+    "close_distance_m": 5.0,     # 이 거리(m) 이하면 "가까움" (5m 미확보 위반)
+
     # ── 표시용 거리 구간 ──
     # bbox 비율에 따른 대략적 거리 표시 (참고용, 정확하지 않음)
     "distance_levels": [
@@ -99,12 +117,22 @@ class PlateDistanceRecord:
     """
 
     # 이동평균 윈도우 크기 (프레임 수)
-    # 비유: 체온계처럼 순간값이 아니라 평균으로 판단
     SMOOTHING_WINDOW = 10
+    # 후진(양보) 판정용 bbox 이력 최대 길이
+    BBOX_HISTORY_LEN = 15
+    # bbox 면적 증가율: 이 비율(1초당) 이상이면 "후진으로 카메라 쪽 접근" = 양보로 간주
+    YIELD_AREA_RATE_MIN = 0.02  # 2% per second
+    # 화면 하단 이동: bbox 중심 y가 이 픽셀 이상 증가하면 "후진(카메라 쪽 접근)" 보조 판정
+    YIELD_CENTER_Y_MIN_PX = 5.0
+
+    # 고의적 길막 시맨틱: 가까움 + 이동 거의 없음(velocity) 지속 시 suspected_blocking
+    BLOCKING_VELOCITY_THRESHOLD = 2.0   # px/frame 이하면 "정지에 가까움"
+    BLOCKING_DURATION_SEC = 2.0         # 이 시간 이상 지속 시 길막 의심
 
     def __init__(self, plate_text: str, timestamp: float):
         self.plate_text = plate_text
         self.bbox_ratio_history: list[float] = []
+        self.bbox_history: list[tuple[list, float]] = []  # (bbox, timestamp)
         self.is_close = False
         self.close_start_time: Optional[float] = None
         self.close_duration = 0.0
@@ -114,21 +142,31 @@ class PlateDistanceRecord:
         self.last_seen_time = timestamp
         self.last_distance_label = ""
         self.last_distance_color = (0, 255, 0)
+        self.is_yielding = False  # 후진으로 양보 중이면 True, 이 구간은 위반 누적 안 함
+        self._yield_emitted = False  # YIELD_DETECTED 이미 발행했는지
+        # 고의적 길막 시맨틱 (velocity/area_rate 기반)
+        self.velocity = (0.0, 0.0)  # (vx, vy) px/frame
+        self.area_rate = 0.0
+        self.suspected_blocking = False
+        self.blocking_start_time: Optional[float] = None
+        self._blocking_emitted = False  # BLOCKING_SUSPECTED 1회만 발행
 
     def update_bbox(self, bbox_ratio: float, timestamp: float,
-                    close_threshold: float, gap_tolerance: float) -> None:
-        """bbox 비율 업데이트 — 거리 상태 갱신
+                    close_threshold: float, gap_tolerance: float,
+                    bbox: Optional[list] = None) -> None:
+        """bbox 비율 업데이트 — 거리 상태 갱신.
 
         Args:
             bbox_ratio: bbox 면적 / 프레임 면적 비율
             timestamp: 현재 영상 시각 (초)
             close_threshold: "가까움" 판정 임계값
             gap_tolerance: 미감지 허용 간격 (초)
+            bbox: [x1,y1,x2,y2] (후진 양보 판정용, 선택)
 
         로직:
-            1. 이동평균 계산 (노이즈 제거)
-            2. 평균값 >= 임계값 → "가까움"
-            3. "가까움" 지속 시간 추적
+            1. bbox 이력 저장 → 면적 증가율(Δarea/Δt)로 후진(양보) 판정
+            2. 이동평균 계산 (노이즈 제거)
+            3. 평균값 >= 임계값 → "가까움" (단, 양보 중이면 위반 누적 안 함)
 
         시간복잡도: O(W), W = SMOOTHING_WINDOW (상수, 10)
         """
@@ -136,12 +174,25 @@ class PlateDistanceRecord:
         gap = timestamp - self.last_seen_time
         if gap > gap_tolerance:
             self.bbox_ratio_history.clear()
+            self.bbox_history.clear()
             self.is_close = False
             self.close_start_time = None
             self.close_duration = 0.0
+            self.is_yielding = False
+            self._yield_emitted = False
+            self.blocking_start_time = None
+            self.suspected_blocking = False
+            self._blocking_emitted = False
 
         self.last_seen_time = timestamp
         self.last_bbox_ratio = bbox_ratio
+
+        # ── bbox 이력 저장 → 후진(양보) 판정: 면적이 증가하면 카메라 쪽 접근 = 후진 ──
+        if bbox is not None and len(bbox) >= 4:
+            self.bbox_history.append((list(bbox), timestamp))
+            if len(self.bbox_history) > self.BBOX_HISTORY_LEN:
+                self.bbox_history = self.bbox_history[-self.BBOX_HISTORY_LEN:]
+            self._update_yielding()
 
         # ── 이동평균 ──
         self.bbox_ratio_history.append(bbox_ratio)
@@ -154,16 +205,18 @@ class PlateDistanceRecord:
         was_close = self.is_close
         self.is_close = avg_ratio >= close_threshold
 
-        if self.is_close and not was_close:
-            # 가까움 상태 진입
+        if self.is_yielding:
+            # 후진 양보 중에는 위반 누적 안 함
+            self.close_start_time = None
+            self.close_duration = 0.0
+            self.is_close = False
+        elif self.is_close and not was_close:
             self.close_start_time = timestamp
             self.close_duration = 0.0
         elif self.is_close and was_close:
-            # 가까움 상태 유지 — 지속 시간 갱신
             if self.close_start_time is not None:
                 self.close_duration = timestamp - self.close_start_time
         elif not self.is_close and was_close:
-            # 가까움 상태 해제
             self.close_start_time = None
             self.close_duration = 0.0
 
@@ -191,6 +244,51 @@ class PlateDistanceRecord:
             return True  # 새로 판정됨
 
         return False
+
+    def _update_yielding(self) -> None:
+        """bbox 면적 증가 + 화면 하단 이동으로 후진(양보) 여부 갱신.
+
+        조건: (1) Δarea/Δt 비율 >= YIELD_AREA_RATE_MIN
+              (2) bbox 중심 y가 증가 (화면에서 아래로 이동 = 카메라 쪽 접근)
+        → 후진으로 경로 확보 = 양보로 간주, False Alarm 제거.
+
+        시간복잡도: O(H), H = BBOX_HISTORY_LEN (상수)
+        """
+        if len(self.bbox_history) < 3:
+            self.is_yielding = False
+            return
+        first_bbox, t0 = self.bbox_history[0]
+        last_bbox, t1 = self.bbox_history[-1]
+        delta_t = t1 - t0
+        if delta_t < 0.3:
+            self.is_yielding = False
+            return
+        a0 = max(1.0, abs((first_bbox[2] - first_bbox[0]) * (first_bbox[3] - first_bbox[1])))
+        a1 = abs((last_bbox[2] - last_bbox[0]) * (last_bbox[3] - last_bbox[1]))
+        rate = (a1 - a0) / delta_t / a0  # 1초당 면적 증가 비율
+        cy_first = (first_bbox[1] + first_bbox[3]) / 2
+        cy_last = (last_bbox[1] + last_bbox[3]) / 2
+        moving_down = (cy_last - cy_first) >= self.YIELD_CENTER_Y_MIN_PX
+        self.is_yielding = rate >= self.YIELD_AREA_RATE_MIN and moving_down
+
+    def update_velocity_blocking(self, velocity: tuple, area_rate: float,
+                                 is_close: bool, timestamp: float) -> None:
+        """velocity/area_rate 반영 후 고의적 길막 의심 여부 갱신.
+
+        가까운데 이동이 거의 없으면(velocity < threshold) 일정 시간 지속 시 suspected_blocking.
+        """
+        self.velocity = velocity
+        self.area_rate = area_rate
+        vx, vy = velocity[0], velocity[1]
+        speed = abs(vx) + abs(vy)
+        if is_close and speed <= self.BLOCKING_VELOCITY_THRESHOLD:
+            if self.blocking_start_time is None:
+                self.blocking_start_time = timestamp
+            duration = timestamp - self.blocking_start_time
+            self.suspected_blocking = duration >= self.BLOCKING_DURATION_SEC
+        else:
+            self.blocking_start_time = None
+            self.suspected_blocking = False
 
     def is_stale(self, current_time: float, gap_tolerance: float) -> bool:
         """더 이상 감지되지 않는지 확인
@@ -259,6 +357,12 @@ class DistanceChecker:
         print(f"  프레임: {frame_width}x{frame_height} ({self.frame_area:,} px)")
         print(f"  가까움 임계값: bbox 비율 >= {threshold_pct:.2f}%")
         print(f"  위반 기준: 가까움 {self.config['violation_duration_sec']}초 이상 지속")
+        if self.config.get("front_roi_y_min_ratio", 0.0) > 0:
+            print(f"  전방 ROI: 하단 {self.config['front_roi_y_min_ratio']*100:.0f}% 영역만 판정 대상")
+        if self.config.get("use_pinhole_distance") and self.config.get("focal_length_px"):
+            print(f"  핀홀 거리: f={self.config['focal_length_px']}px, W={self.config.get('plate_width_m', 0.52)}m, 가까움 <={self.config.get('close_distance_m', 5.0)}m")
+        if self.config.get("use_trapezoid_roi"):
+            print(f"  Trapezoid ROI: 지평선 {self.config.get('trapezoid_horizon_ratio', 0.35)*100:.0f}%, 상단마진 {self.config.get('trapezoid_top_margin', 0.1)*100:.0f}%")
 
     # ───────────────────────────────────────────
     # 이벤트 핸들러
@@ -333,6 +437,16 @@ class DistanceChecker:
             if not plate_text or len(bbox) < 4:
                 continue
 
+            # ── 전방 ROI 필터: 화면 하단(전방)에 있는 bbox만 거리 판정 대상 ──
+            if self.config.get("front_roi_y_min_ratio", 0.0) > 0:
+                if not self._is_in_front_roi(bbox):
+                    continue
+
+            # ── Trapezoid ROI: 지평선 기준 원근 다각형 안의 bbox만 거리 판정 ──
+            if self.config.get("use_trapezoid_roi", False):
+                if not self._is_inside_trapezoid_roi(bbox):
+                    continue
+
             # ── bbox 면적 비율 계산 ──
             x1, y1, x2, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
             bbox_area = abs((x2 - x1) * (y2 - y1))
@@ -343,16 +457,63 @@ class DistanceChecker:
                 self.distance_records[plate_text] = PlateDistanceRecord(plate_text, timestamp)
 
             record = self.distance_records[plate_text]
-            record.update_bbox(bbox_ratio, timestamp, close_threshold, gap_tolerance)
+            record.update_bbox(bbox_ratio, timestamp, close_threshold, gap_tolerance, bbox=bbox)
 
-            # 표시용 거리 라벨 갱신
-            record.last_distance_label, record.last_distance_color = self._get_distance_level(bbox_ratio)
+            # ── 핀홀 거리 d = f*W/w (선택): 설정 시 비율 대신 거리(m)로 가까움 판정 ──
+            if self.config.get("use_pinhole_distance") and self.config.get("focal_length_px"):
+                d_m = self._pinhole_distance_m(bbox)
+                close_distance_m = self.config.get("close_distance_m", 5.0)
+                setattr(record, "last_distance_m", d_m)
+                record.is_close = d_m <= close_distance_m
+                if record.is_close and record.close_start_time is None:
+                    record.close_start_time = timestamp
+                    record.close_duration = 0.0
+                elif record.is_close and record.close_start_time is not None:
+                    record.close_duration = timestamp - record.close_start_time
+                else:
+                    record.close_start_time = None
+                    record.close_duration = 0.0
+                record.last_distance_label, record.last_distance_color = self._get_distance_level_pinhole(d_m)
+                if record.is_yielding:
+                    record.is_close = False
+                    record.close_start_time = None
+                    record.close_duration = 0.0
+            else:
+                # 표시용 거리 라벨 갱신 (비율 기반)
+                record.last_distance_label, record.last_distance_color = self._get_distance_level(bbox_ratio)
 
-            # ── 위반 체크 ──
+            # ── velocity/area_rate 반영 (고의적 길막 시맨틱, 최종 is_close 기준) ──
+            velocity = det.get("velocity", (0.0, 0.0))
+            if isinstance(velocity, (list, tuple)) and len(velocity) >= 2:
+                v_tuple = (float(velocity[0]), float(velocity[1]))
+            else:
+                v_tuple = (0.0, 0.0)
+            area_rate = float(det.get("area_rate", 0.0))
+            record.update_velocity_blocking(
+                v_tuple, area_rate,
+                record.is_close,
+                timestamp,
+            )
+
+            # ── 후진 양보 감지 시 YIELD_DETECTED 발행 (최초 1회) ──
+            if record.is_yielding and not getattr(record, "_yield_emitted", False):
+                record._yield_emitted = True
+                self._publish_yield_detected(record)
+            elif not record.is_yielding:
+                record._yield_emitted = False
+
+            # ── 위반 체크 (양보 중이면 record.is_close가 False라 위반 안 됨) ──
             newly_violated = record.check_violation(violation_duration, timestamp)
             if newly_violated:
                 self.violations[plate_text] = record
                 self._publish_violation(record, bbox_ratio)
+
+            # ── 고의적 길막 의심 시 BLOCKING_SUSPECTED 발행 (최초 1회) ──
+            if record.suspected_blocking and not getattr(record, "_blocking_emitted", False):
+                record._blocking_emitted = True
+                self._publish_blocking_suspected(record)
+            elif not record.suspected_blocking:
+                record._blocking_emitted = False
 
         # ── stale 기록 정리 ──
         self._cleanup_stale_records(timestamp)
@@ -366,6 +527,8 @@ class DistanceChecker:
                     "close_duration": rec.close_duration,
                     "is_violation": rec.is_violation,
                     "distance_label": rec.last_distance_label,
+                    "is_yielding": getattr(rec, "is_yielding", False),
+                    "suspected_blocking": getattr(rec, "suspected_blocking", False),
                 }
                 for text, rec in self.distance_records.items()
             },
@@ -376,6 +539,78 @@ class DistanceChecker:
     # ───────────────────────────────────────────
     # 내부 로직
     # ───────────────────────────────────────────
+
+    def _get_trapezoid_polygon(self) -> np.ndarray:
+        """지평선 기준 Trapezoid(사다리꼴) 꼭짓점 [하단좌, 하단우, 상단우, 상단좌] (OpenCV 순)."""
+        W, H = self.frame_width, self.frame_height
+        hr = self.config.get("trapezoid_horizon_ratio", 0.35)
+        margin = self.config.get("trapezoid_top_margin", 0.10)
+        y_top = H * hr
+        x_left = W * margin
+        x_right = W * (1.0 - margin)
+        # (x, y) 순. 하단 전체 폭, 상단은 마진만큼 안쪽
+        return np.array([
+            [0, H], [W, H], [x_right, y_top], [x_left, y_top]
+        ], dtype=np.float32)
+
+    def _is_inside_trapezoid_roi(self, bbox: list) -> bool:
+        """bbox 중심이 지평선 기준 Trapezoid(도로 원근 영역) 안에 있는지."""
+        if len(bbox) < 4:
+            return False
+        cx = (bbox[0] + bbox[2]) / 2
+        cy = (bbox[1] + bbox[3]) / 2
+        poly = self._get_trapezoid_polygon()
+        return cv2.pointPolygonTest(poly, (cx, cy), False) >= 0
+
+    def _is_in_front_roi(self, bbox: list) -> bool:
+        """전방 ROI 필터: bbox 중심이 화면 하단(전방) 영역에 있는지 확인.
+
+        이미지 좌표계에서 y가 크면 화면 하단 = 카메라 전방.
+        front_roi_y_min_ratio=0.3 이면 y >= height*0.7 인 영역만 전방.
+
+        시간복잡도: O(1)
+        """
+        if len(bbox) < 4:
+            return False
+        _, y1, _, y2 = bbox[0], bbox[1], bbox[2], bbox[3]
+        cy = (y1 + y2) / 2
+        ratio = self.config.get("front_roi_y_min_ratio", 0.0)
+        if ratio <= 0:
+            return True
+        return cy >= self.frame_height * (1.0 - ratio)
+
+    def _pinhole_distance_m(self, bbox: list) -> float:
+        """핀홀 카메라 모델 거리: d = f*W/w (m).
+
+        f: 초점거리(px), W: 번호판 실제 폭(m), w: 이미지 내 번호판 폭(px).
+        w=0이면 매우 가까움으로 간주하여 0.0 반환.
+
+        시간복잡도: O(1)
+        """
+        if len(bbox) < 4:
+            return 0.0
+        x1, x2 = bbox[0], bbox[2]
+        w_px = max(1.0, abs(x2 - x1))
+        f = self.config.get("focal_length_px", 0.0)
+        W = self.config.get("plate_width_m", 0.52)
+        if f <= 0:
+            return 999.0
+        return (f * W) / w_px
+
+    def _get_distance_level_pinhole(self, d_m: float) -> tuple[str, tuple]:
+        """핀홀 거리(m)에 따른 표시용 라벨 + 색상.
+
+        시간복잡도: O(1)
+        """
+        if d_m <= 1.0:
+            return "~1m", (0, 0, 255)
+        if d_m <= 3.0:
+            return "~3m", (0, 100, 255)
+        if d_m <= 5.0:
+            return "~5m", (0, 200, 255)
+        if d_m <= 10.0:
+            return "~10m", (0, 255, 200)
+        return ">10m", (0, 255, 0)
 
     def _get_distance_level(self, bbox_ratio: float) -> tuple[str, tuple]:
         """bbox 비율에 따른 대략적 거리 라벨 + 색상
@@ -415,6 +650,35 @@ class DistanceChecker:
         print(f"     거리 추정: {record.last_distance_label} (bbox 비율: {ratio_pct:.3f}%)")
         print(f"     가까움 지속: {record.close_duration:.1f}초 (기준: {self.config['violation_duration_sec']}초)")
         print(f"     → DISTANCE_VIOLATION 이벤트 발행")
+
+    def _publish_yield_detected(self, record: PlateDistanceRecord) -> None:
+        """후진 양보 감지 이벤트 발행.
+
+        bbox 면적 증가율로 '후진으로 경로 확보'를 추정한 경우 발행.
+        해당 구간에는 DISTANCE_VIOLATION을 누적하지 않음.
+
+        시간복잡도: O(k), k = YIELD_DETECTED 구독자 수
+        """
+        self.event_bus.publish("YIELD_DETECTED", {
+            "plate": record.plate_text,
+            "timestamp": self._current_timestamp,
+            "frame_idx": self._current_frame_idx,
+        })
+        print(f"\n  🟢 [DistanceChecker] 후진 양보 감지: {record.plate_text} (YIELD_DETECTED)")
+
+    def _publish_blocking_suspected(self, record: PlateDistanceRecord) -> None:
+        """고의적 길막 의심 이벤트 발행.
+
+        가까움 + velocity 거의 0인 상태가 BLOCKING_DURATION_SEC 이상 지속 시 1회 발행.
+        """
+        self.event_bus.publish("BLOCKING_SUSPECTED", {
+            "plate": record.plate_text,
+            "velocity": record.velocity,
+            "close_duration": record.close_duration,
+            "timestamp": self._current_timestamp,
+            "frame_idx": self._current_frame_idx,
+        })
+        print(f"\n  🚧 [DistanceChecker] 고의적 길막 의심: {record.plate_text} (BLOCKING_SUSPECTED)")
 
     def _cleanup_stale_records(self, current_time: float) -> None:
         """오래된 거리 기록 정리
@@ -512,6 +776,9 @@ class DistanceChecker:
             if rec.is_violation:
                 text = f"  {rec.plate_text}: {label} VIOLATION!"
                 is_violation = True
+            elif getattr(rec, "is_yielding", False):
+                text = f"  {rec.plate_text}: {label} [YIELD]"
+                is_violation = False
             elif rec.is_close:
                 text = f"  {rec.plate_text}: {label} [{rec.close_duration:.1f}s]"
                 is_violation = False

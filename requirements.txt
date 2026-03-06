@@ -8,10 +8,10 @@ torchvision>=0.15.0
 sahi>=0.11.0
 huggingface_hub
 
-# OCR 엔진 (PaddleOCR + EasyOCR 앙상블)
+# OCR 엔진 (PaddleOCR 단독 — 한국어 특화, GPU 권장: paddlepaddle-gpu)
 paddlepaddle
 paddleocr
-easyocr
+# paddleocr==2.7.3  # 2026 기준 stable (한국 lang 강화 시 옵션)
 pytesseract
 
 # YouTube 영상 테스트용

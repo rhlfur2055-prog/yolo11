@@ -507,15 +507,26 @@ if __name__ == "__main__":
     if goldentime_mode:
         from simulation.goldentime.siren_trigger import SirenTrigger
         from simulation.goldentime.plate_evidence import PlateEvidence
-        from simulation.goldentime.distance_checker import DistanceChecker
+        from simulation.goldentime.distance_checker import DistanceChecker, DISTANCE_CONFIG
         from simulation.goldentime.evidence_export import EvidenceExport
+        from config import RoadCameraConfig
 
         siren = SirenTrigger(sim.event_bus)
         evidence = PlateEvidence(sim.event_bus, fps=sim.fps)
+        # 핀홀 거리 d=(f*W)/w + 지평선 Trapezoid ROI (도로 원근 필터)
+        _distance_config = DISTANCE_CONFIG.copy()
+        _distance_config["plate_width_m"] = RoadCameraConfig.PLATE_WIDTH_M
+        _distance_config["close_distance_m"] = RoadCameraConfig.CLOSE_DISTANCE_M
+        _distance_config["focal_length_px"] = RoadCameraConfig.FOCAL_LENGTH_PX
+        _distance_config["use_pinhole_distance"] = RoadCameraConfig.FOCAL_LENGTH_PX > 0
+        _distance_config["use_trapezoid_roi"] = getattr(RoadCameraConfig, "USE_TRAPEZOID_ROI", True)
+        _distance_config["trapezoid_horizon_ratio"] = getattr(RoadCameraConfig, "TRAPEZOID_HORIZON_RATIO", 0.35)
+        _distance_config["trapezoid_top_margin"] = getattr(RoadCameraConfig, "TRAPEZOID_TOP_MARGIN", 0.10)
         distance = DistanceChecker(
             sim.event_bus,
             frame_width=sim.frame_width,
             frame_height=sim.frame_height,
+            config=_distance_config,
         )
         export = EvidenceExport(
             sim.event_bus,
