@@ -12,18 +12,57 @@
 ## 핵심 아키텍처
 
 ```
-YOLO11x 탐지 → ROI 크롭 (35%/40% 마진) → 500px 업스케일
-→ 18가지 전처리 × PaddleOCR (한국어 특화 단독)
+YOLO11x 탐지 → Manual NMS (IoU>0.65 중복 제거) → Small plate filter (<70px conf↓)
+→ ROI 크롭 (35%/40% 마진) → 500px 업스케일 (LANCZOS4/CUBIC 자동 선택)
+→ 18가지 전처리 × PaddleOCR (한국어 특화 단독, timeout 0.5s)
+→ COLOR-EARLY-EXIT (컬러판 conf≥0.85 또는 3+후보 시 조기종료)
+→ DIGIT-TOP-CROP (4자리만 인식 시 상단 50% 크롭 → 지역명 복원)
 → 위치 기반 분해 투표 → PlateValidator → HangulClassifier (초성 교차검증)
-→ PlateTracker (IoU 기반 차량 추적)
+→ PlateTracker (IoU 기반 차량 추적, text-based 트랙 병합)
 → EventBus 이벤트 → 시뮬레이션 모듈 (트리거 → 판정 → 증거)
 ```
+
+## OCR 파이프라인 상세
+
+### 1단계: YOLO 탐지 + 필터링
+- **YOLO11x** fine-tuned 모델 (mAP@50=98.4%)
+- **Manual NMS**: NMS-free 모델의 IoU > 0.65 중복 bbox 제거
+- **Small plate filter**: bbox < 70px → conf × 0.60, 70-100px → × 0.85
+
+### 2단계: ROI 전처리
+- 마진 크롭: 좌우 35%, 상하 40%
+- 업스케일: 300px 기준 (scale > 3.0 → LANCZOS4, 그 외 CUBIC)
+- 18가지 전처리: original, gray, clahe, sharpen, bilateral, morph_open, morph_close, adaptive_thresh, otsu, green_plate, invert, gamma_high, gamma_low, edge, erode, dilate, blur, unsharp
+
+### 3단계: OCR 엔진
+- **PaddleOCR** 단독 (한국어 특화, det=True)
+- timeout: 0.5초 (컬러/흰색 모두 동일)
+- conf filter: ≥ 0.40
+
+### 4단계: 원거리 2줄 번호판 복원
+- **DIGIT-TOP-CROP**: 4자리 숫자만 인식 + CRNN 실패 시
+  - ROI 상단 50% 크롭 → clahe/sharpen/green_plate 전처리
+  - 상단 OCR 텍스트 + 하단 4자리 결합 → 유효 번호판 검증
+  - 예: "5361" + "7117" → "36다7117"
+- **COLOR-EARLY-EXIT**: 컬러 번호판 고신뢰 결과 시 나머지 전처리 스킵
+
+### 5단계: 투표 + 검증
+- **위치 기반 분해 투표**: 번호판 각 자릿수별 독립 투표
+- **PlateValidator**: 한국 번호판 포맷 검증
+- **HangulClassifier**: 초성 교차검증 (crop OCR 자음 + 투표 모음 결합)
+  - 교정 방향: 단순→복잡 (ㅅ→ㅈ, ㅁ→ㅂ)
+
+### 6단계: 추적
+- **PlateTracker**: IoU 기반 bbox 매칭 (threshold=0.30)
+- TTL 30프레임 만료, grace period 3프레임
+- text-based 트랙 병합: 다른 bbox, 같은 텍스트 → 기존 트랙 재사용
 
 ## 정확도
 
 - 정적 이미지: **12/12 (100%)**
 - 실시간 영상 GT 매칭: **12/12 (100%)**
 - Ghost Detection: **5/5 PASS**
+- OCR 레이턴시: 0.6~3.2초/이미지 (CPU)
 
 ## 실행 방법
 
@@ -69,10 +108,12 @@ python build_dashboard.py
 
 ```
 YOLO26/
-├── plate_engine_pro.py          # 메인 OCR 엔진 (YOLO + PaddleOCR 단독)
-├── plate_gui.py                 # Tkinter GUI + 실시간 영상 처리
-├── plate_ocr_postfilter_v2.py   # OCR 후처리/정제
-├── test_ocr_accuracy.py         # 12장 정확도 테스트
+├── plate_engine_pro.py          # 메인 OCR 엔진 (~2330줄, YOLO + PaddleOCR + DIGIT-TOP-CROP)
+├── plate_gui.py                 # Tkinter GUI + 실시간 영상 처리 (~972줄)
+├── plate_ocr_postfilter_v2.py   # OCR 후처리/정제 (~650줄)
+├── plate_recognition_4k.py      # 한글 교정 함수 라이브러리 (~2925줄, 읽기 전용)
+├── train_plate_ocr.py           # CRNN 학습 스크립트 (~493줄, 수정 금지)
+├── test_ocr_accuracy.py         # 12장 정확도 테스트 (~142줄)
 ├── build_dashboard.py           # 증거 대시보드 HTML 생성기
 ├── config.py                    # 중앙 설정
 │
@@ -197,17 +238,28 @@ frame_read → SHOCK_DETECTED → detection_result → DEPARTURE_DETECTED
 Python 3.10+
 ultralytics          # YOLO11x
 opencv-python        # OpenCV
-paddleocr            # PaddleOCR (한국어)
-easyocr              # EasyOCR (한국어+영어)
-torch, torchvision   # CRNN 모델
+paddleocr            # PaddleOCR (한국어 특화, 단독 OCR 엔진)
+torch, torchvision   # CRNN OCR 모델
 numpy, Pillow        # 이미지 처리
 tkinter              # GUI
 ```
+
+## 원거리 인식 한계
+
+| frame_area_ratio | 인식 수준 | 설명 |
+|-----------------|-----------|------|
+| < 5% | 인식 불가 | 번호판 ~50px, OCR 해상도 한계 |
+| 5-10% | 숫자만 | 4자리 숫자 인식, DIGIT-TOP-CROP으로 지역명 복원 시도 |
+| 10-25% | 부분 인식 | 지역명 오독 가능 (경기76 → 17 등) |
+| 25%+ | 완전 인식 | 전체 번호판 정확 인식 |
 
 ## 커밋 이력
 
 | 커밋 | 내용 |
 |------|------|
+| `0b162ba` | 원거리 2줄 번호판 인식 개선 (DIGIT-TOP-CROP + COLOR-EARLY-EXIT) |
+| `7b3f166` | CRNN 교차검증 강화 + 2줄 번호판 복원 + COMM-FIX 가드 |
+| `eedb0e8` | README.md 추가 + 증거 정리 + 대시보드 업데이트 |
 | `2215934` | SafePlate 4K 완성 — 5모듈 + 야간모드 + 증거패키지 + 스킬5개 |
 | `761e469` | 골든타임 2.0 시뮬레이션 6계단 파이프라인 + 증거 대시보드 |
 | `6a84c2a` | 불필요한 로그/구버전 파일 정리 |
