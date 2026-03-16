@@ -44,8 +44,7 @@ import numpy as np
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# YOLO26 통합 모델 로더 (Ultralytics 최신 모델)
-# YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
+# config.py 중앙 설정 로드
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
 from config import PathConfig, ThresholdConfig, OCRConfig, DisplayConfig
@@ -69,22 +68,20 @@ class NumpyEncoder(json.JSONEncoder):
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# 기본 설정값 (config.py 참조)
+# 기본 설정값
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-# -- 모델 경로 (PathConfig) --
+# -- 모델 설정 (config.py에서 가져옴) --
 HF_PLATE_REPO: str = PathConfig.HF_PLATE_REPO
 HF_PLATE_FILE: str = PathConfig.HF_PLATE_FILE
 LOCAL_ENGINE_MODEL: str = PathConfig.YOLO_ENGINE
 LOCAL_ONNX_MODEL: str = PathConfig.YOLO_ONNX
 LOCAL_PLATE_MODEL: str = PathConfig.YOLO_FALLBACK
 DEFAULT_PLATE_MODEL_SIZE: str = PathConfig.DEFAULT_MODEL_SIZE
-
-# -- COCO 폴백 모델 --
 COCO_MODEL: str = PathConfig.YOLO_COCO_FALLBACK
 VEHICLE_CLASS_IDS: set[int] = ThresholdConfig.VEHICLE_CLASS_IDS
 
-# -- 탐지 설정 (ThresholdConfig) --
+# -- 탐지 설정 (config.py 통일값) --
 DEFAULT_CONFIDENCE: float = ThresholdConfig.DETECT_CONF
 MIN_VEHICLE_WIDTH: int = ThresholdConfig.MIN_VEHICLE_WIDTH
 MIN_VEHICLE_HEIGHT: int = ThresholdConfig.MIN_VEHICLE_HEIGHT
@@ -100,29 +97,29 @@ CONFIRM_FRAME_COUNT: int = ThresholdConfig.CONFIRM_FRAME_COUNT
 UPSCALE_THRESHOLD: int = ThresholdConfig.UPSCALE_THRESHOLD
 UPSCALE_FACTOR: int = ThresholdConfig.UPSCALE_FACTOR
 
-# -- 프레임 스킵 & 버스트 캡처 --
+# -- 프레임 스킵 & 버스트 캡처 (config.py) --
 DEFAULT_FRAME_SKIP: int = ThresholdConfig.FRAME_SKIP
 BURST_FRAME_COUNT: int = ThresholdConfig.BURST_FRAME_COUNT
 NO_DETECT_TOLERANCE: int = ThresholdConfig.NO_DETECT_TOLERANCE
 
-# -- Detection Log OCR (화면 내 텍스트 번호판 인식) --
+# -- Detection Log OCR --
 LOG_OCR_INTERVAL: int = ThresholdConfig.LOG_OCR_INTERVAL
 
-# -- SAHI 타일링 --
+# -- SAHI 타일링 (config.py) --
 SAHI_SLICE_SIZE: int = ThresholdConfig.SAHI_SLICE_SIZE
 SAHI_OVERLAP_RATIO: float = ThresholdConfig.SAHI_OVERLAP_RATIO
 
-# -- 크롭 & 선명도 --
+# -- 크롭 & 선명도 (config.py) --
 PLATE_PADDING_RATIO: float = ThresholdConfig.PLATE_PADDING_RATIO
 PLATE_MODEL_PADDING_H: float = ThresholdConfig.PLATE_MODEL_PADDING_H
 PLATE_MODEL_PADDING_V: float = ThresholdConfig.PLATE_MODEL_PADDING_V
 SHARPNESS_THRESHOLD: float = ThresholdConfig.SHARPNESS_THRESHOLD
 
-# -- 시간축 앙상블 --
+# -- 시간축 앙상블 (config.py) --
 TEMPORAL_WINDOW: int = ThresholdConfig.TEMPORAL_WINDOW
 TEMPORAL_LEVENSHTEIN_MAX: int = ThresholdConfig.TEMPORAL_LEVENSHTEIN_MAX
 
-# -- 한국 번호판 OCR 설정 (OCRConfig) --
+# -- 한국 번호판 OCR 설정 (config.py에서 가져옴) --
 KOREAN_PLATE_HANGUL = OCRConfig.KOREAN_PLATE_HANGUL
 KOREAN_PLATE_ALLOWLIST = OCRConfig.KOREAN_PLATE_ALLOWLIST
 KOREAN_PLATE_PATTERNS = OCRConfig.KR_COMPILED_PATTERNS
@@ -272,15 +269,13 @@ _HANGUL_CONFUSE_MAP: dict[str, str] = {
 # 한글↔한글 혼동 보정 (OCR이 유사한 한글을 잘못 읽는 경우)
 # 앞뒤 숫자 패턴 확인 후에만 적용
 _HANGUL_SIMILAR_MAP: dict[str, str] = {
-    # ★ 무효 한글 → 유효 한글 교정만 수행 (안전한 매핑)
-    # 유효→유효 매핑은 정확한 인식을 망칠 수 있으므로 제거
-    "시": "서",  # 시 무효 → 서(렌터카). ㅅ↔ㅅ + ㅣ↔ㅓ
-    "히": "하",  # 히 무효 → 하(자가용). ㅎ↔ㅎ + ㅣ↔ㅏ
-    "에": "아",  # 에 무효 → 아(자가용). ㅇ↔ㅇ + ㅔ↔ㅏ
-    "지": "저",  # 지 무효 → 저(렌터카). ㅈ↔ㅈ + ㅣ↔ㅓ (실데이터 기반)
-    # ※ 차(자가용), 니(Row2=나 유사), 저, 두, 부 등 유효 한글은 교정하지 않음
-    # ※ 유효→유효 혼동(내↔버, 무↔부 등)은 validate_plate_format()의
-    #   _HANGUL_PLATE_CORRECTION + _find_nearest_valid_hangul() 에서 처리
+    "시": "저",  # 시(2건)→저(2001건), ㅅ↔ㅈ + ㅣ↔ㅓ 혼동
+    "차": "저",  # 차(305건)↔저(2001건), ㅈ↔ㅊ 혼동 빈발 (빈도비 6.5:1)
+    "지": "자",  # 지(1건)→자(2085건)
+    "히": "하",  # 히(1건)→하(2058건)
+    "에": "아",  # 에(0건)→아(5600건)
+    "배": "바",  # 배(153건)→바(5600건), 영업용 오인식 빈발
+    # ※ 너(1966건)는 유효 한글 - 교정 대상에서 제외
 }
 
 # 신형 번호판 정규식: 숫자 2-3자리 + 오인식문자1개 + 숫자 4자리
@@ -485,13 +480,9 @@ _REGION_CORRECTION: dict[str, str] = {
     # 경기
     '걍기': '경기', '겅기': '경기', '견기': '경기',
     '경끼': '경기', '경키': '경기', '껭기': '경기', '격기': '경기',
-    '군기': '경기', '군서': '경기', '건기': '경기',
-    '겸기': '경기', '경거': '경기', '경가': '경기',
     # 서울
     '서을': '서울', '서운': '서울', '셔울': '서울',
-    '서욿': '서울', '석울': '서울',
-    '지울': '서울', '지료': '서울', '저울': '서울',
-    '서물': '서울', '서욹': '서울', '시울': '서울',
+    '서욿': '서울', '석울': '서울', '시울': '서울', '시을': '서울',
     # 인천
     '인쳔': '인천', '인촌': '인천', '인첨': '인천',
     # 부산
@@ -509,7 +500,7 @@ _REGION_CORRECTION: dict[str, str] = {
     # 충북
     '충붂': '충북', '총북': '충북',
     # 충남
-    '총남': '충남', '충납': '충남',
+    '총남': '충남', '충납': '충남', '충나': '충남',
     # 전북
     '전붂': '전북', '젼북': '전북',
     # 전남
@@ -778,14 +769,13 @@ class PlateRecognizer:
 
     def _load_models(self, model_path: Optional[str] = None) -> None:
         """
-        모델 로드 (7단계 우선순위):
+        모델 로드 (5단계 우선순위):
         0. 사용자 지정 모델 (--model 인자)
         1. 로컬 yolo26.engine (TensorRT FP16)
         2. 로컬 yolo26.onnx (ONNX Runtime GPU)
-        3. 로컬 번호판 전용 fine-tuned (yolo11x_plate.pt / yolo11n_plate.pt)
-        4. HuggingFace 번호판 전용 (morsetechlab/yolov11-license-plate-detection)
-        5. 로컬 yolo26.pt (번호판 전용)
-        6. yolo11n.pt 차량 탐지 폴백
+        3. HuggingFace 번호판 전용 (nickmuchi/yolov5-base-plates-detection)
+        4. 로컬 yolo26.pt (번호판 전용)
+        5. yolo11n.pt 차량 탐지 폴백
         """
         from ultralytics import YOLO
 
@@ -829,34 +819,20 @@ class PlateRecognizer:
             except Exception as e:
                 print(f"  [경고] ONNX 모델 로드 실패: {e}")
 
-        # 3순위: 로컬 번호판 전용 fine-tuned 모델 (yolo11x_plate.pt / yolo11n_plate.pt)
-        for _local_plate_name in ("yolo11x_plate.pt", "yolo11n_plate.pt"):
-            _local_plate_path = os.path.join(script_dir, _local_plate_name)
-            if os.path.isfile(_local_plate_path):
-                try:
-                    self.model = YOLO(_local_plate_path)
-                    self._is_plate_model = True
-                    self.model_path = _local_plate_path
-                    print(f"  [모델] 3순위 로컬 번호판 전용: {_local_plate_name}")
-                    self._coco_model: Optional[object] = None
-                    return
-                except Exception as e:
-                    print(f"  [경고] 로컬 번호판 모델 로드 실패 ({_local_plate_name}): {e}")
-
-        # 4순위: HuggingFace 번호판 전용 모델 (hf_hub_download)
+        # 3순위: HuggingFace 번호판 전용 모델 (hf_hub_download)
         try:
             from huggingface_hub import hf_hub_download
             hf_path = hf_hub_download(repo_id=HF_PLATE_REPO, filename=HF_PLATE_FILE)
             self.model = YOLO(hf_path)
             self._is_plate_model = True
             self.model_path = hf_path
-            print(f"  [모델] 4순위 HuggingFace 번호판 전용: {HF_PLATE_REPO}")
+            print(f"  [모델] 3순위 HuggingFace 번호판 전용: {HF_PLATE_REPO}")
             self._coco_model: Optional[object] = None
             return
         except Exception as e:
             print(f"  [경고] HuggingFace 모델 로드 실패: {e}")
 
-        # 5순위: 로컬 yolo26.pt (자동 판별: 번호판 전용 or COCO)
+        # 4순위: 로컬 yolo26.pt (자동 판별: 번호판 전용 or COCO)
         local_plate = os.path.join(script_dir, LOCAL_PLATE_MODEL)
         if os.path.isfile(local_plate):
             self.model = YOLO(local_plate)
@@ -870,15 +846,15 @@ class PlateRecognizer:
             self._is_plate_model = is_plate
             self.model_path = local_plate
             model_type = "번호판 전용" if is_plate else "COCO 범용 (차량 탐지)"
-            print(f"  [모델] 5순위 로컬 모델: {LOCAL_PLATE_MODEL} ({model_type})")
+            print(f"  [모델] 4순위 로컬 모델: {LOCAL_PLATE_MODEL} ({model_type})")
             self._coco_model: Optional[object] = None
             return
 
-        # 6순위: yolo11n.pt 차량 탐지 폴백
+        # 5순위: yolo11n.pt 차량 탐지 폴백
         coco_path = os.path.join(script_dir, COCO_MODEL)
         if not os.path.isfile(coco_path):
             coco_path = COCO_MODEL  # ultralytics 자동 다운로드
-        print(f"  [모델] 6순위 COCO 차량 탐지 폴백: {COCO_MODEL}")
+        print(f"  [모델] 5순위 COCO 차량 탐지 폴백: {COCO_MODEL}")
         self.model = YOLO(coco_path)
         self._is_plate_model = False
         self.model_path = coco_path
@@ -916,14 +892,14 @@ class PlateRecognizer:
             os.path.isfile(f"{_DET_DIR}/inference.pdmodel")
             and os.path.isfile(f"{_REC_DIR}/inference.pdmodel")
         )
-        os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
         try:
             from paddleocr import PaddleOCR
             paddle_kwargs: dict = {
                 "use_angle_cls": True,
                 "lang": "korean",
-                "show_log": False,
                 "use_gpu": False,
+                "enable_mkldnn": True,
+                "cpu_threads": 4,
             }
             if _has_models:
                 paddle_kwargs.update({
@@ -931,12 +907,7 @@ class PlateRecognizer:
                     "rec_model_dir": _REC_DIR,
                     "cls_model_dir": _CLS_DIR,
                 })
-            # show_log 파라미터 호환성 처리 (paddleocr v2 일부 버전에서 미지원)
-            try:
-                self.paddle_reader = PaddleOCR(**paddle_kwargs)
-            except TypeError:
-                paddle_kwargs.pop("show_log", None)
-                self.paddle_reader = PaddleOCR(**paddle_kwargs)
+            self.paddle_reader = PaddleOCR(**paddle_kwargs)
             self._ocr_engine = "paddle"
             print(f"  [OCR] 1순위 PaddleOCR 한국어 초기화 완료 (한글 인식 최강)")
         except Exception as e:
@@ -1050,10 +1021,9 @@ class PlateRecognizer:
 
     def _detect_direct(self, frame: np.ndarray) -> list[dict]:
         """직접 YOLO 추론 (TTA + NMS IoU 최적화)"""
-        imgsz = self._imgsz or 1280
         results = self.model.predict(
             source=frame,
-            imgsz=imgsz,
+            imgsz=640,
             conf=self.confidence_threshold,
             iou=0.45,
             verbose=False,
@@ -1873,16 +1843,13 @@ class PlateRecognizer:
         else:
             ocr_img = plate_img
 
-        # 강화 전처리 이미지 (개선3: 다중 전처리)
-        enhanced_img = self._preprocess_plate_enhanced(plate_img)
-
-        # ── 1. PaddleOCR 원본 (한글 인식 최강, 최우선) ──
+        # ── Tier1: PaddleOCR 원본만 먼저 (conf≥0.8이면 clahe/sharpen 스킵) ──
+        _tier1_high_conf = False
         entries = self._run_paddle_ocr(ocr_img)
         if entries:
             text, conf = self._reassemble_plate(entries)
             result = self._postprocess_ocr_text(text, conf)
             if result[0] and len(result[0]) >= 4:
-                # PaddleOCR + 한글 = 최우선 보너스
                 has_hangul = any('\uac00' <= c <= '\ud7a3' for c in result[0])
                 score = result[3]
                 if has_hangul and conf >= 0.7:
@@ -1890,30 +1857,37 @@ class PlateRecognizer:
                 elif has_hangul:
                     score = max(score, 0.95)
                 candidates.append((result[0], result[1], result[2], score))
+                # conf ≥ 0.8 → 강화 전처리(clahe/sharpen) 및 EasyOCR 스킵
+                if conf >= 0.8:
+                    _tier1_high_conf = True
 
-        # ── 2. PaddleOCR 강화 전처리 ──
-        entries = self._run_paddle_ocr(enhanced_img)
-        if entries:
-            text, conf = self._reassemble_plate(entries)
-            result = self._postprocess_ocr_text(text, conf)
-            if result[0] and len(result[0]) >= 4:
-                candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
+        if not _tier1_high_conf:
+            # 강화 전처리 이미지 (개선3: 다중 전처리) — Tier1 통과 못한 경우만
+            enhanced_img = self._preprocess_plate_enhanced(plate_img)
 
-        # ── 3. EasyOCR 원본 (보조) ──
-        entries = self._run_easy_ocr(ocr_img)
-        if entries:
-            text, conf = self._reassemble_plate(entries)
-            result = self._postprocess_ocr_text(text, conf)
-            if result[0] and len(result[0]) >= 4:
-                candidates.append((result[0], result[1], result[2], result[3]))
+            # ── 2. PaddleOCR 강화 전처리 ──
+            entries = self._run_paddle_ocr(enhanced_img)
+            if entries:
+                text, conf = self._reassemble_plate(entries)
+                result = self._postprocess_ocr_text(text, conf)
+                if result[0] and len(result[0]) >= 4:
+                    candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
 
-        # ── 4. EasyOCR 강화 전처리 ──
-        entries = self._run_easy_ocr(enhanced_img)
-        if entries:
-            text, conf = self._reassemble_plate(entries)
-            result = self._postprocess_ocr_text(text, conf)
-            if result[0] and len(result[0]) >= 4:
-                candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
+            # ── 3. EasyOCR 원본 (보조) ──
+            entries = self._run_easy_ocr(ocr_img)
+            if entries:
+                text, conf = self._reassemble_plate(entries)
+                result = self._postprocess_ocr_text(text, conf)
+                if result[0] and len(result[0]) >= 4:
+                    candidates.append((result[0], result[1], result[2], result[3]))
+
+            # ── 4. EasyOCR 강화 전처리 ──
+            entries = self._run_easy_ocr(enhanced_img)
+            if entries:
+                text, conf = self._reassemble_plate(entries)
+                result = self._postprocess_ocr_text(text, conf)
+                if result[0] and len(result[0]) >= 4:
+                    candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
 
         # ── 5. 소프트 전처리 PaddleOCR 재시도 (모두 실패 시) ──
         if not candidates and self.paddle_reader is not None:
@@ -2148,34 +2122,6 @@ class PlateRecognizer:
                     # 다수결 텍스트가 더 신뢰할 만하면 채택
                     tracker["best_result"]["text"] = majority_text
 
-                # 문자 단위 한글 투표: 숫자 부분이 동일하고 한글만 다를 때 다수결
-                window_texts = [w["text"] for w in tracker["window"]]
-                if len(window_texts) >= 2:
-                    current_best = tracker["best_result"].get("text", "")
-                    # 각 텍스트에서 숫자만 추출
-                    def _digits_only(t):
-                        return re.sub(r"[^0-9]", "", t)
-                    def _hangul_chars(t):
-                        return [c for c in t if "\uac00" <= c <= "\ud7a3"]
-                    best_digits = _digits_only(current_best)
-                    # 숫자 부분이 동일한 텍스트들에서 한글 위치별 투표
-                    matching_texts = [t for t in window_texts if _digits_only(t) == best_digits and _hangul_chars(t)]
-                    if len(matching_texts) >= 2:
-                        # 한글 위치별로 가장 많이 나온 문자 채택
-                        hangul_positions = {}
-                        for t in matching_texts:
-                            for i, c in enumerate(t):
-                                if "\uac00" <= c <= "\ud7a3":
-                                    hangul_positions.setdefault(i, []).append(c)
-                        voted_text = list(current_best)
-                        for pos, chars in hangul_positions.items():
-                            if pos < len(voted_text) and "\uac00" <= voted_text[pos] <= "\ud7a3":
-                                most_common_char = Counter(chars).most_common(1)[0][0]
-                                voted_text[pos] = most_common_char
-                        voted_str = "".join(voted_text)
-                        if voted_str != current_best:
-                            tracker["best_result"]["text"] = voted_str
-
             # CONFIRM_FRAME_COUNT 도달 시 confirmed 승격
             if tracker["count"] >= CONFIRM_FRAME_COUNT and not tracker.get("confirmed"):
                 tracker["confirmed"] = True
@@ -2252,9 +2198,9 @@ class PlateRecognizer:
         return inter / union if union > 0 else 0.0
 
     def _find_bbox_cache(self, xyxy: list[float], frame_idx: int) -> dict | None:
-        """최근 캐시에서 동일 위치(IoU>0.5) 번호판을 찾아 반환. 10프레임 이내만."""
+        """최근 캐시에서 동일 위치(IoU>0.5) 번호판을 찾아 반환. 5프레임 이내만 (OCR 캐시)."""
         for entry in reversed(self._bbox_cache):
-            if frame_idx - entry["frame_idx"] > 10:
+            if frame_idx - entry["frame_idx"] > 5:
                 continue
             if self._bbox_iou(xyxy, entry["xyxy"]) > 0.5:
                 return entry
@@ -2424,27 +2370,6 @@ class PlateRecognizer:
                             if len(t2) > len(text) and any('\uac00' <= c <= '\ud7a3' for c in t2):
                                 text, ocr_conf, is_valid, pattern_score = t2, c2, v2, s2
                                 self._partial_cache[partial_key] = (t2, c2, v2, s2)
-
-                # 숫자만 부분인식 재시도: "2754" 같은 4~7자리 숫자만 → 좌측 확장 크롭
-                if text and re.match(r'^\d{4,7}$', text):
-                    digit_key = text
-                    if not hasattr(self, '_digit_partial_cache'):
-                        self._digit_partial_cache: dict[str, tuple] = {}
-                    if digit_key in self._digit_partial_cache:
-                        text, ocr_conf, is_valid, pattern_score = self._digit_partial_cache[digit_key]
-                    else:
-                        # 좌측을 더 넓게 확장하여 앞부분 숫자+한글 복구
-                        expanded_left = self._crop_region(
-                            frame, det["xyxy"],
-                            padding_ratio=0.10, padding_left=0.50, padding_right=0.10,
-                            padding_top=0.25, padding_bottom=0.25,
-                        )
-                        if expanded_left.size > 0:
-                            expanded_left = self._upscale_if_small(expanded_left)
-                            t2, c2, v2, s2 = self._ocr_with_validation(expanded_left)
-                            if len(t2) > len(text) and any('\uac00' <= c <= '\ud7a3' for c in t2):
-                                text, ocr_conf, is_valid, pattern_score = t2, c2, v2, s2
-                                self._digit_partial_cache[digit_key] = (t2, c2, v2, s2)
 
                 # 텍스트 길이 필터: 번호판은 최대 MAX_PLATE_TEXT_LEN자
                 if len(text) > MAX_PLATE_TEXT_LEN:
@@ -2641,47 +2566,32 @@ class PlateRecognizer:
 
                     if burst_done or lost:
                         if burst_results:
-                            # bbox IoU 기반 클러스터링 → 복수 번호판 각각 best 선택
-                            clusters: list[list[dict]] = []
-                            for br in burst_results:
-                                bbox = br.get("bbox", [0, 0, 0, 0])
-                                placed = False
-                                for cluster in clusters:
-                                    rep_bbox = cluster[0].get("bbox", [0, 0, 0, 0])
-                                    if self._bbox_iou(bbox, rep_bbox) > 0.3:
-                                        cluster.append(br)
-                                        placed = True
-                                        break
-                                if not placed:
-                                    clusters.append([br])
-
+                            # 종합 점수 기반 최선 선택 (선명도 + OCR + 패턴)
+                            best = max(
+                                burst_results,
+                                key=lambda r: (
+                                    r["sharpness"] * 0.3 +
+                                    r["ocr_confidence"] * 100 * 0.3 +
+                                    r["pattern_score"] * 100 * 0.4
+                                ),
+                            )
+                            best_results.append(best)
                             reason = "버스트 소진" if burst_done else "타겟 소실"
-                            for cluster in clusters:
-                                best = max(
-                                    cluster,
-                                    key=lambda r: (
-                                        r["sharpness"] * 0.3 +
-                                        r["ocr_confidence"] * 100 * 0.3 +
-                                        r["pattern_score"] * 100 * 0.4
-                                    ),
-                                )
-                                best_results.append(best)
-                                method = best.get("detection_method", "unknown")
-                                valid_mark = " [유효]" if best.get("is_valid_plate") else ""
-                                print(
-                                    f"  버스트 완료 ({reason}): "
-                                    f"{len(cluster)}건 → "
-                                    f"\"{best['text']}\"{valid_mark} "
-                                    f"(선명도={best['sharpness']:.1f}, "
-                                    f"OCR={best['ocr_confidence']:.2f}, "
-                                    f"방식={method})"
-                                )
+                            method = best.get("detection_method", "unknown")
+                            valid_mark = " [유효]" if best.get("is_valid_plate") else ""
+                            print(
+                                f"  버스트 완료 ({reason}): "
+                                f"{len(burst_results)}건 → "
+                                f"\"{best['text']}\"{valid_mark} "
+                                f"(선명도={best['sharpness']:.1f}, "
+                                f"OCR={best['ocr_confidence']:.2f}, "
+                                f"방식={method})"
+                            )
 
                         burst_results = []
-                        # 쿨다운 3프레임 후 SCANNING 복귀 (연속 차량 감지)
                         self.state = CaptureState.SCANNING
                         self.burst_counter = 0
-                        self.no_detect_count = -3  # 쿨다운: 3프레임 동안 미탐지 허용
+                        self.no_detect_count = 0
 
             frame_idx += 1
 

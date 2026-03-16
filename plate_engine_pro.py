@@ -4,7 +4,16 @@
 # YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
-from config import PathConfig, ThresholdConfig, OCRConfig
+_os.environ["FLAGS_use_mkldnn"] = "0"
+
+from config import PathConfig, ThresholdConfig, OCRConfig, DisplayConfig
+from plate_recognition_4k import (
+    correct_ocr_hangul, correct_hangul_similarity,
+    _HANGUL_PLATE_CORRECTION, _find_nearest_valid_hangul,
+    _VALID_PLATE_HANGUL_ALL, _correct_single_hangul,
+    validate_plate_format, _correct_region, _REGION_SET,
+    _DIGIT_CORRECTION,
+)
 
 def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
@@ -28,193 +37,95 @@ from datetime import datetime
 from pathlib import Path
 from collections import defaultdict, deque
 
+
+_kr_font_cache = {}
+_kr_text_cache = {}
+def draw_korean_text(frame, text, pos, color=(0,255,0), size=24):
+    cache_key = (text, color, size)
+    if cache_key in _kr_text_cache:
+        tmp_np, alpha = _kr_text_cache[cache_key]
+    else:
+        if size not in _kr_font_cache:
+            try:
+                _kr_font_cache[size] = ImageFont.truetype("malgun.ttf", size)
+            except:
+                _kr_font_cache[size] = ImageFont.load_default()
+        font = _kr_font_cache[size]
+        b, g, r = color
+        tmp = Image.new("RGBA", (len(text)*size, size+10), (0,0,0,0))
+        draw = ImageDraw.Draw(tmp)
+        draw.text((0, 0), text, font=font, fill=(r, g, b, 255))
+        tmp_np = np.array(tmp)
+        alpha = tmp_np[:, :, 3:4].astype(np.float32) / 255.0
+        # BGR 채널 순서 변환 (PIL RGB → OpenCV BGR)
+        tmp_np = tmp_np[:, :, :3][:, :, ::-1].astype(np.float32)
+        _kr_text_cache[cache_key] = (tmp_np, alpha)
+    x, y = int(pos[0]), int(pos[1])
+    h, w = tmp_np.shape[:2]
+    fh, fw = frame.shape[:2]
+    y = max(0, min(y, fh - h))
+    x = max(0, min(x, fw - w))
+    roi = frame[y:y+h, x:x+w].astype(np.float32)
+    frame[y:y+h, x:x+w] = (alpha * tmp_np + (1 - alpha) * roi).astype(np.uint8)
+    return frame
+
 import cv2
 import numpy as np
+from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
-# ── plate_recognition_4k 한글 교정 함수 임포트 ──
+# ── OCR 엔진 임포트 ──
 try:
-    from plate_recognition_4k import (
-        correct_ocr_hangul,
-        correct_hangul_similarity,
-        validate_plate_format,
-        validate_korean_plate,
-    )
-    HAS_PLATE_4K_CORRECTION = True
+    import easyocr
+    HAS_EASYOCR = True
 except ImportError:
-    HAS_PLATE_4K_CORRECTION = False
-
-# ── 개선된 OCR 후처리 v2 ──
-try:
-    from plate_ocr_postfilter_v2 import clean_ocr_text_v2, ensemble_vote_v2, verify_paddle_with_crnn
-    HAS_POSTFILTER_V2 = True
-except ImportError:
-    HAS_POSTFILTER_V2 = False
-
-# ── OCR 엔진 임포트 (PaddleOCR 단독, EasyOCR 제거) ──
-HAS_EASYOCR = False
+    easyocr = None
+    HAS_EASYOCR = False
 
 try:
     from paddleocr import PaddleOCR
     HAS_PADDLEOCR = True
-except Exception:
+except ImportError:
     HAS_PADDLEOCR = False
 
 try:
     import pytesseract
     HAS_TESSERACT = True
-except Exception:
+except ImportError:
     HAS_TESSERACT = False
 
 try:
     import fast_alpr  # pip install fast-alpr[onnx-gpu]
     HAS_FAST_ALPR = True
-except Exception:
+except ImportError:
     fast_alpr = None
     HAS_FAST_ALPR = False
 
-# ── CRNN OCR 모델 (학습된 번호판 전용) ──
-try:
-    import torch as _torch
-    HAS_TORCH = True
-except Exception:
-    HAS_TORCH = False
-
-
-# ── 모델 우선순위 ──
-_MODEL_PRIORITY = [
-    "yolo11x_plate.pt",
-    "yolo11n_plate.pt",
-    "yolo26n.pt",
-    "yolo26s.pt",
-    "yolo26.pt",
-    "yolo11n.pt",
-    "yolov8n.pt",
-]
-
-
-class _CRNNModel:
-    """학습된 CRNN 번호판 OCR 모델 래퍼."""
-
-    def __init__(self, model_path):
-        import torch
-        import torch.nn as nn
-
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        checkpoint = torch.load(model_path, map_location=self.device, weights_only=False)
-        self.idx2char = checkpoint["idx2char"]
-        self.img_h = checkpoint.get("img_h", 64)
-        self.img_w = checkpoint.get("img_w", 256)
-        num_classes = checkpoint["num_classes"]
-        hidden = checkpoint.get("hidden_size", 256)
-        n_layers = checkpoint.get("num_layers", 2)
-
-        # CRNN 모델 구조 (train_plate_ocr.py와 동일)
-        class CRNN(nn.Module):
-            def __init__(self):
-                super().__init__()
-                self.cnn = nn.Sequential(
-                    nn.Conv2d(1, 64, 3, 1, 1), nn.BatchNorm2d(64), nn.ReLU(True),
-                    nn.MaxPool2d(2, 2),
-                    nn.Conv2d(64, 128, 3, 1, 1), nn.BatchNorm2d(128), nn.ReLU(True),
-                    nn.MaxPool2d(2, 2),
-                    nn.Conv2d(128, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(True),
-                    nn.Conv2d(256, 256, 3, 1, 1), nn.BatchNorm2d(256), nn.ReLU(True),
-                    nn.MaxPool2d((2, 2), (2, 1), (0, 1)),
-                    nn.Conv2d(256, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU(True),
-                    nn.Conv2d(512, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU(True),
-                    nn.MaxPool2d((2, 2), (2, 1), (0, 1)),
-                    nn.Conv2d(512, 512, 3, 1, 1), nn.BatchNorm2d(512), nn.ReLU(True),
-                    nn.MaxPool2d((2, 2), (2, 1), (0, 1)),
-                    nn.Conv2d(512, 512, (2, 1), 1, 0), nn.BatchNorm2d(512), nn.ReLU(True),
-                )
-                self.rnn = nn.LSTM(512, hidden, n_layers,
-                                   bidirectional=True, batch_first=True, dropout=0.2)
-                self.fc = nn.Linear(hidden * 2, num_classes)
-
-            def forward(self, x):
-                conv = self.cnn(x)
-                conv = conv.squeeze(2).permute(0, 2, 1)
-                rnn_out, _ = self.rnn(conv)
-                return self.fc(rnn_out).permute(1, 0, 2)
-
-        self.model = CRNN().to(self.device)
-        self.model.load_state_dict(checkpoint["model_state"])
-        self.model.eval()
-
-    def recognize(self, bgr_image):
-        """BGR 이미지 → (text, confidence)."""
-        import torch
-
-        # 전처리: 그레이스케일 → 리사이즈 → 패딩 → 정규화
-        gray = cv2.cvtColor(bgr_image, cv2.COLOR_BGR2GRAY) if len(bgr_image.shape) == 3 else bgr_image
-        h, w = gray.shape[:2]
-        ratio = self.img_h / h
-        new_w = min(int(w * ratio), self.img_w)
-        gray = cv2.resize(gray, (new_w, self.img_h), interpolation=cv2.INTER_CUBIC)
-        if new_w < self.img_w:
-            pad = np.ones((self.img_h, self.img_w - new_w), dtype=np.uint8) * 255
-            gray = np.concatenate([gray, pad], axis=1)
-
-        tensor = torch.FloatTensor(gray.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)
-        tensor = tensor.to(self.device)
-
-        with torch.no_grad():
-            output = self.model(tensor)  # (T, 1, C)
-            probs = output.softmax(2)
-            max_probs, preds = probs.max(2)  # (T, 1)
-
-        # CTC greedy decode
-        chars = []
-        confs = []
-        prev = -1
-        for t in range(preds.size(0)):
-            p = preds[t, 0].item()
-            c = max_probs[t, 0].item()
-            if p != 0 and p != prev:
-                if p in self.idx2char:
-                    chars.append(self.idx2char[p])
-                    confs.append(c)
-            prev = p
-
-        text = "".join(chars)
-        conf = float(np.mean(confs)) if confs else 0.0
-        return text, conf
-
 
 class PlateEngineConfig:
-    """엔진 설정"""
-    # ── 모델 경로 ──
+    """엔진 설정 — config.py 중앙 설정을 참조"""
+    # ── 모델 경로 (config.py에서 가져옴) ──
     YOLO_MODEL = PathConfig.YOLO_PRIMARY
     YOLO_FALLBACK = PathConfig.YOLO_FALLBACK
 
-    # ── 인식 임계값 ──
+    # ── 인식 임계값 (config.py 통일값) ──
     DETECT_CONF = ThresholdConfig.DETECT_CONF
-    ROI_X1 = 50
-    ROI_X2 = 1250
-    ROI_Y1 = 100
-    ROI_Y2 = 950
+    ROI_X1 = 0
+    ROI_X2 = 9999
+    ROI_Y1 = 0
+    ROI_Y2 = 9999
     OCR_CONF = ThresholdConfig.OCR_CONF
 
-    # ── 출력 필터링 임계값 ──
-    OUTPUT_CONF_HIGH = 0.85     # ✅ HIGH 확정 (0.90→0.85)
-    OUTPUT_CONF_MEDIUM = 0.60   # ⚠️ MEDIUM (재확인 권장, 0.70→0.60)
-    OUTPUT_CONF_LOW = 0.40      # ❌ 미만 → 폐기 (0.70→0.40, 인식률 최대화)
-    MIN_BBOX_WIDTH = 30         # 최소 bbox 가로 px (50→30, 소형 번호판 허용)
-    MIN_BBOX_HEIGHT = 10        # 최소 bbox 세로 px (15→10)
-    MIN_FRAME_COUNT = 2         # 확정 최소 프레임 수 (영상 모드)
-    TRACKER_IOU_THRESHOLD = 0.20  # IoU 기준 (0.30→0.20, 더 넓은 매칭)
-    TRACKER_TTL_FRAMES = 10       # 미감지 후 트랙 만료 프레임 수 (5→10, 가림 허용)
-
-    # ── MareArts/한국 번호판 정규식 완전판 ──
+    # ── 한국 번호판 정규식 (config.py에서 가져옴) ──
     KR_PATTERNS = OCRConfig.KR_PATTERNS
     PLATE_MIN_LEN = ThresholdConfig.PLATE_MIN_LEN
     PLATE_MAX_LEN = ThresholdConfig.PLATE_MAX_LEN
-    CONSECUTIVE_FRAMES_REQUIRED = 1  # 즉시 표시 (5→2→1)
+    CONSECUTIVE_FRAMES_REQUIRED = ThresholdConfig.CONFIRM_FRAME_COUNT
 
-    # 자주 혼동되는 문자 보정 (MareArts) 0↔O, 1↔I, 8↔B, 6↔G
+    # 자주 혼동되는 문자 보정 (config.py에서 가져옴)
     OCR_CONFUSION_MAP = OCRConfig.CONFUSION_MAP
-    # 멀티프레임 (MultiFrame-LPR): 번호판 픽셀 너비 < 80 이면 멀티프레임 ON
+
+    # 멀티프레임 설정 (config.py에서 가져옴)
     MULTIFRAME_SIZE = ThresholdConfig.MULTIFRAME_SIZE
     MULTIFRAME_PLATE_WIDTH_THRESHOLD = ThresholdConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD
 
@@ -284,17 +195,18 @@ class ImagePreprocessor:
 
     @staticmethod
     def clahe(img):
-        """[평가기준 20점] CLAHE (Contrast Limited Adaptive Histogram Equalization) - 대비 향상 (clipLimit 4.0, tile 8x8)"""
+        """CLAHE 대비 향상 (clipLimit 5.0, tile 8x8 — 그림자/음영 강화)"""
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=5.0, tileGridSize=(8, 8))
         l = clahe.apply(l)
         return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
     @staticmethod
     def denoise(img):
-        """노이즈 제거 (bilateral 필터 — 가장자리·획 보존, 이중 블러 제거)"""
-        return cv2.bilateralFilter(img, 7, 50, 50)
+        """노이즈 제거 (hqdn3d 스타일 가우시안 + bilateral)"""
+        blurred = cv2.bilateralFilter(img, 9, 75, 75)
+        return cv2.GaussianBlur(blurred, (3, 3), 0.5)
 
     @staticmethod
     def deblur(img):
@@ -400,82 +312,91 @@ class ImagePreprocessor:
         return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
 
     @staticmethod
-    def unsharp_mask(img):
-        """⑯ 언샤프 마스크 (선명도 향상 + 가장자리 보존)"""
-        blurred = cv2.GaussianBlur(img, (0, 0), 3.0)
-        return cv2.addWeighted(img, 1.5, blurred, -0.5, 0)
+    def invert_color(img):
+        """⑯ 색상 반전 — 초록/노란 번호판 (밝은 글씨 + 컬러 배경)"""
+        return cv2.bitwise_not(img)
 
     @staticmethod
-    def auto_contrast(img):
-        """⑰ 자동 대비 보정 (밝기 분석 후 적응적 CLAHE)"""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        mean_val = np.mean(gray)
-        # 어두운 이미지: 높은 clipLimit, 밝은 이미지: 낮은 clipLimit
-        if mean_val < 100:
-            clip = 6.0
-        elif mean_val > 180:
-            clip = 2.0
-        else:
-            clip = 4.0
+    def green_plate(img):
+        """⑰ 초록 번호판 전용 — HSV 초록 제거 + 반전"""
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        # 초록 범위 마스크
+        lower_green = np.array([35, 40, 40])
+        upper_green = np.array([90, 255, 255])
+        mask = cv2.inRange(hsv, lower_green, upper_green)
+        # 초록 영역을 검정으로 → 반전하면 흰색 배경
+        result = img.copy()
+        result[mask > 0] = [0, 0, 0]
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def yellow_plate(img):
+        """⑱ 노란 번호판 전용 — HSV 노란 제거 + 반전"""
+        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+        # 노란 범위 마스크
+        lower_yellow = np.array([15, 40, 100])
+        upper_yellow = np.array([35, 255, 255])
+        mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+        # 노란 영역을 검정으로 → 반전하면 흰색 배경
+        result = img.copy()
+        result[mask > 0] = [0, 0, 0]
+        gray = cv2.cvtColor(result, cv2.COLOR_BGR2GRAY)
+        _, binary = cv2.threshold(gray, 80, 255, cv2.THRESH_BINARY_INV)
+        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def color_plate_clahe(img):
+        """⑲ 컬러 번호판 CLAHE + 반전 (초록/노란 공통)"""
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(4, 4))
         l = clahe.apply(l)
-        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+        enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+        return cv2.bitwise_not(enhanced)
 
-    # ── ⑱~㉓ Deblur/형태학 강화 (24종 확장, 12/12 복구용) ──
-    @staticmethod
-    def deblur_laplacian(img):
-        """⑱ Laplacian 엣지 강화 (블러 보상, 야간 전조등 반사 완화)"""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        lap = cv2.Laplacian(gray, cv2.CV_16S, 3, scale=1, delta=0)
-        lap = cv2.convertScaleAbs(lap)
-        enhanced = cv2.addWeighted(gray, 1.0, lap, 0.3, 0)
-        return cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+    # ── ⑳~㉒ 야간/역광 전처리 ──
 
     @staticmethod
-    def deblur_strong(img):
-        """⑲ 강화 샤프닝 (5x5 커널, 주행 블러 보정)"""
-        kernel = np.array([
-            [-1, -1, -1, -1, -1],
-            [-1, -1, -1, -1, -1],
-            [-1, -1, 25, -1, -1],
-            [-1, -1, -1, -1, -1],
-            [-1, -1, -1, -1, -1],
-        ], dtype=np.float32) / 25.0
-        return cv2.filter2D(img, -1, kernel)
-
-    @staticmethod
-    def morphology_close_strong(img):
-        """⑳ 강화 닫기 (5x5, 자음/모음 붙임 완화)"""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
-        morph = cv2.morphologyEx(gray, cv2.MORPH_CLOSE, kernel)
-        return cv2.cvtColor(morph, cv2.COLOR_GRAY2BGR)
-
-    @staticmethod
-    def morphology_gradient(img):
-        """㉑ 형태학 그라디언트 (엣지 강조)"""
-        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        grad = cv2.morphologyEx(gray, cv2.MORPH_GRADIENT, kernel)
-        return cv2.cvtColor(grad, cv2.COLOR_GRAY2BGR)
-
-    @staticmethod
-    def clahe_aggressive(img):
-        """㉒ 공격적 CLAHE (clipLimit=8, 저조도/반사 강한 경우)"""
+    def night_clahe(img):
+        """⑳ 야간 강화 CLAHE (clipLimit=8.0, 저조도 번호판 대비 극대화)"""
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
-        clahe = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(8, 8))
+        clahe = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4))
         l = clahe.apply(l)
         return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
     @staticmethod
-    def median_strong(img):
-        """㉓ 강화 중앙값 (5x5, 점잡음·반사점 제거)"""
+    def backlight_adaptive(img):
+        """㉑ 역광 대응 — 밝기 정규화 + adaptive threshold 조합
+        역광 시 번호판이 어둡고 주변이 밝은 패턴을 보정"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        result = cv2.medianBlur(gray, 5)
-        return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
+        # 로컬 평균 밝기로 정규화 (역광 그라디언트 제거)
+        blur = cv2.GaussianBlur(gray, (0, 0), sigmaX=30)
+        normalized = cv2.divide(gray, blur, scale=255)
+        # adaptive threshold로 이진화
+        binary = cv2.adaptiveThreshold(
+            normalized, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 31, 15
+        )
+        return cv2.cvtColor(binary, cv2.COLOR_GRAY2BGR)
+
+    @staticmethod
+    def brightness_normalize(img):
+        """㉒ 밝기 정규화 — 야간/그림자 환경 대응
+        평균 밝기를 127로 맞추고 CLAHE 적용"""
+        lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+        l, a, b = cv2.split(lab)
+        # 평균 밝기를 127로 정규화
+        mean_l = np.mean(l)
+        if mean_l > 0:
+            scale = 127.0 / mean_l
+            l = np.clip(l.astype(np.float32) * scale, 0, 255).astype(np.uint8)
+        # CLAHE 적용
+        clahe = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8))
+        l = clahe.apply(l)
+        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
 
 
 class PlateValidator:
@@ -486,47 +407,8 @@ class PlateValidator:
         self.min_len = PlateEngineConfig.PLATE_MIN_LEN
         self.max_len = PlateEngineConfig.PLATE_MAX_LEN
 
-    # 자주 혼동되는 한글 문자 쌍 (번호판 기준 + OCR 오인식 교정 확장)
-    _KR_CONFUSION = {
-        "스": "소", "수": "소",  # 소 혼동
-        "오": "0",
-        "아": "아", "어": "어",
-        "르": "르", "프": "프",
-        # ★ OCR 빈출 혼동 쌍 추가 (비↔바, 시↔서, 당→다, 물→무 등)
-        "비": "바", "시": "서", "지": "저",
-        "당": "다", "랑": "라", "물": "무",
-        "법": "버", "낭": "나", "문": "누",
-        "대": "다", "태": "타", "내": "나",
-        "래": "라", "매": "마", "새": "사",
-        "재": "자", "채": "차", "해": "하",
-        # ★ 추가: 테스트 결과 발견된 혼동 쌍
-        "니": "나", "두": "다", "버": "바",
-        "누": "나", "배": "바",
-    }
-
-    # ★ 지역명 OCR 오인식 교정 맵 (2글자 단위)
-    _REGION_CONFUSION_MAP = {
-        "얼리": "경기", "잘리": "경기", "결리": "경기", "열리": "경기",
-        "건것": "경기", "견기": "경기", "경거": "경기", "결기": "경기",
-        "경리": "경기", "갱기": "경기", "겸기": "경기",
-        "서올": "서울", "서을": "서울", "시울": "서울", "사울": "서울",
-        "서룰": "서울", "셔울": "서울",
-        "부선": "부산", "부잔": "부산", "부진": "부산",
-        "대귀": "대구", "대고": "대구", "데구": "대구",
-        "인첨": "인천", "인전": "인천", "인견": "인천",
-        "광쥬": "광주", "광지": "광주", "강주": "광주",
-        "대젼": "대전", "대진": "대전", "데전": "대전",
-        "울잔": "울산", "울선": "울산", "을산": "울산",
-        "세졍": "세종", "세정": "세종", "새종": "세종",
-        "간원": "강원", "깅원": "강원",
-        "충복": "충북", "총북": "충북", "층북": "충북",
-        "충넘": "충남", "총남": "충남", "층남": "충남",
-        "전복": "전북", "전볶": "전북", "잔북": "전북",
-        "전넘": "전남", "잔남": "전남", "젼남": "전남",
-        "경복": "경북", "겸북": "경북", "경뵉": "경북",
-        "경넘": "경남", "겸남": "경남", "경냄": "경남",
-        "재주": "제주", "제쥬": "제주", "재쥬": "제주",
-    }
+    # 자주 혼동되는 한글 문자 쌍 (plate_recognition_4k.py 테이블 통합)
+    _KR_CONFUSION = _HANGUL_PLATE_CORRECTION
 
     def _try_patterns(self, text):
         """패턴 매칭 시도 (정방향 + 역방향 + 한글교정)"""
@@ -549,15 +431,15 @@ class PlateValidator:
     # 구형 지역번호판에서만 나오는 상용차 계열 문자 (일반 신형 가나다 제외)
     _COMMERCIAL_CHARS = set("비바사아자배하")
 
+    # ★ 2줄 공용차 번호판 상단 2자 코드 목록 (OCR 4자리 복원에 사용)
+    # 실제 번호판: 이나8060, 오수2754 등
+    _GOV_PREFIXES_2CHAR = [
+        "전기",  # 전기차 (가장 흔함)
+        "이나", "오수", "아자", "이아", "이마", "오아",  # 관용/군용 계열
+        "하나", "하다", "하라", "하마",  # 하이패스 관련
+    ]
+
     def validate(self, text):
-        # ★ 4자리 숫자만 읽힌 경우 → 전기차 하단 잘림 처리
-        # 예: 8060 → 전기8060
-        _pure4 = re.match(r'^[0-9]{4}$', text.strip())
-        if _pure4:
-            candidate = "전기" + text.strip()
-            for pattern in self.patterns:
-                if pattern.match(candidate):
-                    return True, candidate
         clean = self._normalize_for_validation(text)
         if not (self.min_len <= len(clean) <= self.max_len):
             rev = self._normalize_for_validation(text[::-1])
@@ -567,66 +449,77 @@ class PlateValidator:
                     return True, result
             return False, clean
 
-        # ★ 한글 유효성 교정: 패턴은 맞지만 한글이 유효하지 않으면 자동 교정
-        clean = self._fix_invalid_hangul(clean)
-
-        # ★ 지역명 OCR 오인식 교정 (얼리→경기, 건것→경기 등)
-        clean = self._fix_region_name(clean)
-
-        # 정방향 패턴 매칭 (먼저 시도 - 이미 유효하면 지역 추측 불필요)
-        for pattern in self.patterns:
-            if pattern.match(clean):
-                return True, clean
-
-        # ★ 구형 지역번호판 교정: 앞 1~2자리 숫자가 지역명 오인식
-        # 예) 376비7789 → 경기76비7789  (비/바/사/아/자 등 상용차 문자가 있을 때만)
-        # 일반 신형 123가4567에는 적용 안 함 (가/나/다 등은 _COMMERCIAL_CHARS 제외)
-        # ★ 이미 유효 패턴 매칭된 경우 여기까지 오지 않음 (위에서 return)
+        # ★ 구형 지역번호판 우선 교정: 앞 1~2자리 숫자가 지역명 오인식
+        # 예) 176바7789 → 경기76바7789 (앞 '1' = 지역명 OCR 잔여)
+        # ★ 지역명 복원은 정방향 매칭보다 우선 (지역명이 숫자로 오인식된 경우)
         m_reg = re.match(r'^[0-9]{1,2}([0-9]{2}([가-힣])[0-9]{4})$', clean)
         if m_reg and m_reg.group(2) in PlateValidator._COMMERCIAL_CHARS:
             suffix = m_reg.group(1)
-            for region in PlateValidator._REGION_PREFIXES:
-                candidate = region + suffix
-                nc = self._normalize_for_validation(candidate)
+            # ★ "00" 연식 코드는 실제 번호판에 없음 → 허위감지 차단
+            if suffix[:2] != "00":
+                for region in PlateValidator._REGION_PREFIXES:
+                    candidate = region + suffix
+                    nc = self._normalize_for_validation(candidate)
+                    for pattern in self.patterns:
+                        if pattern.match(nc):
+                            return True, nc
+
+        # 정방향 패턴 매칭
+        for pattern in self.patterns:
+            if pattern.match(clean):
+                # ★ 한글 유효성 추가 검증: 번호판에 쓰이지 않는 한글이면 교정
+                fmt_corrected, fmt_score = validate_plate_format(clean)
+                if fmt_score > 0 and fmt_corrected != clean:
+                    return True, fmt_corrected
+                return True, clean
+
+        # ★ 순수 숫자 7~9자리 → 한글 누락 복원 (PaddleOCR이 한글을 숫자로 오인식)
+        # 예: 88606118 → 86?6118 → 신형 "86가6118" 또는 구형 "충남86가6118"
+        digits_only = re.match(r'^[0-9]{7,9}$', clean)
+        if digits_only:
+            # 1) correct_ocr_hangul 적용 (숫자→한글 자동 보정)
+            corrected = correct_ocr_hangul(clean)
+            if corrected != clean:
                 for pattern in self.patterns:
-                    if pattern.match(nc):
-                        return True, nc
+                    if pattern.match(corrected):
+                        return True, corrected
+
+            # 2) 스마트 한글 삽입: 뒤 4자리를 기준점으로 삼아 한글 위치 결정
+            # ★ 수정: suffix를 뒤 4자리로 고정 → 앞자리 숫자 탈락 방지
+            suffix = clean[-4:]  # 뒤 4자리 숫자
+            if suffix.isdigit():
+                for split_pos in [2, 3]:  # 앞 2~3자리 + 한글(1자리 건너뜀) + 뒤 4자리
+                    if len(clean) >= split_pos + 5:
+                        prefix = clean[:split_pos]
+                        # 한글 자리에 있는 숫자를 한글로 매핑 시도
+                        mid_digit = clean[split_pos]
+                        from plate_recognition_4k import _HANGUL_CONFUSE_MAP
+                        mapped = _HANGUL_CONFUSE_MAP.get(mid_digit)
+                        if mapped:
+                            candidate = prefix + mapped + suffix
+                            for pattern in self.patterns:
+                                if pattern.match(candidate):
+                                    return True, candidate
+                        # 전체 유효 한글 시도
+                        for h in _VALID_PLATE_HANGUL_ALL:
+                            candidate = prefix + h + suffix
+                            for pattern in self.patterns:
+                                if pattern.match(candidate):
+                                    return True, candidate
 
         # 역방향 / 혼동 교정 시도
         ok, result = self._try_patterns(clean)
         if ok:
             return True, result
 
-        return False, clean
+        # ★ 최종 폴백: validate_plate_format (한글 교정 테이블 + 자모 유사도)
+        fmt_corrected, fmt_score = validate_plate_format(clean)
+        if fmt_score > 0:
+            for pattern in self.patterns:
+                if pattern.match(fmt_corrected):
+                    return True, fmt_corrected
 
-    def _fix_region_name(self, text):
-        """지역명 OCR 오인식 교정: 앞 2~3 한글이 유효 지역이 아니면 _REGION_CONFUSION_MAP으로 교정"""
-        # 구형 번호판 패턴: 한글2~3자 + 숫자 + 한글 + 숫자
-        m = re.match(r'^([가-힣]{2,3})(\d{1,2}[가-힣]\d{4})$', text)
-        if not m:
-            return text
-        region = m.group(1)
-        suffix = m.group(2)
-        _valid = set(self._REGION_PREFIXES)
-        if region in _valid:
-            return text  # 이미 유효한 지역
-        # _REGION_CONFUSION_MAP에서 교정 시도
-        corrected = self._REGION_CONFUSION_MAP.get(region)
-        if corrected:
-            return corrected + suffix
-        # 편집거리 1~2인 유효 지역 찾기
-        best_region = None
-        best_dist = 999
-        for vr in _valid:
-            if len(vr) != len(region):
-                continue
-            dist = sum(1 for a, b in zip(region, vr) if a != b)
-            if dist < best_dist:
-                best_dist = dist
-                best_region = vr
-        if best_region and best_dist <= 1:
-            return best_region + suffix
-        return text
+        return False, clean
 
     def _normalize_for_validation(self, text):
         """공백/특수문자 제거, OCR 글자 잘림 보정용 정규화"""
@@ -642,27 +535,7 @@ class PlateValidator:
     ]
 
     def clean_ocr_text(self, text):
-        """OCR 후처리: 특수문자 완전 제거 + 혼동문자 보정 + 한글 교정 + 두 줄 번호판 교정"""
-        # ★ v2 후처리기 우선 사용 (영문→한글 + 숫자위치 O→0 통합 교정)
-        if HAS_POSTFILTER_V2:
-            v2_result = clean_ocr_text_v2(text)
-            if v2_result:
-                # ★ v2가 지역명 포함 결과를 생성하면 추가 교정 건너뜀
-                # (plate_recognition_4k의 교정이 지역명을 망칠 수 있음)
-                _v2_has_region = bool(re.match(
-                    r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', v2_result))
-                if not _v2_has_region and HAS_PLATE_4K_CORRECTION:
-                    try:
-                        v2_result = correct_ocr_hangul(v2_result)
-                        v2_result = correct_hangul_similarity(v2_result)
-                        fmt_text, fmt_score = validate_plate_format(v2_result)
-                        if fmt_score > 0:
-                            v2_result = fmt_text
-                    except Exception:
-                        pass
-                return v2_result
-
-        # ── fallback: 기존 로직 ──
+        """OCR 후처리: 특수문자 완전 제거 + 혼동문자 보정 + 두 줄 번호판 교정"""
         clean = text.strip()
         # ★ 핵심: 중간 특수문자도 모두 제거 (번호판에는 숫자·한글·영문만)
         clean = re.sub(r"[^\w가-힣]", "", clean, flags=re.ASCII)
@@ -681,48 +554,19 @@ class PlateValidator:
                 result.append(ch)
         cleaned = "".join(result)
 
-        # ★ 한글 교정: plate_recognition_4k의 교정 함수 적용
-        if HAS_PLATE_4K_CORRECTION:
-            try:
-                cleaned = correct_ocr_hangul(cleaned)
-                cleaned = correct_hangul_similarity(cleaned)
-                # validate_plate_format 으로 무효 한글 → 유효 한글 교정
-                fmt_text, fmt_score = validate_plate_format(cleaned)
-                if fmt_score > 0:
-                    cleaned = fmt_text
-            except Exception:
-                pass
+        # ★ 한글 보정 (plate_recognition_4k.py 로직 통합)
+        # 1) 숫자/영문→한글 오인식 보정 + 한글↔한글 유사 보정
+        cleaned = correct_ocr_hangul(cleaned)
+        cleaned = correct_hangul_similarity(cleaned)
+
+        # 2) 지역명 오인식 보정 (시울→서울 등) — 8자 이상만 (짧은 결과는 그대로)
+        if len(cleaned) >= 7:
+            prefix2 = cleaned[:2]
+            corrected_region = _correct_region(prefix2)
+            if corrected_region != prefix2 and corrected_region in _REGION_SET:
+                cleaned = corrected_region + cleaned[2:]
 
         return cleaned
-
-    # 유효 번호판 한글 문자 집합
-    _VALID_PLATE_HANGUL = set(
-        '가나다라마바사아자차카타파하'
-        '거너더러머버서어저처커터퍼허'
-        '고노도로모보소오조호'
-        '구누두루무부수우주'
-        '배육'
-    )
-
-    def _fix_invalid_hangul(self, text):
-        """번호판 한글 위치에 유효하지 않은 한글이 있으면 _KR_CONFUSION으로 교정"""
-        # 신형: XX[한글]XXXX 패턴에서 한글 위치 찾기
-        m = re.match(r'^(\d{2,3})([가-힣])(\d{4})$', text)
-        if m:
-            hg = m.group(2)
-            if hg not in self._VALID_PLATE_HANGUL:
-                fixed = self._KR_CONFUSION.get(hg, hg)
-                if fixed in self._VALID_PLATE_HANGUL:
-                    return m.group(1) + fixed + m.group(3)
-        # 구형: 지역XX[한글]XXXX
-        m2 = re.match(r'^([가-힣]{2,3})(\d{2})([가-힣])(\d{4})$', text)
-        if m2:
-            hg = m2.group(3)
-            if hg not in self._VALID_PLATE_HANGUL:
-                fixed = self._KR_CONFUSION.get(hg, hg)
-                if fixed in self._VALID_PLATE_HANGUL:
-                    return m2.group(1) + m2.group(2) + fixed + m2.group(4)
-        return text
 
     def _should_be_digit(self, text, pos):
         if pos > 0 and text[pos - 1].isdigit():
@@ -734,295 +578,6 @@ class PlateValidator:
     def is_valid_length(self, text):
         clean = self._normalize_for_validation(text)
         return self.min_len <= len(clean) <= self.max_len
-
-    # ── 번호판 유형/차량 유형 분류 ──
-
-    # 번호판 허용 한글 (차량 용도별)
-    _HANGUL_COMMERCIAL = set('아바사자')         # 영업용 (택시, 버스 등)
-    _HANGUL_RENTAL = set('하허호')               # 렌터카
-
-    @staticmethod
-    def classify_plate_type(text):
-        """번호판 유형 분류 → str"""
-        # 전기차: 3자리(700~799) + 한글 + 4자리
-        m = re.match(r'^(\d{3})([가-힣])(\d{4})$', text)
-        if m:
-            prefix = int(m.group(1))
-            if 700 <= prefix <= 799:
-                return "전기차"
-            elif 100 <= prefix <= 699:
-                return "신형"
-        # 영업용: 지역명 + 2자리 + 영업용한글(아바사자) + 4자리
-        m = re.match(r'^([가-힣]{2,3})(\d{2})([아바사자])(\d{4})$', text)
-        if m:
-            return "영업용"
-        # 지역명 구형: 지역명 + 2자리 + 한글 + 4자리
-        m = re.match(r'^([가-힣]{2,3})(\d{2})([가-힣])(\d{4})$', text)
-        if m:
-            return "지역명_구형"
-        # 구형: 2자리 + 한글 + 4자리
-        m = re.match(r'^(\d{2})([가-힣])(\d{4})$', text)
-        if m:
-            return "구형"
-        return "기타"
-
-    @classmethod
-    def classify_vehicle_type(cls, text):
-        """차량 용도 분류 → str"""
-        # 번호판에서 한글 문자 추출 (지역명 제외)
-        m = re.search(r'\d([가-힣])\d', text)
-        if m:
-            hangul = m.group(1)
-            if hangul in cls._HANGUL_COMMERCIAL:
-                return "영업용"
-            if hangul in cls._HANGUL_RENTAL:
-                return "렌터카"
-        return "자가용"
-
-    @staticmethod
-    def get_confidence_level(conf):
-        """신뢰도 등급 분류 → str"""
-        if conf >= PlateEngineConfig.OUTPUT_CONF_HIGH:
-            return "HIGH"
-        elif conf >= PlateEngineConfig.OUTPUT_CONF_MEDIUM:
-            return "MEDIUM"
-        else:
-            return "LOW"
-
-
-class HangulClassifier:
-    """번호판 한글 전용 분류기 — 초성 교차검증 방식
-
-    OCR 앙상블 투표에서 결정된 한글의 초성이 혼동 쌍(ㅅ↔ㅈ, ㅁ↔ㅂ)에
-    해당하면, PaddleOCR 인식 모델(det=False)을 한글 크롭에 직접 적용하여
-    초성을 교차검증한다.
-
-    원리:
-    - 전체 번호판 OCR: 맥락은 좋지만 미세 구조(ㅈ 가로획 등) 누락 가능
-    - 한글 크롭 OCR: 맥락(모음)은 틀리지만 자음 구조를 더 정확히 감지
-    - 예: 투표="서"(ㅅ+ㅓ) + 크롭="지"(ㅈ+ㅣ) → 초성 ㅈ + 모음 ㅓ = "저"
-    """
-
-    # 교정 방향: 단순 초성 → 복잡 초성 (역방향은 안전하지 않음)
-    _INITIAL_OVERRIDE = {
-        9: 12,   # ㅅ(9) → ㅈ(12): ㅈ의 가로획이 크롭에서 감지되면 교정
-        6: 7,    # ㅁ(6) → ㅂ(7): ㅂ의 하단 세로획이 감지되면 교정
-    }
-    # ㅈ 계열 초성 (가로획 보유) — 크롭에서 이 그룹이 검출되면 ㅈ로 교정
-    _JIEUT_GROUP = {12, 13, 14}   # ㅈ, ㅉ, ㅊ
-    _SIOT_GROUP = {9, 10}          # ㅅ, ㅆ
-    # ㅂ 계열
-    _BIEUP_GROUP = {7, 8}         # ㅂ, ㅃ
-
-    def __init__(self):
-        self._ready = True
-
-    @staticmethod
-    def _decompose(ch):
-        """한글 음절 → (초성, 중성, 종성) 인덱스"""
-        code = ord(ch) - 0xAC00
-        if code < 0 or code > 11171:
-            return None
-        return code // (21 * 28), (code // 28) % 21, code % 28
-
-    @staticmethod
-    def _compose(ini, med, fin=0):
-        """(초성, 중성, 종성) → 한글 음절"""
-        return chr(0xAC00 + ini * 21 * 28 + med * 28 + fin)
-
-    @staticmethod
-    def _structural_bieup_check(crop_bgr):
-        """형태학적 구조 분석으로 ㅂ/ㅁ 구분.
-
-        ㅂ: 자음 영역에 3개 이상의 수평 바 (상단+중단+하단) + 높은 픽셀 밀도
-        ㅁ: 자음 영역에 2개의 수평 바 (상단+하단) + 낮은 픽셀 밀도
-
-        Returns: True if structural evidence suggests ㅂ, False otherwise
-        """
-        try:
-            gray = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2GRAY) if len(crop_bgr.shape) == 3 else crop_bgr
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY_INV + cv2.THRESH_OTSU)
-            hh, hw = binary.shape
-            if hh < 20 or hw < 20:
-                return False
-
-            # 수직 프로젝션으로 자음 영역 열 범위 탐색
-            v_proj = np.sum(binary > 0, axis=0)
-            v_threshold = hh * 0.15
-
-            # 연속 high-value 열 그룹 찾기 (자음 영역)
-            groups = []
-            in_group = False
-            g_start = -1
-            for c in range(hw):
-                if v_proj[c] >= v_threshold:
-                    if not in_group:
-                        g_start = c
-                        in_group = True
-                else:
-                    if in_group:
-                        groups.append((g_start, c - 1))
-                        in_group = False
-            if in_group:
-                groups.append((g_start, hw - 1))
-
-            if not groups:
-                return False
-
-            # 가장 넓은 열 그룹 = 자음 본체 (보통 자음이 가장 넓음)
-            # 단, 최소 폭 8px 이상인 그룹만 고려
-            valid_groups = [(s, e) for s, e in groups if (e - s + 1) >= 8]
-            if not valid_groups:
-                return False
-            cons_start, cons_end = max(valid_groups, key=lambda g: g[1] - g[0])
-            cons_region = binary[:, cons_start:cons_end + 1]
-            ch, cw = cons_region.shape
-
-            # 자음 영역의 수평 프로젝션 (행별 흰 픽셀 수)
-            h_proj = np.sum(cons_region > 0, axis=1)
-
-            # 수평 바 감지 (h_proj > 60% 자음 폭)
-            bar_threshold = cw * 0.55
-            bars = []
-            in_bar = False
-            bar_start = -1
-            for r in range(ch):
-                if h_proj[r] >= bar_threshold:
-                    if not in_bar:
-                        bar_start = r
-                        in_bar = True
-                else:
-                    if in_bar:
-                        bars.append((bar_start, r - 1))
-                        in_bar = False
-            if in_bar:
-                bars.append((bar_start, ch - 1))
-
-            # 자음 영역만 추출: 상단 60% 이내의 바만 (하단은 모음 ㅜ/ㅗ)
-            cons_height_limit = int(ch * 0.55)
-            cons_bars = [(s, e) for s, e in bars if s < cons_height_limit]
-
-            # 판정 기준 1: 자음 상반부에 3+ 바 → ㅂ 가능성 매우 높음
-            if len(cons_bars) >= 3:
-                return True
-
-            # 판정 기준 2: 자음 상반부에 2개 바가 있고, 간격이 좁으면 ㅂ
-            # (ㅂ의 상단바+중단바 = 좁은 간격, ㅁ의 상단바+하단바 = 넓은 간격)
-            if len(cons_bars) == 2:
-                bar1_end = cons_bars[0][1]
-                bar2_start = cons_bars[1][0]
-                gap = bar2_start - bar1_end - 1
-                bar_span = cons_bars[1][1] - cons_bars[0][0] + 1
-                # ㅂ: 두 바 사이 간격이 전체 높이의 25% 이하
-                if bar_span > 0 and gap < bar_span * 0.25:
-                    return True
-
-            # 판정 기준 3: 픽셀 밀도 (자음 영역 상반부)
-            cons_upper = cons_region[:cons_height_limit, :]
-            density = np.sum(cons_upper > 0) / max(cons_upper.size, 1)
-            if density > 0.50:
-                return True
-
-            return False
-        except Exception:
-            return False
-
-    def check_override(self, voted_hg, crop_bgr, paddle_engine, ocr_engines=None):
-        """투표 결과 한글의 초성을 PaddleOCR+Tesseract 크롭 인식으로 교차검증.
-
-        Returns: (corrected_hangul, changed: bool)
-        """
-        if crop_bgr is None or crop_bgr.size < 100:
-            return voted_hg, False
-
-        vd = self._decompose(voted_hg)
-        if not vd or vd[0] not in self._INITIAL_OVERRIDE:
-            return voted_hg, False
-
-        # 다중 전처리 변형 생성
-        variants = [crop_bgr]
-        try:  # CLAHE
-            cl = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
-            lab = cv2.cvtColor(crop_bgr, cv2.COLOR_BGR2LAB)
-            lab[:, :, 0] = cl.apply(lab[:, :, 0])
-            variants.append(cv2.cvtColor(lab, cv2.COLOR_LAB2BGR))
-        except Exception:
-            pass
-        try:  # Sharpen
-            k = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-            variants.append(cv2.filter2D(crop_bgr, -1, k))
-        except Exception:
-            pass
-        variants.append(cv2.bitwise_not(crop_bgr))  # Inverted
-        # 업스케일 버전 추가
-        big = cv2.resize(crop_bgr, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC)
-        variants.append(big)
-        try:
-            lab2 = cv2.cvtColor(big, cv2.COLOR_BGR2LAB)
-            lab2[:, :, 0] = cl.apply(lab2[:, :, 0])
-            variants.append(cv2.cvtColor(lab2, cv2.COLOR_LAB2BGR))
-        except Exception:
-            pass
-
-        # PaddleOCR det=False로 각 변형 인식 → 초성 수집
-        crop_initials = []
-        for v in variants:
-            try:
-                res = paddle_engine.ocr(v, det=False, cls=True)
-                if res and res[0]:
-                    for text, conf in res[0]:
-                        for ch in str(text):
-                            d = self._decompose(ch)
-                            if d:
-                                crop_initials.append(d[0])
-            except Exception:
-                pass
-
-        # ★ Tesseract 초성 증거 수집 (PaddleOCR과 다른 인식 모델)
-        if ocr_engines and 'tesseract' in ocr_engines and HAS_TESSERACT:
-            for v in variants:
-                try:
-                    gray = cv2.cvtColor(v, cv2.COLOR_BGR2GRAY) if len(v.shape) == 3 else v
-                    # PSM 10 = single character (한글 1자 크롭)
-                    text = pytesseract.image_to_string(
-                        gray, config='--oem 3 --psm 10 -l kor'
-                    )
-                    for ch in text.strip():
-                        d = self._decompose(ch)
-                        if d:
-                            crop_initials.append(d[0])
-                except Exception:
-                    pass
-
-        if not crop_initials:
-            return voted_hg, False
-
-        # 초성 증거 판정
-        target_ini = self._INITIAL_OVERRIDE[vd[0]]
-
-        if vd[0] == 9:  # ㅅ → ㅈ 교정 여부
-            evidence = sum(1 for i in crop_initials if i in self._JIEUT_GROUP)
-            counter = sum(1 for i in crop_initials if i in self._SIOT_GROUP)
-        elif vd[0] == 6:  # ㅁ → ㅂ 교정 여부
-            evidence = sum(1 for i in crop_initials if i in self._BIEUP_GROUP)
-            counter = sum(1 for i in crop_initials if i == 6)
-        else:
-            return voted_hg, False
-
-        # 과반 + 최소 2건 이상 증거 시 교정
-        if evidence > counter and evidence >= 2:
-            new_hg = self._compose(target_ini, vd[1], vd[2])
-            if new_hg in PlateValidator._VALID_PLATE_HANGUL:
-                return new_hg, True
-
-        # ★ OCR 증거 부족 시 구조 분석 fallback (ㅁ→ㅂ만 적용)
-        if vd[0] == 6 and evidence == 0:
-            if self._structural_bieup_check(crop_bgr):
-                new_hg = self._compose(target_ini, vd[1], vd[2])
-                if new_hg in PlateValidator._VALID_PLATE_HANGUL:
-                    return new_hg, True
-
-        return voted_hg, False
 
 
 class PlateDatabase:
@@ -1095,219 +650,10 @@ class PlateDatabase:
         """, (f"%{query}%", limit)).fetchall()
 
 
-def _resolve_plate_model(config: "PlateEngineConfig") -> Path:
-    """프로젝트(스크립트) 폴더 기준으로 번호판용 YOLO 모델 경로를 찾는다. 없으면 None."""
-    script_dir = Path(__file__).resolve().parent
-    candidates = [
-        script_dir / "best.pt",  # 경량 번호판 모델 (5.5MB, ~0.1s CPU)
-        script_dir / "yolo11x_plate.pt",  # 대형 모델 (114MB, ~1.5s CPU)
-        script_dir / "runs" / "detect" / "plate_korean_3k_v2" / "weights" / "best.pt",
-        script_dir / "runs" / "detect" / "plate_korean_3k3" / "weights" / "best.pt",
-        script_dir / "runs" / "detect" / "highway_plate" / "weights" / "best.pt",
-        script_dir / config.YOLO_MODEL,
-        script_dir / config.YOLO_FALLBACK,
-    ]
-    for m in _MODEL_PRIORITY:
-        candidates.append(script_dir / m)
-        candidates.append(Path(m))  # CWD
-    for p in candidates:
-        if p.exists():
-            return p
-    return None
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# PlateTracker: IoU 기반 차량 추적 + TTL 프레임 만료
-#   → Ghost Detection (이전 차량 잔상) 방지
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-class PlateTracker:
-    """IoU 기반 번호판 트래커.
-
-    각 트랙은 bbox 위치로 차량을 식별하며, IoU < threshold 이면
-    다른 차량으로 판단하여 이전 결과를 초기화합니다.
-
-    TTL(Time-To-Live) 프레임 이내에 재감지되지 않으면 트랙을 만료시켜
-    ghost detection (이전 차량 번호가 다음 차량에 표시) 을 방지합니다.
-    """
-
-    # ── Ghost Detection 방지 파라미터 ──
-    AREA_CHANGE_THRESHOLD = 0.5   # bbox 면적 비율이 0.5배 미만 또는 2.0배 초과 → 차량 변경 판단
-    GAP_FRAMES_THRESHOLD = 10     # N프레임 이상 미감지 후 재감지 → texts 리셋
-    MAX_TEXT_ENTRIES = 50          # texts dict 최대 항목 수 (무한 누적 방지)
-
-    def __init__(self, iou_threshold=0.30, ttl_frames=30):
-        self.iou_threshold = iou_threshold
-        self.ttl_frames = ttl_frames
-        self.tracks = []  # list of track dicts
-        self._frame_id = 0
-
-    @staticmethod
-    def _bbox_area(bbox):
-        """bbox [x1,y1,x2,y2]의 면적 계산"""
-        return max(0, bbox[2] - bbox[0]) * max(0, bbox[3] - bbox[1])
-
-    def _bbox_iou(self, a, b):
-        """두 bbox [x1,y1,x2,y2] 간 IoU 계산"""
-        x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
-        x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
-        inter = max(0, x2 - x1) * max(0, y2 - y1)
-        area_a = (a[2] - a[0]) * (a[3] - a[1])
-        area_b = (b[2] - b[0]) * (b[3] - b[1])
-        union = area_a + area_b - inter
-        return inter / union if union > 0 else 0
-
-    def _should_reset_texts(self, trk, new_bbox, new_text=None):
-        """기존 트랙에 매칭됐지만 차량이 변경된 것으로 판단되는 경우 True 반환.
-
-        리셋 조건:
-          1. bbox 면적 급변 (0.5배 미만 또는 2.0배 초과)
-          2. N프레임(10+) 미감지 후 재감지
-          3. 새 OCR 텍스트의 숫자 4자리가 기존 최다 득표와 완전 불일치
-        """
-        # 조건 1: bbox 면적 급변 → 다른 차량이 같은 위치에 진입
-        old_area = self._bbox_area(trk["bbox"])
-        new_area = self._bbox_area(new_bbox)
-        if old_area > 0 and new_area > 0:
-            ratio = new_area / old_area
-            if ratio < self.AREA_CHANGE_THRESHOLD or ratio > (1.0 / self.AREA_CHANGE_THRESHOLD):
-                return True
-
-        # 조건 2: N프레임 이상 미감지 후 재감지 → 사이에 차량 교체 가능성
-        gap = self._frame_id - trk["last_frame"]
-        if gap >= self.GAP_FRAMES_THRESHOLD:
-            return True
-
-        # 조건 3: 새 OCR 텍스트의 끝 4자리(숫자)가 기존 최다 득표와 완전 불일치
-        if new_text and trk["texts"]:
-            import re as _re
-            _new_digits = _re.sub(r'[^0-9]', '', new_text)[-4:]
-            _best_old = max(trk["texts"], key=trk["texts"].get)
-            _old_digits = _re.sub(r'[^0-9]', '', _best_old)[-4:]
-            if len(_new_digits) >= 4 and len(_old_digits) >= 4 and _new_digits != _old_digits:
-                # 숫자 4자리 완전 불일치 → 다른 차량
-                return True
-
-        return False
-
-    def _reset_track_texts(self, trk):
-        """트랙의 투표 데이터를 초기화 (차량 변경 판단 시)"""
-        trk["texts"] = defaultdict(int)
-        trk["best_conf"] = 0
-        trk["recorded"] = False
-        trk["consecutive"] = 0  # ★ 0부터 시작 (ghost 방지: 즉시 표시 차단)
-        trk["_detect_count"] = 0  # ★ 0부터 시작
-
-    def begin_frame(self):
-        """새 프레임 시작 — 프레임 카운터 증가, 트랙 seen 플래그 리셋"""
-        self._frame_id += 1
-        for trk in self.tracks:
-            trk["_seen"] = False
-
-    def match(self, bbox):
-        """bbox와 가장 높은 IoU를 가진 트랙 매칭.
-
-        Returns:
-            track (dict): 매칭된 트랙 (새 트랙이면 새로 생성)
-            is_new (bool): 새 트랙 여부 (이전 차량과 다른 위치)
-        """
-        best_iou = 0
-        best_trk = None
-        _new_cx = (bbox[0] + bbox[2]) / 2
-        _new_cy = (bbox[1] + bbox[3]) / 2
-        for trk in self.tracks:
-            iou = self._bbox_iou(bbox, trk["bbox"])
-            if iou > best_iou:
-                # ★ 중심 거리 200px 이상이면 다른 차량으로 판단
-                _trk_cx = (trk["bbox"][0] + trk["bbox"][2]) / 2
-                _trk_cy = (trk["bbox"][1] + trk["bbox"][3]) / 2
-                _cdist = ((_new_cx - _trk_cx) ** 2 + (_new_cy - _trk_cy) ** 2) ** 0.5
-                if _cdist >= 200:
-                    continue
-                best_iou = iou
-                best_trk = trk
-
-        if best_iou >= self.iou_threshold and best_trk is not None:
-            # ── Ghost 방지: 차량 변경 감지 시 texts 리셋 ──
-            if self._should_reset_texts(best_trk, bbox):
-                self._reset_track_texts(best_trk)
-
-            # ── texts 항목 수 제한 (무한 누적 방지) ──
-            if len(best_trk["texts"]) >= self.MAX_TEXT_ENTRIES:
-                # 최다 득표 상위 5개만 유지
-                top_items = sorted(best_trk["texts"].items(), key=lambda x: x[1], reverse=True)[:5]
-                best_trk["texts"] = defaultdict(int, top_items)
-
-            # 기존 트랙 갱신 — 이동 벡터 v = Δpos/Δt, 면적 변화율 Δarea/Δt (고의적 길막 판정용)
-            best_trk["_pre_gap"] = self._frame_id - best_trk["last_frame"]
-            old_bbox = best_trk["bbox"]
-            old_area = self._bbox_area(old_bbox)
-            new_area = self._bbox_area(bbox)
-            dt = max(1, self._frame_id - best_trk["last_frame"])
-            cx_old = (old_bbox[0] + old_bbox[2]) / 2
-            cy_old = (old_bbox[1] + old_bbox[3]) / 2
-            cx_new = (bbox[0] + bbox[2]) / 2
-            cy_new = (bbox[1] + bbox[3]) / 2
-            best_trk["velocity"] = ((cx_new - cx_old) / dt, (cy_new - cy_old) / dt)
-            best_trk["area_rate"] = (new_area - old_area) / dt / max(old_area, 1.0) if old_area > 0 else 0.0
-            best_trk["bbox"] = bbox
-            best_trk["consecutive"] += 1
-            best_trk["_detect_count"] = best_trk.get("_detect_count", 0) + 1
-            best_trk["last_frame"] = self._frame_id
-            best_trk["_seen"] = True
-            return best_trk, False
-        else:
-            # 새 트랙 생성 (다른 차량)
-            new_trk = {
-                "bbox": bbox,
-                "texts": defaultdict(int),
-                "consecutive": 1,
-                "_detect_count": 1,
-                "best_conf": 0,
-                "recorded": False,
-                "last_frame": self._frame_id,
-                "_seen": True,
-                "velocity": (0.0, 0.0),
-                "area_rate": 0.0,
-            }
-            self.tracks.append(new_trk)
-            return new_trk, True
-
-    def end_frame(self):
-        """프레임 종료 — 미감지 트랙 처리 + TTL 만료 트랙 제거"""
-        alive = []
-        for trk in self.tracks:
-            if trk["_seen"]:
-                alive.append(trk)
-            else:
-                # 이번 프레임에 미감지 → consecutive 점진적 감소 (즉시 리셋 안 함)
-                # 실시간 모드에서 YOLO가 1~2프레임 미감지해도 트랙 유지
-                frames_since = self._frame_id - trk["last_frame"]
-                if frames_since <= 2:
-                    # 2프레임 이내 미감지: consecutive 유지 (일시적 미감지 허용)
-                    pass
-                elif frames_since <= self.ttl_frames:
-                    # 3프레임 초과 ~ TTL 이내: consecutive 리셋
-                    trk["consecutive"] = 0
-                    alive.append(trk)
-                    continue
-                else:
-                    # TTL 초과: 트랙 제거 (ghost detection 방지)
-                    continue
-                alive.append(trk)
-        self.tracks = alive
-
-    def reset(self):
-        """모든 트랙 초기화 — 이미지 단독 테스트 시 사용"""
-        self.tracks.clear()
-        self._frame_id = 0
-
-
 class PlateEnginePro:
     """
-    상용급 번호판 인식 엔진 (평가기준 반영)
-    · best.pt: YOLO 학습자료로 생성한 모델 사용 (평가 5점 - train.py / Roboflow 데이터셋)
-    · 외부 입력파일 차량 객체 인지: process_frame()으로 영상·이미지 입력 (평가 5점)
-    [영상입력] → [YOLO탐지] → [ROI추출] → [10종전처리(CLAHE 등)]
+    상용급 번호판 인식 엔진
+    [영상입력] → [YOLO탐지] → [ROI추출] → [10종전처리]
     → [멀티OCR] → [검증/보정] → [DB기록] → [경고알림]
     """
 
@@ -1317,99 +663,71 @@ class PlateEnginePro:
         self.validator = PlateValidator()
         self.db = PlateDatabase()
 
-        model_path = _resolve_plate_model(self.config)
-        self._is_plate_model = False  # 번호판 전용 모델 여부 플래그
-        if model_path is not None:
-            self.model = YOLO(str(model_path))
-            # 모델 클래스 이름으로 번호판 전용인지 자동 판별
-            _names = self.model.names or {}
-            _name_vals = [str(v).lower() for v in _names.values()]
-            self._is_plate_model = any(
-                kw in n for n in _name_vals
-                for kw in ("plate", "license", "번호판")
-            ) or "plate" in str(model_path).lower()
-            _mtype = "번호판 전용" if self._is_plate_model else "범용(COCO)"
-            print(f"[엔진] YOLO 모델 로드: {model_path} ({_mtype})")
-        else:
-            self.model = _load_best_model()
-            print("[엔진] 번호판 전용 .pt가 없어 기본 모델 사용. 인식이 안 되면 train.py로 학습 후 runs/.../best.pt를 두세요.")
-        # COCO 모델에서 차량 클래스 ID (car=2, motorcycle=3, bus=5, truck=7)
-        self._vehicle_class_ids = {2, 3, 5, 7}
+        model_path = Path(self.config.YOLO_MODEL)
+        if not model_path.exists():
+            model_path = Path(self.config.YOLO_FALLBACK)
+        if not model_path.exists():
+            model_path = Path("yolo11n.pt")  # ultralytics 기본
+        self.model = YOLO(str(model_path))
+        print(f"[엔진] 번호판 YOLO 모델 로드: {model_path}")
+
+        # ── 2-Stage: 차량 탐지 모델 (yolov8n.pt) ──
+        self.model_vehicle = YOLO('yolov8n.pt')
+        print("[엔진] 차량 YOLO 모델 로드: yolov8n.pt")
+
+        # ── Phase1 Fast loop 전용 번호판 모델 (별도 인스턴스 → 스레드 안전) ──
+        self.model_fast = YOLO(str(model_path))
+        print(f"[엔진] Phase1 Fast 번호판 모델 로드: {model_path}")
 
         self.ocr_engines = {}
         if HAS_PADDLEOCR:
-            paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False, use_gpu=False)
-            # Windows 한글 경로 우회: 영문 경로에 모델이 있으면 직접 지정
-            _paddle_model_root = PathConfig.paddle_model_dir()
-            if _paddle_model_root.exists():
-                _det = _paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer"
-                _rec = _paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer"
-                _cls = _paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer"
-                if _det.exists():
-                    paddle_kwargs["det_model_dir"] = str(_det)
-                if _rec.exists():
-                    paddle_kwargs["rec_model_dir"] = str(_rec)
-                if _cls.exists():
-                    paddle_kwargs["cls_model_dir"] = str(_cls)
             try:
-                self.ocr_engines["paddleocr"] = PaddleOCR(**paddle_kwargs)
-            except TypeError:
-                # show_log 파라미터 호환성 처리
-                paddle_kwargs.pop("show_log", None)
-                try:
-                    self.ocr_engines["paddleocr"] = PaddleOCR(**paddle_kwargs)
-                except Exception as e:
-                    print(f"[엔진] PaddleOCR 초기화 실패: {e}")
+                self.ocr_engines["paddleocr"] = PaddleOCR(
+                    lang="korean",
+                    use_doc_orientation_classify=False,
+                    use_doc_unwarping=False,
+                    use_textline_orientation=False,
+                    enable_mkldnn=True, cpu_threads=4,
+                )
             except Exception as e:
                 print(f"[엔진] PaddleOCR 초기화 실패: {e}")
-        # PaddleOCR 단독 (EasyOCR 제거 — lean pipeline, Jetson 메모리 절약)
-        # 한국 번호판 허용 문자 (validator/allowlist용)
-        self._kr_allowlist = (
-            "0123456789"
-            "가나다라마바사아자차카타파하"
-            "거너더러머버서어저처커터퍼허"
-            "고노도로모보소오조호"
-            "구누두루무부수우주"
-            "배육"
-            "서울부산대구인천광주대전울산세종"
-            "경기강원충북충남전북전남경북경남제주"
-            "전기외교"
-        )
-        # ── CRNN 학습 모델 로드 (별도 실행, 전처리 루프 밖) ──
-        self._crnn_model = None
-        _crnn_path = Path(__file__).resolve().parent / "plate_ocr_crnn.pth"
-        if HAS_TORCH and _crnn_path.exists():
+        if len(self.ocr_engines) == 0 and HAS_EASYOCR and easyocr is not None:
             try:
-                self._crnn_model = _CRNNModel(str(_crnn_path))
-                print(f"[엔진] CRNN 모델 로드: {_crnn_path}")
+                self.ocr_engines["easyocr"] = easyocr.Reader(["ko", "en"], gpu=True)
+                print("[엔진] PaddleOCR 미사용 → EasyOCR 폴백 사용")
             except Exception as e:
-                print(f"[엔진] CRNN 모델 로드 실패: {e}")
-
+                print(f"[엔진] EasyOCR 폴백 실패: {e}")
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
 
-        # ★ 한글 전용 분류기 (템플릿 매칭 방식)
-        self._hangul_clf = HangulClassifier()
+        # ── CRNN 한글 검증 모델 로드 ──
+        self._crnn_model = None
+        self._crnn_idx2char = {}
+        self._crnn_vocab = set()
+        self._load_crnn()
 
         self.recent_plates = defaultdict(lambda: {"count": 0, "last_seen": 0, "consecutive": 0})
         self.DUPLICATE_THRESHOLD = 3.0
+        # ★ 전역 숫자부 기반 번호판 히스토리 (크로스-트랙 안정화용)
+        # {digits: {text: (count, last_frame)}} — 프레임 기반 TTL 관리
+        self._global_plate_history = {}  # {digit_pattern: {full_text: (vote_count, last_frame_no)}}
+        self._gph_ttl_frames = 90        # 90프레임(≈3초@30fps) 미갱신 → 투표 만료
+        self._gph_max_digits = 50        # 최대 50개 숫자 패턴 보관
+        self._gph_cleanup_interval = 30  # 30프레임마다 정리 실행
+        self._gph_last_cleanup = 0       # 마지막 정리 시점
+        # ── 속도 최적화: 프레임 스킵 캐시 ──
+        self._frame_skip_interval = 3   # N프레임마다 1번 YOLO 실행 (5→3: 컬러 번호판 연속 감지 개선)
+        self._frame_counter = 0
+        self._cached_results = None     # 이전 프레임 결과 재사용 (None=첫 프레임은 반드시 처리)
+        # ── OCR 스킵 최적화 (FPS 개선) ──
+        # 트랙별: {track_key: {"text": str, "conf": float, "same_count": int,
+        #          "frame_since_ocr": int, "last_area": float, "bbox": list}}
+        self._ocr_track_cache = {}
         # 연속 N프레임 감지 시 표시 (이미지 슬라이드 영상은 PLATE_CONSECUTIVE_FRAMES=1 로 설정)
         _env = os.environ.get("PLATE_CONSECUTIVE_FRAMES")
         default_consecutive = int(_env) if (_env and _env.isdigit()) else getattr(
             self.config, "CONSECUTIVE_FRAMES_REQUIRED", 1
         )
         self.consecutive_required = default_consecutive
-        # ── PlateTracker: IoU 기반 차량 추적 + TTL 프레임 만료 ──
-        self._tracker = PlateTracker(
-            iou_threshold=self.config.TRACKER_IOU_THRESHOLD,
-            ttl_frames=self.config.TRACKER_TTL_FRAMES,
-        )
-        # ★ YOLO 결과 캐싱 (fast loop → worker 중복 추론 방지)
-        self._cached_yolo_frame_id = None  # 캐싱된 프레임의 id(frame.tobytes() 해시)
-        self._cached_yolo_boxes = []       # 캐싱된 raw boxes
-        self._cached_yolo_ts = 0.0         # 캐싱 시각
-        # 하위 호환: 기존 _pos_trackers 참조를 tracker.tracks로 연결
-        self._pos_trackers = self._tracker.tracks
-        self._POS_IOU_THRESHOLD = self.config.TRACKER_IOU_THRESHOLD
         # 멀티프레임: 최근 5프레임 크롭 저장 (번호판 너비 < 80px 시 사용)
         self._multiframe_buffer = deque(maxlen=PlateEngineConfig.MULTIFRAME_SIZE)
         # 리테스트/벤치마크용 통계
@@ -1425,13 +743,47 @@ class PlateEnginePro:
         }
 
     def reset_state(self):
-        """내부 캐시 초기화 — 이미지 단독 테스트 시 이전 결과 오염 방지"""
-        self.recent_plates.clear()
-        self._tracker.reset()
-        self._pos_trackers = self._tracker.tracks
+        """내부 캐시/상태 초기화 (테스트용 — 이미지 간 오염 방지)"""
+        self.recent_plates = defaultdict(lambda: {"count": 0, "last_seen": 0, "consecutive": 0})
+        self._frame_counter = 0
+        self._cached_results = None
+        self._ocr_track_cache = {}
         self._multiframe_buffer.clear()
-        self.stats["frames_processed"] = 0
-        self.stats["plates_shown"] = 0
+        self._global_plate_history = {}
+        self._gph_last_cleanup = 0
+
+    def _cleanup_global_plate_history(self):
+        """★ 전역 히스토리 TTL 정리 — 오래된 투표 제거 + maxlen 방어.
+        30프레임마다 실행, 90프레임 미갱신 엔트리 삭제."""
+        if self._frame_counter - self._gph_last_cleanup < self._gph_cleanup_interval:
+            return
+        self._gph_last_cleanup = self._frame_counter
+
+        # 1단계: TTL 만료 투표 제거
+        expired_digits = []
+        for digits, variants in self._global_plate_history.items():
+            expired_texts = [
+                t for t, (count, last_frame) in variants.items()
+                if self._frame_counter - last_frame > self._gph_ttl_frames
+            ]
+            for t in expired_texts:
+                del variants[t]
+            if not variants:
+                expired_digits.append(digits)
+        for d in expired_digits:
+            del self._global_plate_history[d]
+
+        # 2단계: maxlen 초과 시 가장 오래된 패턴 제거
+        if len(self._global_plate_history) > self._gph_max_digits:
+            by_recency = sorted(
+                self._global_plate_history.keys(),
+                key=lambda d: max(
+                    (lf for _, lf in self._global_plate_history[d].values()),
+                    default=0
+                )
+            )
+            while len(self._global_plate_history) > self._gph_max_digits:
+                del self._global_plate_history[by_recency.pop(0)]
 
     def _composite_multiframe(self, crops):
         """5프레임 크롭을 하나로 합성 (median → 노이즈 감소)."""
@@ -1442,1076 +794,1663 @@ class PlateEnginePro:
         stack = np.stack(resized, axis=0)
         return np.median(stack, axis=0).astype(np.uint8)
 
-    def detect_only(self, frame):
-        """YOLO 탐지만 실행 (OCR 없이 bbox만 반환). Phase 1 즉시 표시용.
-        ~50ms로 빠르게 bbox 위치를 반환하여 GUI에서 즉시 노란 박스를 그릴 수 있게 한다.
-        ★ 결과를 캐싱하여 process_frame에서 중복 YOLO 추론 방지."""
-        results = []
-        _fh, _fw = frame.shape[:2]
-        # ★ 해상도별 imgsz (영상/정적 공통 — 정확한 번호판 탐지 우선)
-        if _fw >= 3840:
-            _imgsz = 1920
-        elif _fw >= 1920:
-            _imgsz = 1280    # FHD: 번호판 정확 탐지 (960은 엠블럼 오탐지)
-        elif _fw >= 1280:
-            _imgsz = 960
+    def _make_track_key(self, bbox):
+        """bbox 중심점 + 크기 기반 트랙 키 생성.
+        30px 양자화 + bbox 높이 그룹으로 같은 위치의 다른 크기 차량 분리."""
+        cx = (bbox[0] + bbox[2]) // 2
+        cy = (bbox[1] + bbox[3]) // 2
+        bh = bbox[3] - bbox[1]
+        # 30px 양자화 (50→30: 충돌 확률 감소, 같은 차량 추적 유지)
+        qx = cx // 30
+        qy = cy // 30
+        # bbox 높이를 20px 단위로 양자화 → 같은 위치라도 크기 다른 번호판 분리
+        qh = bh // 20
+        return (qx, qy, qh)
+
+    def _bbox_area(self, bbox):
+        return (bbox[2] - bbox[0]) * (bbox[3] - bbox[1])
+
+    def _should_skip_ocr(self, track_key, bbox):
+        """OCR 스킵 여부 판단.
+        - 새 트랙 → False (무조건 OCR)
+        - 3프레임마다 강제 OCR (5→3: 차량 교체 대응 속도 향상)
+        - bbox 중심 이동 > 15px → False (같은 키라도 위치 변동 시 즉시 OCR)
+        - bbox 면적 20% 변화 → False (즉시 OCR)
+        - 같은 결과 5프레임 연속 → True (스킵)
+        """
+        if track_key not in self._ocr_track_cache:
+            return False  # 새 트랙
+
+        cache = self._ocr_track_cache[track_key]
+
+        # 3프레임마다 강제 OCR 재실행 (5→3: Ghost 잔상 지속 시간 단축)
+        if cache["frame_since_ocr"] >= 3:
+            return False
+
+        # ★ bbox 중심점 이동 거리 체크 — 같은 track_key라도 위치 변동 감지
+        last_bbox = cache.get("bbox")
+        if last_bbox:
+            last_cx = (last_bbox[0] + last_bbox[2]) / 2
+            last_cy = (last_bbox[1] + last_bbox[3]) / 2
+            cur_cx = (bbox[0] + bbox[2]) / 2
+            cur_cy = (bbox[1] + bbox[3]) / 2
+            displacement = ((cur_cx - last_cx)**2 + (cur_cy - last_cy)**2) ** 0.5
+            if displacement > 15:  # 15px 이상 이동 → 다른 차량 가능성
+                return False
+
+        # bbox 면적 20% 변화 시 즉시 OCR
+        cur_area = self._bbox_area(bbox)
+        last_area = cache.get("last_area", 0)
+        if last_area > 0:
+            area_change = abs(cur_area - last_area) / last_area
+            if area_change >= 0.2:
+                return False
+
+        # 같은 결과 5프레임 연속이면 스킵
+        if cache["same_count"] >= 5:
+            return True
+
+        return False
+
+    @staticmethod
+    def _extract_hangul_positions(text):
+        """텍스트에서 한글 문자와 위치(숫자 기준 상대 위치) 추출.
+        예: '70버6393' → digits='706393', kr_map={2: '버'}
+            '경기76바7789' → digits='767789', kr_map={-2: '경', -1: '기', 2: '바'}
+        위치 키: 뒤 4자리 숫자 기준 한글의 상대 위치."""
+        if not text:
+            return {}
+        # 숫자만 추출하여 뒤 4자리 위치 기준점 설정
+        digits_pos = [(i, c) for i, c in enumerate(text) if c.isdigit()]
+        kr_map = {}
+        for i, c in enumerate(text):
+            if '\uac00' <= c <= '\ud7a3':
+                # 한글 위치를 원본 인덱스로 저장
+                kr_map[i] = c
+        return kr_map
+
+    def _update_ocr_cache(self, track_key, bbox, text, conf, did_ocr):
+        """OCR 캐시 업데이트 + 한글 투표 카운터 누적 + 전체 텍스트 다수결 투표"""
+        cur_area = self._bbox_area(bbox)
+        if track_key not in self._ocr_track_cache:
+            self._ocr_track_cache[track_key] = {
+                "text": text, "conf": conf, "same_count": 1,
+                "frame_since_ocr": 0, "last_area": cur_area, "bbox": bbox,
+                "best_kr_text": "", "best_kr_conf": 0.0,
+                "kr_votes": {},  # {position: {char: count}}
+                "vote_count": 0,
+                "frames_absent": 0,  # ★ 고스트 방지: 미감지 프레임 카운터
+                "text_votes": {},    # ★ 전체 텍스트 다수결: {text: count}
+                "text_confs": {},    # ★ 텍스트별 conf 합산: {text: [conf1, ...]}
+            }
+            if text and re.search(r'[가-힣]', text):
+                self._ocr_track_cache[track_key]["best_kr_text"] = text
+                self._ocr_track_cache[track_key]["best_kr_conf"] = conf
+                # 첫 투표 등록
+                for pos, ch in self._extract_hangul_positions(text).items():
+                    self._ocr_track_cache[track_key]["kr_votes"][pos] = {ch: 1}
+                self._ocr_track_cache[track_key]["vote_count"] = 1
+            # 전체 텍스트 투표 등록
+            if text:
+                self._ocr_track_cache[track_key]["text_votes"][text] = 1
+                self._ocr_track_cache[track_key]["text_confs"][text] = [conf]
+            return
+
+        cache = self._ocr_track_cache[track_key]
+        if did_ocr:
+            if text == cache["text"]:
+                cache["same_count"] += 1
+            else:
+                cache["same_count"] = 1
+            cache["text"] = text
+            cache["conf"] = conf
+            cache["frame_since_ocr"] = 0
+            if text and re.search(r'[가-힣]', text):
+                if conf >= cache.get("best_kr_conf", 0):
+                    cache["best_kr_text"] = text
+                    cache["best_kr_conf"] = conf
+                # 한글 투표 누적
+                for pos, ch in self._extract_hangul_positions(text).items():
+                    if pos not in cache["kr_votes"]:
+                        cache["kr_votes"][pos] = {}
+                    cache["kr_votes"][pos][ch] = cache["kr_votes"][pos].get(ch, 0) + 1
+                cache["vote_count"] = cache.get("vote_count", 0) + 1
+            # ★ 전체 텍스트 다수결 누적
+            if text:
+                if "text_votes" not in cache:
+                    cache["text_votes"] = {}
+                    cache["text_confs"] = {}
+                cache["text_votes"][text] = cache["text_votes"].get(text, 0) + 1
+                if text not in cache.get("text_confs", {}):
+                    cache["text_confs"][text] = []
+                cache["text_confs"][text].append(conf)
+                # ★ 전역 히스토리 즉시 누적 (프레임 번호 기반 TTL 관리)
+                _digits = re.sub(r'[^0-9]', '', text)
+                if len(_digits) >= 4:
+                    if _digits not in self._global_plate_history:
+                        self._global_plate_history[_digits] = {}
+                    _prev = self._global_plate_history[_digits].get(text, (0, 0))
+                    self._global_plate_history[_digits][text] = (
+                        _prev[0] + 1, self._frame_counter  # (누적 투표수, 마지막 감지 프레임)
+                    )
         else:
-            _imgsz = 640
-        _det_conf = self.config.DETECT_CONF
-        # ★ 영상 모드: 오탐지 방지 → conf 높임 (엠블럼/헤드라이트 필터)
-        if self.consecutive_required > 1:
-            _det_conf = max(_det_conf + 0.10, 0.35)  # 0.25→0.35 (정밀 탐지)
-        _raw_boxes_for_cache = []  # 캐싱용 raw boxes
-        try:
-            detections = self.model(frame, conf=_det_conf, imgsz=_imgsz, verbose=False, max_det=10)
-            for det in detections[0].boxes:
-                bbox = list(map(int, det.xyxy[0].tolist()))
-                conf = float(det.conf[0])
-                _raw_boxes_for_cache.append((bbox, conf))
-                # ROI 필터 (영상 모드)
-                if self.consecutive_required > 1:
-                    cx = (bbox[0] + bbox[2]) / 2
-                    cy = (bbox[1] + bbox[3]) / 2
-                    if not (self.config.ROI_X1 <= cx <= self.config.ROI_X2
-                            and self.config.ROI_Y1 <= cy <= self.config.ROI_Y2):
-                        continue
-                results.append({
-                    "bbox": bbox,
-                    "confidence": conf,
-                    "plate": "",
-                })
-        except Exception:
-            pass
-        # ★ YOLO 결과 캐싱 (프레임 shape + 좌상단 픽셀로 간이 식별)
-        try:
-            _frame_sig = (_fh, _fw, int(frame[0, 0, 0]), int(frame[_fh//2, _fw//2, 0]))
-            self._cached_yolo_frame_id = _frame_sig
-            self._cached_yolo_boxes = _raw_boxes_for_cache
-            self._cached_yolo_ts = time.time()
-        except Exception:
-            pass
-        return results
+            cache["frame_since_ocr"] += 1
+        cache["last_area"] = cur_area
+        cache["bbox"] = bbox
 
-    def detect_and_quick_ocr(self, frame):
-        """YOLO 탐지 + PaddleOCR 1회 = 즉석 번호 인식 (~50-100ms 목표).
-        ★ 0.1초 인식: 300px 축소 + OCR 1회만 + CLAHE 재시도 제거."""
-        # 1) YOLO 탐지
-        detections = self.detect_only(frame)
-        if not detections:
-            return []
+    def _recover_hangul_from_cache(self, track_key, text, conf):
+        """한글 캐시 복원 + 멀티프레임 한글 투표 적용.
+        1) 한글 없는 결과 → 캐시의 한글 포함 결과로 복원
+        2) 한글 있는 결과 → 5프레임 이상 누적 시 다수결로 한글 교체"""
+        cache = self._ocr_track_cache.get(track_key)
+        if not cache:
+            return text, conf
 
-        _paddle = self.ocr_engines.get("paddleocr")
-        if _paddle is None:
-            return detections
+        has_kr = bool(text and re.search(r'[가-힣]', text))
 
-        results = []
-        for det in detections:
-            bbox = det["bbox"]
-            conf = det["confidence"]
-            x1, y1, x2, y2 = bbox
+        # 한글 없음 → 캐시 복원 (기존 로직)
+        if not has_kr:
+            kr_text = cache.get("best_kr_text", "")
+            if kr_text:
+                # 복원된 텍스트에도 투표 적용
+                text, conf = kr_text, cache.get("best_kr_conf", conf)
+                has_kr = True
+            else:
+                return text, conf
 
-            # 2) ROI 크롭 + 마진 (OCR 정확도를 위해 적절한 마진 유지)
-            fh, fw = frame.shape[:2]
-            det_w, det_h = x2 - x1, y2 - y1
-            margin_x = int(det_w * 0.30)
-            margin_y = int(det_h * 0.35)
-            rx1 = max(0, x1 - margin_x)
-            ry1 = max(0, y1 - margin_y)
-            rx2 = min(fw, x2 + margin_x)
-            ry2 = min(fh, y2 + margin_y)
-            roi = frame[ry1:ry2, rx1:rx2]
-            if roi.size == 0:
-                results.append(det)
-                continue
+        # 한글 투표 적용: 5프레임 이상 누적 시 다수결로 한글 교체
+        vote_count = cache.get("vote_count", 0)
+        kr_votes = cache.get("kr_votes", {})
+        if vote_count < 5 or not kr_votes:
+            return text, conf
 
-            # 3) 400px 업스케일 (OCR 정확도 + 속도 균형)
-            rh, rw = roi.shape[:2]
-            if rw < 400:
-                scale = 400.0 / rw
-                roi_for_ocr = cv2.resize(roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_LINEAR)
+        # 현재 텍스트의 한글 위치와 투표 결과 매칭
+        result = list(text)
+        changed = False
+        for pos, ch in self._extract_hangul_positions(text).items():
+            if pos in kr_votes:
+                votes = kr_votes[pos]
+                winner = max(votes, key=votes.get)
+                if winner != ch and votes[winner] >= 3:
+                    result[pos] = winner
+                    changed = True
+
+        if changed:
+            return "".join(result), conf
+        return text, conf
+
+    def _stabilize_track_text(self, track_key, text, conf):
+        """★ 트래킹 기반 번호판 안정화: 전역 히스토리 다수결.
+        조건: 승자가 최소 3회 이상 + 현재 텍스트보다 2회 이상 많을 때만 교체.
+        조기 교체 방지 — 충분한 데이터 누적 후에만 다수결 적용."""
+        if not text:
+            return text, conf
+
+        digits = re.sub(r'[^0-9]', '', text)
+        if len(digits) < 4:
+            return text, conf
+
+        # ★ 전역 히스토리 참조 (최소 3표 + 2표차 + TTL 유효한 투표만)
+        history = self._global_plate_history.get(digits, {})
+        if history and len(history) >= 2:
+            # TTL 유효한 투표만 필터링
+            alive = {t: cnt for t, (cnt, lf) in history.items()
+                     if self._frame_counter - lf <= self._gph_ttl_frames}
+            if len(alive) >= 2:
+                winner = max(alive, key=alive.get)
+                winner_count = alive[winner]
+                current_count = alive.get(text, 0)
+                if (winner != text
+                        and winner_count >= 3
+                        and winner_count >= current_count + 2):
+                    print(f"[STABILIZE] 전역 다수결: {text}({current_count}회) → "
+                          f"{winner}({winner_count}회)", flush=True)
+                    return winner, conf
+
+        return text, conf
+
+    def _get_cached_ocr(self, track_key):
+        """캐시된 OCR 결과 반환"""
+        cache = self._ocr_track_cache.get(track_key)
+        if cache:
+            return cache["text"], cache["conf"]
+        return "", 0.0
+
+    def _ocr_plate_roi(self, roi, use_multiframe=False):
+        """번호판 ROI에서 OCR 수행 → (best_text, best_conf) 반환"""
+        roi_h, roi_w = roi.shape[:2]
+        roi_for_ocr = roi
+
+        if use_multiframe and roi_w < PlateEngineConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD:
+            self._multiframe_buffer.append(roi.copy())
+            if len(self._multiframe_buffer) >= PlateEngineConfig.MULTIFRAME_SIZE:
+                crops = list(self._multiframe_buffer)
+                roi_for_ocr = self._composite_multiframe(crops)
+                self._multiframe_buffer.clear()
+                self.stats["multiframe_used"] = self.stats.get("multiframe_used", 0) + 1
+            else:
+                return "", 0.0  # 버퍼 채울 때까지 스킵
+        else:
+            if use_multiframe:
+                self.stats["singleframe_used"] = self.stats.get("singleframe_used", 0) + 1
+            target_w = 300  # 500→300 축소: PaddleOCR 입력 크기 감소
+            if roi_w < target_w:
+                scale = target_w / roi_w
+            else:
+                scale = 1.0
+            if scale > 1.0:
+                roi_for_ocr = cv2.resize(
+                    roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
+                )
+                kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+                roi_for_ocr = cv2.filter2D(roi_for_ocr, -1, kernel)
             else:
                 roi_for_ocr = roi
 
-            # 4) PaddleOCR 1회만 (CLAHE 재시도 제거 — 속도 우선)
+        # ── 구형 두 줄 번호판 감지 ──
+        extra_crops = []
+        roi_nosharp = None  # 샤프닝 없는 업스케일 (2줄 번호판용)
+        if roi_h > roi_w * 0.45:
+            top_crop = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.5), :]
+            bot_crop = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.4):, :]
+            extra_crops = [("top", top_crop), ("bot", bot_crop)]
+            # 샤프닝이 2줄 상단행을 뭉개는 경우 대비: 샤프닝 없는 3x 업스케일
+            if roi_w < 150:
+                roi_nosharp = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
+
+        from collections import Counter
+        all_candidates = []
+
+        early_exit = False  # original 고신뢰 시 나머지 전처리 스킵
+        _base_methods = {"original", "clahe", "sharpen"}  # 기본 전처리 (흰 번호판용)
+        _skip_color = False  # 기본 3종에서 충분한 후보 → 컬러 전처리 불필요
+        _ocr_start_time = time.time()  # ★ 시간 기반 강제 종료용
+        _ocr_time_limit = 0.8  # ★ 최대 800ms (영상 모드 속도 보장)
+        _method_count = 0  # ★ 처리한 전처리 수
+        for method in self.config.PREPROCESS_METHODS:
+            # ★ 시간 기반 강제 종료: 800ms 초과 시 즉시 중단
+            if time.time() - _ocr_start_time > _ocr_time_limit and _method_count >= 2:
+                print(f"[OCR-TIMEOUT] {_method_count}종 처리 후 {(time.time()-_ocr_start_time)*1000:.0f}ms → 시간 초과 종료", flush=True)
+                break
+            # 기본 전처리에서 충분한 후보가 나오면 컬러 전처리 스킵
+            if early_exit and method not in _base_methods:
+                break
+            # 기본 3종 완료 후 후보가 1개 이상이면 컬러 전처리 건너뛰기
+            if method not in _base_methods and not _skip_color:
+                if len(all_candidates) >= 1:
+                    _skip_color = True
+            if _skip_color and method not in _base_methods:
+                continue
+            _method_count += 1
             try:
-                text, ocr_conf = self._run_ocr("paddleocr", _paddle, roi_for_ocr)
-                if text and ocr_conf >= 0.20:
+                if method == "original":
+                    processed = roi_for_ocr.copy()
+                else:
+                    proc_func = getattr(self.preprocessor, method, None)
+                    if proc_func is None:
+                        continue
+                    processed = proc_func(roi_for_ocr.copy())
+
+                for engine_name, engine in self.ocr_engines.items():
+                    text, ocr_conf = self._run_ocr(engine_name, engine, processed)
+                    print(f"[OCR-RAW] text={text!r} conf={ocr_conf:.2f}", flush=True)
+                    if not text or ocr_conf < 0.10:
+                        continue
                     cleaned = self.validator.clean_ocr_text(text)
-                    if self.validator.is_valid_length(cleaned):
-                        is_valid, final_text = self.validator.validate(cleaned)
-                        if is_valid:
-                            results.append({
-                                "bbox": bbox,
-                                "confidence": conf,
-                                "text": final_text,
-                                "plate": final_text,
-                                "ocr_confidence": ocr_conf,
-                                "is_valid_plate": True,
-                                "phase": 1,
-                            })
-                            continue
+                    if not self.validator.is_valid_length(cleaned):
+                        # ★ 숫자 4자리만 읽힌 경우: CRNN으로 한글+앞번호 복원 시도
+                        # "7117" → CRNN "36다7117" → 복원 가능
+                        if (re.fullmatch(r'\d{4}', cleaned)
+                                and ocr_conf >= 0.50):
+                            _digit_recovered = False
+                            # 방법 1: CRNN 직접 복원
+                            if hasattr(self, '_crnn_model') and self._crnn_model is not None:
+                                _crnn_full = self._crnn_read_plate(roi)
+                                if (_crnn_full
+                                        and _crnn_full.endswith(cleaned)
+                                        and len(_crnn_full) > len(cleaned)
+                                        and self.validator.is_valid_length(_crnn_full)):
+                                    is_valid_c, final_c = self.validator.validate(_crnn_full)
+                                    if is_valid_c:
+                                        print(f"[DIGIT-CRNN] 숫자만 → CRNN 복원: {cleaned} → {final_c}", flush=True)
+                                        all_candidates.append((final_c, ocr_conf * 0.85))
+                                        _digit_recovered = True
+                            # 방법 2: 히스토리/캐시 기반 복원 (CRNN 실패 시)
+                            if not _digit_recovered:
+                                for _known in list(self.recent_plates.keys()):
+                                    if _known.endswith(cleaned) and len(_known) > len(cleaned):
+                                        print(f"[DIGIT-HIST] 숫자만 → 히스토리 복원: {cleaned} → {_known}", flush=True)
+                                        all_candidates.append((_known, ocr_conf * 0.75))
+                                        _digit_recovered = True
+                                        break
+                            if not _digit_recovered:
+                                for _tk, _tc in self._ocr_track_cache.items():
+                                    _ct = _tc.get("text", "")
+                                    if _ct.endswith(cleaned) and len(_ct) > len(cleaned):
+                                        print(f"[DIGIT-CACHE] 숫자만 → 캐시 복원: {cleaned} → {_ct}", flush=True)
+                                        all_candidates.append((_ct, ocr_conf * 0.75))
+                                        _digit_recovered = True
+                                        break
+                            if _digit_recovered:
+                                continue
+                        print(f"[OCR-FILTERED-LEN] cleaned={cleaned!r}", flush=True)
+                        self.stats["filtered_by_length"] += 1
+                        continue
+                    print(f"[OCR-DBG] raw={text} cleaned={cleaned} conf={ocr_conf:.2f}", flush=True)
+                    is_valid, final_text = self.validator.validate(cleaned)
+                    if not is_valid:
+                        self.stats["filtered_by_pattern"] += 1
+                        continue
+                    all_candidates.append((final_text, ocr_conf))
+                    # ★ 영상 모드 고속화: 유효 번호판 + conf ≥ 0.6 → 즉시 스킵
+                    # (original뿐 아니라 모든 전처리에서 고신뢰 시 종료)
+                    if ocr_conf >= 0.6:
+                        early_exit = True
+                    # ★ 후보 3개 이상 모이면 추가 전처리 불필요
+                    if len(all_candidates) >= 3:
+                        early_exit = True
             except Exception:
-                pass
+                continue
 
-            # OCR 실패 → bbox만 반환
-            results.append(det)
+        if extra_crops:
+            top_texts, bot_texts = [], []
+            top_confs, bot_confs = [], []
+            for crop_name, crop_img in extra_crops:
+                for eng_name, eng in self.ocr_engines.items():
+                    t, c = self._run_ocr(eng_name, eng, crop_img)
+                    if t and c > 0.2:
+                        cleaned_t = self.validator.clean_ocr_text(t)
+                        if crop_name == "top":
+                            top_texts.append(cleaned_t); top_confs.append(c)
+                        else:
+                            bot_texts.append(cleaned_t); bot_confs.append(c)
+            for tt in (top_texts or [""]):
+                for bt in (bot_texts or [""]):
+                    combined = (tt + bt).strip()
+                    norm = self.validator._normalize_for_validation(combined)
+                    if self.validator.is_valid_length(norm):
+                        is_v, final = self.validator.validate(norm)
+                        if is_v:
+                            avg_c = float(np.mean((top_confs or [0.3]) + (bot_confs or [0.3])))
+                            weight = 6 if re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', final) else 2
+                            for _ in range(weight):
+                                all_candidates.append((final, avg_c))
 
-        return results
+        # ── 2줄 번호판 보완: 샤프닝 없는 업스케일로 engine.predict 시도 ──
+        if roi_nosharp is not None and not all_candidates:
+            for eng_name, eng in self.ocr_engines.items():
+                try:
+                    for res in eng.predict(roi_nosharp):
+                        texts = res.get('rec_texts', [])
+                        scores = res.get('rec_scores', [])
+                        if texts:
+                            text = "".join(texts)
+                            conf = sum(scores) / len(scores) if scores else 0.0
+                            cleaned = self.validator.clean_ocr_text(text)
+                            if self.validator.is_valid_length(cleaned):
+                                is_v, final = self.validator.validate(cleaned)
+                                if is_v:
+                                    all_candidates.append((final, conf))
+                except Exception:
+                    pass
+
+        best_text = ""
+        best_conf = 0.0
+        if all_candidates:
+            # ★ conf 가중합 투표: 고신뢰 결과에 높은 가중치 (한글 혼동 방지)
+            # 소↔조, 버↔조, 무↔오↔보 등 유효 한글 간 혼동 시 conf가 높은 쪽이 승리
+            weighted_scores = {}
+            for t, c in all_candidates:
+                weighted_scores[t] = weighted_scores.get(t, 0.0) + max(c, 0.1)
+            best_text = max(weighted_scores, key=weighted_scores.get)
+            confs = [c for t, c in all_candidates if t == best_text]
+            best_conf = sum(confs) / len(confs)
+
+        return best_text, best_conf
+
+    @staticmethod
+    def _extract_last4(plate_text):
+        """번호판 텍스트에서 뒤 4자리 숫자 추출 (중복 제거용)"""
+        digits = re.findall(r'\d', plate_text)
+        return ''.join(digits[-4:]) if len(digits) >= 4 else ''
+
+    # ★ 영상 모드에서 유효한 완전한 번호판 형식만 허용 (부분 인식 제거)
+    # config.py KR_PATTERNS 14개와 완전 동기화 + 영업용 노란판 추가
+    _STRICT_PLATE_PATTERNS = [
+        re.compile(r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$'),       # 구형: 서울12가3456
+        re.compile(r'^[0-9]{2,3}[가-힣][0-9]{4}$'),                # 신형: 123가4567, 12가3456
+        re.compile(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$'),      # 구형지역: 경기12가3456
+        re.compile(r'^[가-힣]{2}[0-9]{2}[바사아자배비하][0-9]{4}$'),# 영업/버스: 서울12바3456
+        re.compile(r'^[가-힣]{2,3}[0-9]{4}[가-힣]{1}$'),           # 영업용 변형: 서울1234가
+        re.compile(r'^외교[0-9]{3}-?[0-9]{3}$'),                    # 외교: 외교123-456
+        re.compile(r'^[가-힣]{2}[0-9]{3}[가-힣]$'),                # 이륜차: 서울123가
+        re.compile(r'^[가-힣]{2}[0-9]{1,2}[가-힣]{1,2}[0-9]{4}$'),# 혼합형: 서울1가나3456
+        re.compile(r'^전기[0-9]{4}$'),                              # 전기차 구형: 전기1234
+        re.compile(r'^[가-힣]{2}전기[0-9]{4}$'),                    # 지역+전기차: 서울전기1234
+        re.compile(r'^[0-9]{2}[가-힣][0-9]{4}$'),                  # 신형 전기차: 12가3456
+        re.compile(r'^[가-힣][0-9]{2}[가-힣][0-9]{4}$'),           # 영업용 1줄: 충86다6118
+        re.compile(r'^[가-힣][0-9]{4}$'),                           # 2줄판 하단: 바6286
+        re.compile(r'^[가-힣]{2}[0-9]{4}$'),                        # 공용차/관용차: 이나8060
+        re.compile(r'^[0-9]{3}[가-힣][0-9]{4}$'),                  # 영업용 노란판: 586다6118
+    ]
+
+    @classmethod
+    def _is_strict_valid_plate(cls, text):
+        """★ 엄격한 번호판 형식 검증: 완전한 형식만 허용.
+        config.py KR_PATTERNS 14개 + 영업용 노란판(586다6118) 포함.
+        바6282(부분인식), 250보5351(비표준) 등 제거."""
+        if not text:
+            return False
+        # 최소 5자 이상 (전기1234=6자, 바6286=5자 등 특수 번호판 허용)
+        if len(text) < 5:
+            return False
+        # 한글이 최소 1자 포함
+        if not re.search(r'[가-힣]', text):
+            return False
+        # 엄격 패턴 매칭
+        for pat in cls._STRICT_PLATE_PATTERNS:
+            if pat.match(text):
+                return True
+        return False
+
+    def _deduplicate_results(self, results):
+        """같은 프레임 내 뒤 4자리 숫자 동일 번호판 → conf 높은 것만 유지"""
+        # ★ conf 필터 (0.55로 완화 — 경기91바6286 등 저conf 정상 결과 보존)
+        results = [r for r in results if r.get("confidence", 0) >= 0.55]
+        # ★ 글로벌 2LINE 복원: 부분 인식을 recent_plates에서 전체 형식으로 복원
+        # 형식 필터 전에 실행해야 부분 인식이 제거되지 않음
+        # 대상: "바7789"(한글+4숫자), "70바9203"(숫자+한글+4숫자, 지역명 누락)
+        for i, r in enumerate(results):
+            plate = r.get("plate", "")
+            # 부분 인식 패턴 확장: 한글+4숫자 또는 숫자2~3+한글+4숫자 (지역명 없는 것)
+            # ★ 강화: XX[가-힣]XXXX (7자리)가 recent_plates에서 Y+XX[가-힣]XXXX (8자리)와 매칭 시 복원
+            _is_partial = (re.match(r'^[가-힣]\d{4}$', plate)
+                          or (re.match(r'^\d{2,3}[가-힣]\d{4}$', plate)
+                              and not re.match(r'^[가-힣]', plate))
+                          or (re.match(r'^\d{2}[가-힣]\d{4}$', plate)
+                              and any(kp.endswith(plate) and len(kp) > len(plate)
+                                      for kp in self.recent_plates)))
+            if _is_partial:
+                # recent_plates에서 이 부분 인식으로 끝나는 더 긴 전체 형식 찾기
+                _restored = False
+                for known_plate in self.recent_plates:
+                    if (known_plate.endswith(plate) and len(known_plate) > len(plate)
+                            and self._is_strict_valid_plate(known_plate)):
+                        print(f"[2LINE-GLOBAL] 부분 인식 복원: {plate} → {known_plate}", flush=True)
+                        results[i] = dict(r)
+                        results[i]["plate"] = known_plate
+                        _restored = True
+                        break
+                if not _restored:
+                    # _ocr_track_cache에서도 검색
+                    for _tk, _tc in self._ocr_track_cache.items():
+                        _cached_text = _tc.get("text", "")
+                        if (_cached_text.endswith(plate) and len(_cached_text) > len(plate)
+                                and self._is_strict_valid_plate(_cached_text)):
+                            print(f"[2LINE-GLOBAL] 캐시 기반 복원: {plate} → {_cached_text}", flush=True)
+                            results[i] = dict(r)
+                            results[i]["plate"] = _cached_text
+                            break
+        # ★ 엄격한 형식 필터: 부분 인식 / 비표준 형식 제거
+        _before = len(results)
+        results = [r for r in results if self._is_strict_valid_plate(r.get("plate", ""))]
+        if _before > 0 and len(results) < _before:
+            print(f"[STRICT-FMT] {_before}개 → {len(results)}개 (형식 불일치 {_before - len(results)}개 제거)",
+                  flush=True)
+        by_last4 = {}
+        for r in results:
+            last4 = self._extract_last4(r["plate"])
+            if not last4:
+                by_last4[id(r)] = r  # 4자리 추출 불가 시 그대로 유지
+                continue
+            if last4 not in by_last4 or r["confidence"] > by_last4[last4]["confidence"]:
+                by_last4[last4] = r
+        # ★ 크로스-트랙 다수결: 숫자부 동일한 결과를 전역 히스토리와 대조
+        final = []
+        for r in by_last4.values():
+            plate = r["plate"]
+            stabilized = self._cross_track_stabilize(plate, r["confidence"])
+            if stabilized != plate:
+                print(f"[CROSS-TRACK] {plate} → {stabilized} (전역 다수결)", flush=True)
+                r = dict(r)
+                r["plate"] = stabilized
+            final.append(r)
+        return final
+
+    def _cross_track_stabilize(self, text, conf):
+        """★ 전역 크로스-트랙 안정화: 전역 히스토리에서 같은 숫자부를 가진
+        텍스트 중 최다 득표를 반환 (히스토리 누적은 _update_ocr_cache에서 수행).
+        조건: 승자 3회 이상 + 현재보다 2회 이상 많을 때만 교체."""
+        digits = re.sub(r'[^0-9]', '', text)
+        if len(digits) < 4:
+            return text
+
+        history = self._global_plate_history.get(digits, {})
+        if not history or len(history) < 2:
+            return text
+
+        # TTL 유효 투표만 필터링
+        alive = {t: cnt for t, (cnt, lf) in history.items()
+                 if self._frame_counter - lf <= self._gph_ttl_frames}
+        if len(alive) < 2:
+            return text
+
+        winner = max(alive, key=alive.get)
+        winner_count = alive[winner]
+        current_count = alive.get(text, 0)
+
+        if (winner != text
+                and winner_count >= 3
+                and winner_count >= current_count + 2):
+            return winner
+        return text
+
+    def _unify_plate_variants(self, results):
+        """★ 최종 변이 통합: 같은 숫자부를 가진 번호판 변이 → 전역 최다 득표로 통일.
+        이미 출력된 결과도 소급 교체하여 동일 차량이 여러 번호판으로 나오는 것 방지.
+        예: 35오5546 → 35무5546 (전역 히스토리에서 35무5546이 최다)"""
+        unified = []
+        for r in results:
+            plate = r.get("plate", "")
+            digits = re.sub(r'[^0-9]', '', plate)
+            if len(digits) < 4 or digits not in self._global_plate_history:
+                unified.append(r)
+                continue
+            history = self._global_plate_history[digits]
+            alive = {t: cnt for t, (cnt, lf) in history.items()
+                     if self._frame_counter - lf <= self._gph_ttl_frames}
+            if len(alive) < 2:
+                unified.append(r)
+                continue
+            winner = max(alive, key=alive.get)
+            if winner != plate and alive[winner] > alive.get(plate, 0):
+                print(f"[UNIFY] {plate} → {winner} "
+                      f"(히스토리: {plate}={alive.get(plate,0)}, {winner}={alive[winner]})",
+                      flush=True)
+                r = dict(r)
+                r["plate"] = winner
+            unified.append(r)
+        return unified
+
+    def detect_only(self, frame) -> list[dict]:
+        """번호판 위치 탐지 전용 (model_fast — best.pt 별도 인스턴스).
+        Phase2의 self.model과 별개 인스턴스 → 동시 호출 스레드 안전.
+        번호판 bbox 반환 → Phase2 결과와 IoU 매칭으로 현재 위치 보정."""
+        try:
+            results = []
+            ch, cw = frame.shape[:2]
+            # 별도 인스턴스(model_fast)로 탐지 → Phase2(self.model)와 충돌 없음
+            p_res = self.model_fast(frame, conf=self.config.DETECT_CONF,
+                                    imgsz=640, verbose=False)
+            for pbox in p_res[0].boxes:
+                x1, y1, x2, y2 = map(int, pbox.xyxy[0].tolist())
+                x1 = max(0, x1); y1 = max(0, y1)
+                x2 = min(cw, x2); y2 = min(ch, y2)
+                if x2 - x1 < 20 or y2 - y1 < 10:
+                    continue
+                results.append({
+                    "bbox": [x1, y1, x2, y2],
+                    "confidence": float(pbox.conf[0]),
+                })
+            return results
+        except Exception:
+            return []
 
     def process_frame(self, frame, camera_id="CAM01", use_multiframe=False, full_frame=None):
         """
-        [평가기준] 교통안전 AI 솔루션 - 번호판 인식 파이프라인
-          · 입력화일 차량 detect 표시(10점): YOLO로 번호판 영역 탐지 → bbox 반환
-          · ROI/CROP/CLAHE/Homography(20점): ROI 추출 → CROP → 전처리(CLAHE 등), 기울기보정(deskew)
-          · 차량번호 인식 표시(20점): OCR 앙상블 → 검증 → plate/confidence 반환
-        frame: YOLO 추론용 (640px 등 축소 가능)
-        full_frame: OCR 크롭용 원본 고해상도 프레임 (None이면 frame에서 크롭)
+        2-Stage 파이프라인:
+          Stage1: frame → YOLO(yolov8n.pt, 차량 탐지) → 차량 크롭
+          Stage2: 차량 크롭 → YOLO(best.pt, 번호판 탐지) → 번호판 크롭 → OCR
+          폴백: 차량 0대 → 기존 1-Stage (frame → 번호판 직접 탐지)
         """
-        results = []
         self.stats["frames_processed"] += 1
-        self._tracker.begin_frame()
-        # ★ 해상도에 따라 imgsz 동적 조정 (고해상도 영상에서 소형 번호판 탐지 향상)
-        _fh, _fw = frame.shape[:2]
-        if _fw >= 3840:      # 4K
-            _imgsz = 1920
-        elif _fw >= 1920:    # FHD
-            _imgsz = 1280
-        elif _fw >= 1280:    # HD
-            _imgsz = 960
-        else:
-            _imgsz = 640
-        # ★ 영상 모드: 오탐지(엠블럼/헤드라이트) 방지 → conf 높임
-        _det_conf = self.config.DETECT_CONF
-        if self.consecutive_required > 1:
-            _det_conf = max(_det_conf + 0.10, 0.35)  # 0.25→0.35 (정밀 탐지)
 
-        # ★ YOLO 캐시 확인: detect_and_quick_ocr에서 이미 같은 프레임 추론했으면 재사용
-        _used_cache = False
-        _raw_boxes = []
-        try:
-            _frame_sig = (_fh, _fw, int(frame[0, 0, 0]), int(frame[_fh//2, _fw//2, 0]))
-            if (self._cached_yolo_frame_id == _frame_sig
-                    and self._cached_yolo_boxes
-                    and (time.time() - self._cached_yolo_ts) < 1.0):
-                # 캐시 히트 → YOLO 재추론 스킵
-                for _cb, _cc in self._cached_yolo_boxes:
-                    if self.consecutive_required > 1:
-                        cx = (_cb[0] + _cb[2]) / 2
-                        cy = (_cb[1] + _cb[3]) / 2
-                        if not (self.config.ROI_X1 <= cx <= self.config.ROI_X2 and self.config.ROI_Y1 <= cy <= self.config.ROI_Y2):
-                            continue
-                    _raw_boxes.append((_cb, _cc, None))
-                _used_cache = True
-        except Exception:
-            pass
+        # ── 전역 히스토리 정리 (30프레임마다) ──
+        self._cleanup_global_plate_history()
+        # ── 최적화③: 프레임 스킵 (N프레임마다 1번 YOLO, 중간은 캐시 재사용) ──
+        self._frame_counter += 1
+        if self._frame_counter % self._frame_skip_interval != 1 and self._cached_results is not None:
+            # ★ 스킵 프레임에서도 트랙 노화 처리 — Ghost 방지
+            cached_keys = set()
+            for r in self._cached_results:
+                if "bbox" in r:
+                    cached_keys.add(self._make_track_key(r["bbox"]))
+            for _tk in list(self._ocr_track_cache.keys()):
+                if _tk not in cached_keys:
+                    self._ocr_track_cache[_tk]["frames_absent"] = (
+                        self._ocr_track_cache[_tk].get("frames_absent", 0) + 1
+                    )
+                    if self._ocr_track_cache[_tk]["frames_absent"] >= 3:
+                        del self._ocr_track_cache[_tk]
+            return list(self._cached_results)
 
-        if not _used_cache:
-            detections = self.model(frame, conf=_det_conf, imgsz=_imgsz, verbose=False, max_det=10)
-            # ★ 겹치는 bbox 제거 (수동 NMS): IoU > 0.5인 겹침에서 낮은 conf 제거
-            # YOLO NMS-free 모델이 중복 bbox를 출력하는 경우 대비
-            for det in detections[0].boxes:
-                _rb = list(map(int, det.xyxy[0].tolist()))
-                _rc = float(det.conf[0])
-                # ★ 영상 모드에서만 ROI 필터 적용 (정적 이미지는 해상도 다름)
-                if self.consecutive_required > 1:
-                    cx = (_rb[0] + _rb[2]) / 2
-                    cy = (_rb[1] + _rb[3]) / 2
-                    if not (self.config.ROI_X1 <= cx <= self.config.ROI_X2 and self.config.ROI_Y1 <= cy <= self.config.ROI_Y2):
-                        continue
-                _raw_boxes.append((_rb, _rc, det))
+        results = []
+        # === PRIMARY 생략: 2-Stage 파이프라인만 사용 (YOLO 호출 1회 감소 → FPS 개선) ===
 
         crop_src = full_frame if full_frame is not None else frame
         ch_full, cw_full = crop_src.shape[:2]
         ch_det, cw_det = frame.shape[:2]
         sx = cw_full / cw_det
         sy = ch_full / ch_det
+        frame_area = cw_det * ch_det
 
-        # ★ SAHI (Sliced Aided Hyper Inference): 전체 프레임 탐지 실패 시 타일 분할 탐지
-        # 조건: 0개 탐지 + 정적 이미지만 (영상 모드는 SAHI=6~11초로 너무 느림)
-        _use_sahi = (len(_raw_boxes) == 0 and _fw >= 640 and _fh >= 480
-                     and not (self.consecutive_required > 1))
-        if _use_sahi:
-            _sahi_conf = max(self.config.DETECT_CONF - 0.05, 0.10)
-            # 해상도에 따라 타일 크기 조정
-            if _fw >= 1920:
-                _slice_w, _slice_h = 800, 600  # FHD+: 큰 타일
-            else:
-                _slice_w, _slice_h = 640, 480  # HD: 표준 타일
-            _overlap = 0.25
-            _stride_x = int(_slice_w * (1 - _overlap))
-            _stride_y = int(_slice_h * (1 - _overlap))
-            for _sy_off in range(0, max(1, _fh - _slice_h // 2), _stride_y):
-                for _sx_off in range(0, max(1, _fw - _slice_w // 2), _stride_x):
-                    _sx2_t = min(_sx_off + _slice_w, _fw)
-                    _sy2_t = min(_sy_off + _slice_h, _fh)
-                    _sx1_t = max(0, _sx2_t - _slice_w)
-                    _sy1_t = max(0, _sy2_t - _slice_h)
-                    _tile = frame[_sy1_t:_sy2_t, _sx1_t:_sx2_t]
-                    if _tile.shape[0] < 200 or _tile.shape[1] < 200:
-                        continue
-                    try:
-                        _tile_dets = self.model(_tile, conf=_sahi_conf, imgsz=640, verbose=False, max_det=5)
-                        for _td in _tile_dets[0].boxes:
-                            _tb = list(map(int, _td.xyxy[0].tolist()))
-                            _tc = float(_td.conf[0])
-                            # 타일 좌표 → 전체 프레임 좌표로 변환
-                            _tb_global = [_tb[0] + _sx1_t, _tb[1] + _sy1_t, _tb[2] + _sx1_t, _tb[3] + _sy1_t]
-                            # ROI 필터 (영상 모드)
-                            if self.consecutive_required > 1:
-                                _tcx = (_tb_global[0] + _tb_global[2]) / 2
-                                _tcy = (_tb_global[1] + _tb_global[3]) / 2
-                                if not (self.config.ROI_X1 <= _tcx <= self.config.ROI_X2 and self.config.ROI_Y1 <= _tcy <= self.config.ROI_Y2):
-                                    continue
-                            _raw_boxes.append((_tb_global, _tc, _td))
-                    except Exception:
-                        pass
-        _raw_boxes.sort(key=lambda x: (x[0][2]-x[0][0])*(x[0][3]-x[0][1]), reverse=True)  # bbox 면적 큰 순
-        _keep_dets = []
-        for _rb, _rc, _det in _raw_boxes:
-            _suppressed = False
-            for _kb, _kc, _ in _keep_dets:
-                _iou = self._tracker._bbox_iou(_rb, _kb)
-                if _iou > 0.65:
-                    _suppressed = True
-                    break
-            if not _suppressed:
-                _keep_dets.append((_rb, _rc, _det))
+        # ═══════════════════════════════════════════════
+        # Stage 1: 차량 탐지 (yolov8n.pt, classes=[2,5,7])
+        #   2=car, 5=bus, 7=truck (COCO)
+        #   최적화①: imgsz 640→416 (차량은 큰 객체라 충분)
+        # ═══════════════════════════════════════════════
+        vehicle_results = self.model_vehicle(frame, conf=0.3, classes=[2, 5, 7],
+                                             imgsz=416, verbose=False)
+        vehicle_boxes = []
+        for det in vehicle_results[0].boxes:
+            vx1, vy1, vx2, vy2 = map(int, det.xyxy[0].tolist())
+            vconf = float(det.conf[0])
+            area = (vx2 - vx1) * (vy2 - vy1)
+            vehicle_boxes.append((vx1, vy1, vx2, vy2, vconf, area))
+
+        # 면적 큰 순 정렬 (가까운 차량 우선)
+        vehicle_boxes.sort(key=lambda v: v[5], reverse=True)
+
+        # ── ROI 필터: 차량 bbox 중심점이 ROI 안에 있는 것만 Stage2로 전달 ──
+        if ThresholdConfig.ROI_ENABLED and vehicle_boxes:
+            roi_x1 = int(ThresholdConfig.ROI_X1 * cw_det / 1920)
+            roi_y1 = int(ThresholdConfig.ROI_Y1 * ch_det / 1080)
+            roi_x2 = int(ThresholdConfig.ROI_X2 * cw_det / 1920)
+            roi_y2 = int(ThresholdConfig.ROI_Y2 * ch_det / 1080)
+            before = len(vehicle_boxes)
+            vehicle_boxes = [
+                v for v in vehicle_boxes
+                if roi_x1 <= (v[0] + v[2]) // 2 <= roi_x2
+                and roi_y1 <= (v[1] + v[3]) // 2 <= roi_y2
+            ]
+            if before != len(vehicle_boxes):
+                print(f"[ROI] 차량 필터: {before} → {len(vehicle_boxes)} (ROI 밖 {before - len(vehicle_boxes)}대 제외)")
+
+        ratio = vehicle_boxes[0][5] / frame_area if vehicle_boxes else 0.0
+        print(f"[2STAGE] vehicles={len(vehicle_boxes)}, frame_area_ratio={ratio:.1%}")
 
         seen_this_frame = set()
+        seen_track_keys = set()  # ★ 고스트 방지: 이번 프레임에 감지된 트랙 키
 
-        for _kept_bbox, _kept_conf, _kept_det in _keep_dets:
-            self._last_crnn_raw = None  # ROI별 CRNN 교차검증용 (verify_paddle_with_crnn)
-            # ★ SAHI 통합: 글로벌 좌표 _kept_bbox 사용 (타일 det.xyxy는 로컬 좌표)
-            x1, y1, x2, y2 = _kept_bbox
-            conf = _kept_conf
+        # ── 최적화②: 차량 bbox 면적 ≥ 20% → Stage2 스킵 (가까운 차량 대응) ──
+        if len(vehicle_boxes) >= 1:  # Always use 1-stage direct detection
+            # 차량이 프레임 대부분을 차지 → 번호판 직접 탐지 (Stage2 생략)
+            vx1, vy1, vx2, vy2, vconf, varea = vehicle_boxes[0]
+            vox1, voy1 = int(vx1 * sx), int(vy1 * sy)
+            vox2, voy2 = int(vx2 * sx), int(vy2 * sy)
+            vox1 = max(0, vox1); voy1 = max(0, voy1)
+            vox2 = min(cw_full, vox2); voy2 = min(ch_full, voy2)
 
-            # ★ COCO 모델일 때 차량 클래스만 허용 (비차량 오탐 방지)
-            if not self._is_plate_model:
-                cls_id = int(_kept_det.cls[0]) if hasattr(_kept_det, 'cls') and _kept_det.cls is not None else -1
-                if cls_id not in self._vehicle_class_ids:
+            plate_detections = self.model(frame, conf=self.config.DETECT_CONF,
+                                          imgsz=640, verbose=False)
+            n_detected = len(plate_detections[0].boxes)
+            print(f"[PLATE-DBG] detected={n_detected} conf_thresh={self.config.DETECT_CONF}", flush=True)
+
+            # ★ 폴백: best.pt 미탐지 → 각 차량 하단 40% 직접 OCR
+            if n_detected == 0:
+                for _vx1, _vy1, _vx2, _vy2, _vconf, _varea in vehicle_boxes:
+                    _vox1, _voy1 = int(_vx1 * sx), int(_vy1 * sy)
+                    _vox2, _voy2 = int(_vx2 * sx), int(_vy2 * sy)
+                    _vox1 = max(0, _vox1); _voy1 = max(0, _voy1)
+                    _vox2 = min(cw_full, _vox2); _voy2 = min(ch_full, _voy2)
+                    _bh = _voy2 - _voy1
+                    _bw = _vox2 - _vox1
+                    if _bh < 40 or _bw < 50:
+                        continue
+                    bottom_y = _voy1 + int(_bh * 0.6)
+                    bottom_crop = crop_src[bottom_y:_voy2, _vox1:_vox2]
+                    if bottom_crop.size == 0:
+                        continue
+                    fb_text, fb_conf = self._ocr_plate_roi(bottom_crop)
+                    if fb_text and fb_conf >= self.config.OCR_CONF:
+                        fb_bbox = [_vox1, bottom_y, _vox2, _voy2]
+                        print(f"[FALLBACK-OCR] text={fb_text} conf={fb_conf:.2f}", flush=True)
+                        seen_this_frame.add(fb_text)
+                        plate_info = self.recent_plates[fb_text]
+                        plate_info["consecutive"] = plate_info.get("consecutive", 0) + 1
+                        plate_info["last_seen"] = time.time()
+                        plate_info["count"] += 1
+                        if plate_info["consecutive"] >= self.consecutive_required:
+                            is_alert, alert_info = (0, None)
+                            if plate_info["consecutive"] == self.consecutive_required:
+                                try:
+                                    is_alert, alert_info = self.db.record_plate(fb_text, fb_conf, camera_id)
+                                except Exception:
+                                    pass
+                            results.append({
+                                "plate": fb_text, "confidence": fb_conf,
+                                "bbox": fb_bbox, "vehicle_bbox": [_vox1, _voy1, _vox2, _voy2],
+                                "is_alert": bool(is_alert), "alert_info": alert_info,
+                            })
+
+            for pdet in plate_detections[0].boxes:
+                px1, py1, px2, py2 = map(int, pdet.xyxy[0].tolist())
+                pconf = float(pdet.conf[0])
+
+                ox1, oy1 = int(px1 * sx), int(py1 * sy)
+                ox2, oy2 = int(px2 * sx), int(py2 * sy)
+
+                # ★ 번호판 위치 필터: 차량 bbox 하단 60% 영역에만 허용
+                # 앞유리(상단), 그릴(상단 중간), 화물칸(전체) 오탐 방지
+                _pcy = (oy1 + oy2) // 2          # 번호판 중심 Y
+                _vh = voy2 - voy1                 # 차량 높이
+                if _vh > 0:
+                    _plate_y_min = voy1 + int(_vh * 0.35)  # 차량 상단 35% 제외
+                    if _pcy < _plate_y_min:
+                        print(f"[POS-FILTER] 번호판 위치 부적합: "
+                              f"pcy={_pcy} < zone_y={_plate_y_min} "
+                              f"(차량={voy1}~{voy2}, 상단35% 제외)", flush=True)
+                        continue
+
+                # ROI 필터: 번호판 중심이 ROI 밖이면 스킵
+                if ThresholdConfig.ROI_ENABLED:
+                    pcx = (ox1 + ox2) // 2
+                    pcy = (oy1 + oy2) // 2
+                    r_x1 = int(ThresholdConfig.ROI_X1 * cw_full / 1920)
+                    r_y1 = int(ThresholdConfig.ROI_Y1 * ch_full / 1080)
+                    r_x2 = int(ThresholdConfig.ROI_X2 * cw_full / 1920)
+                    r_y2 = int(ThresholdConfig.ROI_Y2 * ch_full / 1080)
+                    if not (r_x1 <= pcx <= r_x2 and r_y1 <= pcy <= r_y2):
+                        continue
+
+                pw = ox2 - ox1
+                ph = oy2 - oy1
+                margin_x = int(pw * 0.30)
+                margin_y = int(ph * 0.20)
+                rx1 = max(0, ox1 - margin_x)
+                ry1 = max(0, oy1 - margin_y)
+                rx2 = min(cw_full, ox2 + margin_x)
+                ry2 = min(ch_full, oy2 + margin_y)
+                roi = crop_src[ry1:ry2, rx1:rx2]
+                if roi.size == 0:
                     continue
 
-            ox1, oy1 = int(x1 * sx), int(y1 * sy)
-            ox2, oy2 = int(x2 * sx), int(y2 * sy)
+                plate_bbox = [ox1, oy1, ox2, oy2]
+                track_key = self._make_track_key(plate_bbox)
+                seen_track_keys.add(track_key)  # ★ 고스트 방지
+                # ★ 캐시 무효화: frames_absent > 0 또는 bbox 중심 급변 시 새 차량으로 판단
+                if track_key in self._ocr_track_cache:
+                    _cache = self._ocr_track_cache[track_key]
+                    _need_reset = False
+                    # 조건1: 미감지 이력 있음 → 재출현 = 새 차량
+                    if _cache.get("frames_absent", 0) > 0:
+                        _need_reset = True
+                    # 조건2: bbox 중심 25px 이상 점프 → 같은 키지만 다른 물체
+                    _last_bbox = _cache.get("bbox")
+                    if _last_bbox and not _need_reset:
+                        _lcx = (_last_bbox[0] + _last_bbox[2]) / 2
+                        _lcy = (_last_bbox[1] + _last_bbox[3]) / 2
+                        _ccx = (plate_bbox[0] + plate_bbox[2]) / 2
+                        _ccy = (plate_bbox[1] + plate_bbox[3]) / 2
+                        if ((_lcx - _ccx)**2 + (_lcy - _ccy)**2) ** 0.5 > 25:
+                            _need_reset = True
+                    if _need_reset:
+                        print(f"[GHOST-RESET] 캐시 초기화: key={track_key}", flush=True)
+                        del self._ocr_track_cache[track_key]
+                skip_ocr = self._should_skip_ocr(track_key, plate_bbox)
 
-            # ★ 최소 크기 필터 (너무 작은 탐지는 노이즈)
-            det_w = ox2 - ox1
-            det_h = oy2 - oy1
-            if det_w < self.config.MIN_BBOX_WIDTH or det_h < self.config.MIN_BBOX_HEIGHT:
-                continue
-
-            # ★ bbox 가로세로 비율 검증 (엠블럼/그릴/간판 제거)
-            _aspect = det_w / max(det_h, 1)
-            _is_1line = 1.8 <= _aspect <= 6.0   # 1줄 번호판 (2.0-5.5 → 1.8-6.0 약간 완화)
-            _is_2line = 0.6 <= _aspect < 1.8    # 2줄 번호판 (0.8-2.0 → 0.6-1.8 약간 완화)
-            if not (_is_1line or _is_2line):
-                continue  # 번호판 비율 아님 → 엠블럼/그릴/간판 가능성
-
-            # ★ bbox 위치 검증 (이미지 상단 5% / 하단 2% → 간판/노면, 완화)
-            if oy1 < ch_full * 0.05:
-                continue  # 상단 영역 (간판/표지판 의심)
-            if oy2 > ch_full * 0.98:
-                continue  # 하단 영역 (노면 의심)
-
-            # ★ bbox 크기 기반 신뢰도 페널티 (소형 번호판 오인식 방지)
-            # 영상 분석 결과: bbox 폭 < 70px → 정확도 0%, 70~100px → 60%, > 100px → 100%
-            _bbox_conf_penalty = 1.0
-            _is_small_plate = False
-            if det_w < 50:
-                _bbox_conf_penalty = 0.70   # 극소형: 30% 감점 (70→50 기준 하향)
-                _is_small_plate = True
-            elif det_w < 80:
-                _bbox_conf_penalty = 0.85   # 소형: 15% 감점 (100→80 기준 하향)
-                _is_small_plate = True
-            elif det_w < 110:
-                _bbox_conf_penalty = 0.95   # 중형: 5% 감점
-
-            # [평가기준 20점] ROI (Region of Interest) + CROP: 번호판 영역 좌표로 관심영역 설정 후 크롭
-            margin_x = int((ox2 - ox1) * 0.35)  # ★ 좌우 마진 확대 (0.25→0.35, 가장자리 문자 보존)
-            margin_y = int((oy2 - oy1) * 0.40)  # ★ 상하 마진 확대 (0.30→0.40, 2줄 번호판+지역명 캡처)
-            rx1 = max(0, ox1 - margin_x)
-            ry1 = max(0, oy1 - margin_y)
-            rx2 = min(cw_full, ox2 + margin_x)
-            ry2 = min(ch_full, oy2 + margin_y)
-            roi = crop_src[ry1:ry2, rx1:rx2]   # CROP: 번호판 영역 이미지 추출
-
-            if roi.size == 0:
-                continue
-
-            # ★ 트래커 기반 OCR 스킵: 이미 확인된 번호판이면 OCR 건너뜀 (FPS 최적화)
-            # 조건: 기존 트랙 + 직전 프레임 연속 감지(gap≤1) + 3프레임 확인 + 3+표
-            # gap>1이면 차량 교체 가능성 → OCR 반드시 실행
-            cur_bbox = [ox1, oy1, ox2, oy2]
-            _pre_trk, _pre_is_new = self._tracker.match(cur_bbox)
-            _skip_ocr = False
-            if not _pre_is_new and _pre_trk["texts"]:
-                _pre_gap = _pre_trk.get("_pre_gap", 999)
-                _pre_top_text = max(_pre_trk["texts"], key=_pre_trk["texts"].get)
-                _pre_top_votes = _pre_trk["texts"][_pre_top_text]
-                _pre_detect_cnt = _pre_trk.get("_detect_count", 0)
-                # 직전 프레임 연속(gap≤1) & 3프레임+ 감지 & 3+표 → OCR 스킵
-                if _pre_gap <= 1 and _pre_detect_cnt >= 3 and _pre_top_votes >= 3:
-                    _skip_ocr = True
-            if _skip_ocr:
-                # OCR 없이 트래커 결과 사용
-                _pre_conf = _pre_trk.get("best_conf", 0.5)
-                seen_this_frame.add(_pre_top_text)
-                plate_info = self.recent_plates[_pre_top_text]
-                plate_info["consecutive"] = _pre_trk["consecutive"]
-                plate_info["last_seen"] = time.time()
-                plate_info["count"] += 1
-                _show = (_pre_trk["consecutive"] >= self.consecutive_required
-                         or _pre_detect_cnt >= self.consecutive_required)
-                if _show:
-                    _adj_conf = min(_pre_conf + 0.10, 1.0)
-                    _conf_level = self.validator.get_confidence_level(_adj_conf) + "(추적)"
-                    _bbox_w = ox2 - ox1
-                    _bbox_h = oy2 - oy1
-                    results.append({
-                        "plate": _pre_top_text,
-                        "confidence": _pre_conf,
-                        "bbox": cur_bbox,
-                        "is_alert": False,
-                        "alert_info": None,
-                        "plate_number": _pre_top_text,
-                        "confidence_level": _conf_level,
-                        "plate_type": self.validator.classify_plate_type(_pre_top_text),
-                        "vehicle_type": self.validator.classify_vehicle_type(_pre_top_text),
-                        "plate_lines": 1 if _bbox_w / max(_bbox_h, 1) > 2.5 else 2,
-                        "plate_color": "흰색바탕_검은글씨",
-                        "bbox_area": _bbox_w * _bbox_h,
-                        "frame_count": _pre_top_votes,
-                        "is_valid_format": True,
-                        "rejection_reason": None,
-                    })
-                continue
-
-            # ★ 디버그: 번호판 crop 저장 (환경변수 _DEBUG_CROP=1 로 활성화)
-            if os.environ.get('_DEBUG_CROP', ''):
-                _dbg_dir = Path(__file__).resolve().parent / "debug_crops"
-                _dbg_dir.mkdir(exist_ok=True)
-                _dbg_name = f"frame{self.stats['frames_processed']:04d}_det{x1}_{y1}.png"
-                cv2.imwrite(str(_dbg_dir / _dbg_name), roi)
-
-            roi_h, roi_w = roi.shape[:2]
-            _clf_scale, _clf_pad = 1.0, 0  # 한글 분류기용 스케일/패딩 (나중에 사용)
-            # 멀티프레임: 번호판 픽셀 너비 < 80 이면 5프레임 합성 후 OCR
-            roi_for_ocr = roi
-            if use_multiframe and roi_w < PlateEngineConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD:
-                self._multiframe_buffer.append((roi.copy(), (x1, y1, x2, y2)))
-                if len(self._multiframe_buffer) >= PlateEngineConfig.MULTIFRAME_SIZE:
-                    crops = [c[0] for c in self._multiframe_buffer]
-                    roi_for_ocr = self._composite_multiframe(crops)
-                    self._multiframe_buffer.clear()
-                    self.stats["multiframe_used"] = self.stats.get("multiframe_used", 0) + 1
+                if skip_ocr:
+                    best_text, best_conf = self._get_cached_ocr(track_key)
+                    self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=False)
                 else:
-                    continue  # 버퍼 채울 때까지 이 ROI는 스킵
-            else:
-                if use_multiframe:
-                    self.stats["singleframe_used"] = self.stats.get("singleframe_used", 0) + 1
-                # ★ 업스케일 목표 500px (소형 번호판 인식률 향상)
-                target_w = 500
-                if roi_w < target_w:
-                    scale = target_w / roi_w
-                    # 극소 번호판(60px 이하)은 9배까지 확대 (52px→468px)
-                    if roi_w < 60:
-                        scale = max(scale, 9.0)
-                    elif roi_w < 120:
-                        scale = max(scale, 4.0)
-                else:
-                    scale = 1.0
-                if scale > 1.0:
-                    # ★ 소형 번호판(80px 이하): LANCZOS4로 선명 업스케일
-                    _interp = cv2.INTER_LANCZOS4 if roi_w < 80 else cv2.INTER_CUBIC
-                    roi_for_ocr = cv2.resize(
-                        roi, None, fx=scale, fy=scale, interpolation=_interp
-                    )
-                    # 업스케일 후 선명화 적용 (언샤프 마스크)
-                    if roi_w < 80:
-                        # ★ 소형 번호판: 강화 샤프닝 (획이 흐려지는 것 보상)
-                        kernel = np.array([[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32)
-                    else:
-                        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
-                    roi_for_ocr = cv2.filter2D(roi_for_ocr, -1, kernel)
-                else:
-                    roi_for_ocr = roi
-                # ★ 흰색 테두리 패딩 추가 (OCR 엔진이 가장자리 문자를 더 잘 읽음)
-                pad = max(10, int(roi_for_ocr.shape[0] * 0.15))
-                roi_for_ocr = cv2.copyMakeBorder(
-                    roi_for_ocr, pad, pad, pad, pad,
-                    cv2.BORDER_CONSTANT, value=(255, 255, 255)
-                )
-                _clf_scale, _clf_pad = scale, pad  # 한글 분류기용 저장
-
-            # ★ 번호판 색상 검증 (번호판 바탕색으로 오감지 필터링)
-            _color_conf_penalty = 1.0
-            try:
-                _hsv_check = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-                _h_avg = np.mean(_hsv_check[:, :, 0])
-                _s_avg = np.mean(_hsv_check[:, :, 1])
-                _v_avg = np.mean(_hsv_check[:, :, 2])
-                _is_white = _s_avg < 50 and _v_avg > 80        # 흰색/은색 바탕 (자가용, 음영 포함)
-                _is_yellow = 15 < _h_avg < 35 and _s_avg > 60  # 노란색 (영업용)
-                _is_green = 35 < _h_avg < 85 and _s_avg > 40   # 초록색 (구형/영업용)
-                _is_blue = 90 < _h_avg < 130 and _s_avg > 40   # 파란색 (전기차)
-                if not (_is_white or _is_yellow or _is_green or _is_blue):
-                    _color_conf_penalty = 0.85  # 판별 불가 → 15% 페널티
-            except Exception:
-                pass
-
-            # ★ CRNN 학습 모델 (빠름 ~50ms, 투표 보강용)
-            _crnn_candidates = []
-            if self._crnn_model is not None:
-                try:
-                    crnn_text, crnn_conf = self._crnn_model.recognize(roi)
-                    self._last_crnn_raw = crnn_text or None  # Paddle 교차검증(verify_paddle_with_crnn)용
-                    if crnn_text and crnn_conf > 0.3:
-                        cleaned = self.validator.clean_ocr_text(crnn_text)
-                        if self.validator.is_valid_length(cleaned):
-                            is_valid, final_text = self.validator.validate(cleaned)
-                            if is_valid:
-                                _crnn_candidates.append((final_text, crnn_conf))
-                except Exception:
-                    pass
-
-            # ★ 영상/정적 모드 판별 (extra_crops, OCR 루프에서 공통 사용)
-            _is_video_mode = (self.consecutive_required > 1)
-
-            # ★ 녹색 번호판 감지 (HSV 분석) — extra_crops 및 OCR 루프 전에 판정
-            _is_green_plate = False
-            try:
-                _hsv_det = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-                _green_mask = cv2.inRange(_hsv_det, (35, 40, 40), (85, 255, 255))
-                _is_green_plate = (np.sum(_green_mask > 0) / _green_mask.size) > 0.20
-            except Exception:
-                pass
-
-            # ── 구형 두 줄 번호판 감지: 세로 비율이 높으면 상단/하단 분리 추가 ──
-            # (구형 번호판은 가로:세로 ≈ 2:1, 신형은 4:1)
-            # ★ 영상 모드: extra_crops 전처리 자체를 스킵 (CPU 절약)
-            extra_crops = []
-            if roi_h > roi_w * 0.45 and not _is_video_mode:   # 정적 이미지만
-                top_crop = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.5), :]
-                bot_crop = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.4):, :]
-                # ★ 상단 크롭 강화: 500px 확대 + 다양한 전처리 (한글/지역명 인식률 향상)
-                top_h, top_w = top_crop.shape[:2]
-                if top_w < 500:
-                    sc_top = 500 / top_w
-                    top_crop = cv2.resize(top_crop, None, fx=sc_top, fy=sc_top, interpolation=cv2.INTER_CUBIC)
-                # 반전 버전 (녹색 배경 → 흰배경 검은글자)
-                top_inv = cv2.bitwise_not(top_crop)
-                # CLAHE 강화 버전
-                top_gray = cv2.cvtColor(top_crop, cv2.COLOR_BGR2GRAY)
-                clahe_obj = cv2.createCLAHE(clipLimit=4.0, tileGridSize=(4, 4))
-                top_clahe = clahe_obj.apply(top_gray)
-                top_clahe_bgr = cv2.cvtColor(top_clahe, cv2.COLOR_GRAY2BGR)
-                # ★ HSV V-channel 이진화: 녹색 번호판의 얇은 숫자("1") 인식률 대폭 향상
-                top_hsv = cv2.cvtColor(top_crop, cv2.COLOR_BGR2HSV)
-                _, _, top_v = cv2.split(top_hsv)
-                _, top_val_mask = cv2.threshold(top_v, 150, 255, cv2.THRESH_BINARY)
-                top_val_bgr = cv2.cvtColor(top_val_mask, cv2.COLOR_GRAY2BGR)
-                # ★ 선명화 800px 버전: 얇은 획 강조
-                sc_800 = 800 / top_crop.shape[1] if top_crop.shape[1] < 800 else 1.0
-                if sc_800 > 1.0:
-                    top_800 = cv2.resize(top_inv, None, fx=sc_800, fy=sc_800, interpolation=cv2.INTER_CUBIC)
-                    sharp_k = np.array([[-1,-1,-1],[-1,9,-1],[-1,-1,-1]], dtype=np.float32)
-                    top_sharp800 = cv2.filter2D(top_800, -1, sharp_k)
-                else:
-                    top_sharp800 = top_inv
-                extra_crops = [
-                    ("top", top_inv),
-                    ("bot", bot_crop),
-                ]  # ★ 6→2 축소 (속도 최적화: top_inv + bot가 핵심)
-                # ★ 녹색 번호판: 추가 전처리 (반전+강화CLAHE, 녹색채널 이진화)
-                if _is_green_plate:
-                    # 반전 + 강화 CLAHE (clipLimit 8.0)
-                    _inv_lab = cv2.cvtColor(top_inv, cv2.COLOR_BGR2LAB)
-                    _l, _a, _b = cv2.split(_inv_lab)
-                    _clahe_s = cv2.createCLAHE(clipLimit=8.0, tileGridSize=(4, 4))
-                    _l = _clahe_s.apply(_l)
-                    _inv_clahe = cv2.cvtColor(cv2.merge([_l, _a, _b]), cv2.COLOR_LAB2BGR)
-                    extra_crops.append(("top", _inv_clahe))
-                    # 반전 + Otsu 이진화
-                    _inv_gray = cv2.cvtColor(top_inv, cv2.COLOR_BGR2GRAY)
-                    _clahe_g = cv2.createCLAHE(clipLimit=6.0, tileGridSize=(8, 8))
-                    _inv_enh = _clahe_g.apply(_inv_gray)
-                    _, _inv_bin = cv2.threshold(_inv_enh, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    extra_crops.append(("top", cv2.cvtColor(_inv_bin, cv2.COLOR_GRAY2BGR)))
-                    # 녹색 채널 추출 → 반전 → Otsu
-                    _g_ch = top_crop[:, :, 1]  # BGR의 G채널
-                    _g_inv = cv2.bitwise_not(_g_ch)
-                    _, _g_bin = cv2.threshold(_g_inv, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-                    extra_crops.append(("top", cv2.cvtColor(_g_bin, cv2.COLOR_GRAY2BGR)))
-                    # V채널 낮은 임계값 (녹색판 전용, 기본 150→100)
-                    _, _v_low = cv2.threshold(top_v, 100, 255, cv2.THRESH_BINARY)
-                    extra_crops.append(("top", cv2.cvtColor(_v_low, cv2.COLOR_GRAY2BGR)))
-                    # 하단도 반전 추가
-                    extra_crops.append(("bot", cv2.bitwise_not(bot_crop)))
-
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            # ★ 속도 최적화 OCR: 영상 모드 초경량 / 정적 모드 풀 앙상블
-            #   영상 모드: original(+clahe) 1~2회, 즉시반환 → ~200-500ms
-            #   정적 모드: Tier1(3개)+Tier2+HangulClassifier → 정확도 우선
-            # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-            _paddle_engine = self.ocr_engines.get("paddleocr")
-            # 영상 모드: original+clahe 2개 (sharpen 제거로 OCR 1회 절약)
-            # 정적 모드: 기존 3개 유지 (12/12 검증됨)
-            _TIER1_METHODS = ["original", "clahe"] if _is_video_mode else ["original", "clahe", "sharpen"]
-            from collections import Counter
-            all_candidates = []
-            _tier1_consensus = False
-            _video_fast_exit = False  # 영상 모드 1회 즉시반환 플래그
-
-            # ── Tier 1: PaddleOCR × 핵심 전처리 ──
-            if _paddle_engine:
-                for method in _TIER1_METHODS:
-                    try:
-                        if method == "original":
-                            processed = roi_for_ocr.copy()
-                        elif method == "inverted":
-                            processed = cv2.bitwise_not(roi_for_ocr)
-                        else:
-                            proc_func = getattr(self.preprocessor, method, None)
-                            if proc_func is None:
-                                continue
-                            processed = proc_func(roi_for_ocr.copy())
-                        text, ocr_conf = self._run_ocr("paddleocr", _paddle_engine, processed)
-                        if not text or ocr_conf < 0.20:
-                            continue
-                        cleaned = self.validator.clean_ocr_text(text)
-                        if not self.validator.is_valid_length(cleaned):
-                            continue
-                        is_valid, final_text = self.validator.validate(cleaned)
-                        if not is_valid:
-                            continue
-                        _v2r = bool(re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', cleaned))
-                        w = 4 if _v2r else 1
-                        for _ in range(w):
-                            all_candidates.append((final_text, ocr_conf))
-                        # ★ 영상 모드 즉시반환: 유효 번호판 + 중간신뢰 → 나머지 스킵
-                        # 트래커가 다중 프레임에서 누적 보정하므로 1회로 충분
-                        if _is_video_mode and ocr_conf >= 0.50 and is_valid:
-                            _video_fast_exit = True
-                            _tier1_consensus = True
-                            break
-                    except Exception:
-                        continue
-                # Tier 1 합의 판정
-                if not _video_fast_exit and all_candidates:
-                    _t1_counter = Counter(t for t, c in all_candidates)
-                    _t1_top, _t1_cnt = _t1_counter.most_common(1)[0]
-                    _t1_confs = [c for t, c in all_candidates if t == _t1_top]
-                    if _t1_cnt >= 2 and float(np.mean(_t1_confs)) > 0.6:
-                        _tier1_consensus = True
-
-            # ── 합의 실패 시: 추가 전처리 (인식률 최대화) ──
-            # ★ 영상 모드: 경량 Tier2 (inverted 1회만) — 반전 이미지가 가장 효과적
-            # ★ 정적 이미지: PaddleOCR 추가 전처리 fallback (정확도 우선)
-            if not _tier1_consensus and _is_video_mode and _paddle_engine:
-                # ── 영상 경량 Tier2: inverted 1회 PaddleOCR ──
-                try:
-                    _inv_img = cv2.bitwise_not(roi_for_ocr)
-                    _inv_text, _inv_conf = self._run_ocr("paddleocr", _paddle_engine, _inv_img)
-                    if _inv_text and _inv_conf >= 0.20:
-                        _inv_cleaned = self.validator.clean_ocr_text(_inv_text)
-                        if self.validator.is_valid_length(_inv_cleaned):
-                            _inv_valid, _inv_final = self.validator.validate(_inv_cleaned)
-                            if _inv_valid:
-                                _v2r = bool(re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', _inv_cleaned))
-                                w = 4 if _v2r else 1
-                                for _ in range(w):
-                                    all_candidates.append((_inv_final, _inv_conf))
-                                _tier1_consensus = True
-                except Exception:
-                    pass
-            if not _tier1_consensus and not _is_video_mode:
-                _fb_methods = ["original", "clahe", "sharpen", "inverted"]
-                _fb_engines = [("paddleocr", _paddle_engine)]
-                for _fb_engine_name, _fb_eng in _fb_engines:
-                    if _fb_eng is None:
-                        continue
-                    # PaddleOCR: Tier1 미합의 시 24종 확장 전처리 fallback (Deblur/형태학 6종 포함)
-                    if _fb_engine_name == "paddleocr":
-                        _fb_run = [
-                            "inverted", "bilateral", "adaptive_threshold", "gamma_bright", "morphology",
-                            "deblur_laplacian", "deblur_strong", "morphology_close_strong",
-                            "morphology_gradient", "clahe_aggressive", "median_strong",
+                    best_text, best_conf = self._ocr_plate_roi(roi, use_multiframe)
+                    # ── CRNN 한글 검증 + 2줄 번호판 복원 (1회 호출) ──
+                    if best_text and re.search(r'[가-힣]', best_text):
+                        cmx = int(pw * 0.35)
+                        cmy_top = int(ph * 0.50)  # 2줄 상단 포함
+                        cmy_bot = int(ph * 0.40)
+                        crnn_roi = crop_src[
+                            max(0, oy1 - cmy_top):min(ch_full, oy2 + cmy_bot),
+                            max(0, ox1 - cmx):min(cw_full, ox2 + cmx)
                         ]
-                    else:
-                        _fb_run = _fb_methods
-                    for _fb_name in _fb_run:
-                        try:
-                            if _fb_name == "original":
-                                _fb_img = roi_for_ocr.copy()
-                            elif _fb_name == "inverted":
-                                _fb_img = cv2.bitwise_not(roi_for_ocr)
-                            else:
-                                proc_func = getattr(self.preprocessor, _fb_name, None)
-                                if proc_func is None:
-                                    continue
-                                _fb_img = proc_func(roi_for_ocr.copy())
-                            text, ocr_conf = self._run_ocr(_fb_engine_name, _fb_eng, _fb_img)
-                            if text and ocr_conf > 0.20:
-                                cleaned = self.validator.clean_ocr_text(text)
-                                if self.validator.is_valid_length(cleaned):
-                                    is_valid, final_text = self.validator.validate(cleaned)
-                                    if is_valid:
-                                        _v2r = bool(re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', cleaned))
-                                        w = 4 if _v2r else 1
-                                        for _ in range(w):
-                                            all_candidates.append((final_text, ocr_conf))
-                        except Exception:
-                            continue
+                        _2line_restored = False  # ★ 2LINE 복원 플래그 초기화
+                        if crnn_roi.size > 0:
+                            crnn_text, crnn_conf = self._crnn_read_plate(crnn_roi, return_confidence=True)
+                            # 1) 한글 검증 (CRNN 신뢰도 전달로 과적합 방어)
+                            _before_crnn = best_text
+                            best_text = self._verify_korean_with_crnn(best_text, crnn_roi, crnn_text, crnn_conf)
+                            # ★ CRNN-PREFIX 교정 시에도 2LINE 복원 보너스 적용
+                            if (_before_crnn != best_text
+                                    and re.match(r'^\d{2,3}[가-힣]\d{4}$', best_text)
+                                    and re.match(r'^\d{2,3}[가-힣]\d{4}$', _before_crnn)):
+                                _b_prefix = re.match(r'^(\d{2,3})', _before_crnn).group(1)
+                                _a_prefix = re.match(r'^(\d{2,3})', best_text).group(1)
+                                if _b_prefix != _a_prefix:
+                                    _2line_restored = True  # prefix 교정도 확인된 결과로 보너스
+                            # ★ _verify가 구형/영업용 2줄 결과를 직접 반환한 경우 복원 플래그 설정
+                            if (_before_crnn != best_text
+                                    and not re.match(r'^\d{2,3}[가-힣]\d{4}$', best_text)
+                                    and (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', best_text)
+                                         or re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', best_text))):
+                                _2line_restored = True
+                                print(f"[CRNN-2LINE-FLAG] _verify 구형 복원 → _2line_restored=True", flush=True)
+                            # 2) 2줄 번호판 지역명 복원
+                            _prev_best = best_text  # ★ 복원 실패 시 롤백용 저장
+                            # ★ 후미 매칭: PaddleOCR과 CRNN의 한글+4자리가 일치하면 복원
+                            _paddle_suffix_m = re.search(r'[가-힣]\d{4}$', best_text)
+                            _crnn_suffix_m = re.search(r'[가-힣]\d{4}$', crnn_text or "")
+                            _suffix_match = (_paddle_suffix_m and _crnn_suffix_m
+                                             and _paddle_suffix_m.group() == _crnn_suffix_m.group())
+                            _full_substr = (crnn_text and best_text
+                                            and (crnn_text.endswith(best_text) or best_text in crnn_text))
+                            # ★ 영업용 body 매칭: "586다6118" vs "충86다6118" (같은 길이)
+                            _comm_body_match = False
+                            _comm_p_m = re.match(r'^\d(\d{2}[가-힣]\d{4})$', best_text)
+                            _comm_c_m = re.match(r'^[가-힣](\d{2}[가-힣]\d{4})$', crnn_text or "")
+                            if _comm_p_m and _comm_c_m:
+                                _comm_body_match = (_comm_p_m.group(1) == _comm_c_m.group(1))
+                            if (crnn_text
+                                    and re.match(r'^\d{0,3}[가-힣]\d{4}$', best_text)
+                                    and (len(crnn_text) > len(best_text)
+                                         or _comm_body_match)  # ★ 영업용: 길이 같아도 body 일치 시 통과
+                                    and (_full_substr or _suffix_match or _comm_body_match)
+                                    and (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', crnn_text)
+                                         or re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', crnn_text))):  # ★ 영업용 추가
+                                print(f"[2LINE] CRNN 지역명 복원: {best_text} → {crnn_text} "
+                                      f"(suffix={'일치' if _suffix_match else 'body' if _comm_body_match else 'substr'})",
+                                      flush=True)
+                                best_text = crnn_text
+                                _2line_restored = True  # ★ 2LINE 복원 성공 플래그
+                                # ★ 최종 안전 검증: 복원 결과 패턴 재확인
+                                if not (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', best_text)
+                                        or re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', best_text)):
+                                    print(f"[2LINE] 최종검증 실패, 복원 취소: '{best_text}'", flush=True)
+                                    best_text = _prev_best
+                                    _2line_restored = False
+                            # 3) 지역명 CRNN 교정: OCR 지역명이 틀렸을 경우 CRNN 결과로 보정
+                            # 예: 서울76바7789 → 경기76바7789 (CRNN이 다른 지역명을 읽은 경우)
+                            if (crnn_text
+                                    and re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', best_text)
+                                    and re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', crnn_text)):
+                                _b_suffix = re.sub(r'^[가-힣]{2,3}', '', best_text)
+                                _c_suffix = re.sub(r'^[가-힣]{2,3}', '', crnn_text)
+                                _c_region_m = re.match(r'^[가-힣]{2,3}', crnn_text)
+                                _c_region = _c_region_m.group() if _c_region_m else ""
+                                if (_b_suffix == _c_suffix
+                                        and _c_region in PlateValidator._REGION_PREFIXES
+                                        and crnn_text != best_text):
+                                    print(f"[CRNN-REGION] 지역명 교정: {best_text} → {crnn_text}", flush=True)
+                                    best_text = crnn_text
+                            # 4) 영업용 번호판 교정: "596아6118" → "충86아6118"
+                            # PaddleOCR이 첫 한글(충,전,경 등)을 숫자(5,3,1)로 오인식하는 경우
+                            # 3자리+한글+4자리 → 1한글+2자리+한글+4자리로 교정
+                            _comm_m = re.match(r'^(\d{3})([가-힣])(\d{4})$', best_text)
+                            # ★ 가드: COMM-FIX는 CRNN이 영업용 패턴을 확인한 경우에만 허용
+                            # (A) CRNN이 구형 지역 패턴 → 스킵 (2LINE에서 처리)
+                            # (B) CRNN이 영업용 패턴 → 허용 (CRNN 교차검증 완료)
+                            # (C) CRNN 미확인/실패 → 스킵 (추측성 교정 방지)
+                            # 예: "170바9203" → CRNN "서울70바9203" → (A) 스킵
+                            #     "586다6118" → CRNN "충86다6118" → (B) 허용
+                            #     "386오6118" → CRNN "589599" → (C) 스킵
+                            _comm_skip = True  # ★ 기본값: 스킵 (CRNN 확인 시에만 허용)
+                            if _comm_m:
+                                if crnn_text:
+                                    if re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', crnn_text):
+                                        # (A) CRNN이 구형 지역 패턴 → 영업용 아님
+                                        print(f"[COMM-SKIP] CRNN 구형 지역 감지 → COMM-FIX 스킵: "
+                                              f"crnn={crnn_text}", flush=True)
+                                    elif re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', crnn_text):
+                                        # (B) CRNN이 영업용 패턴 확인 → 유일하게 허용
+                                        _comm_skip = False
+                                    else:
+                                        # (C) CRNN이 다른 결과 → 추측성 교정 방지
+                                        print(f"[COMM-SKIP] CRNN 영업용 미확인 → COMM-FIX 스킵: "
+                                              f"crnn={crnn_text!r}", flush=True)
+                            if _comm_m and not _2line_restored and not _comm_skip:
+                                _first_digit = _comm_m.group(1)[0]  # "5" in "596"
+                                _rest_digits = _comm_m.group(1)[1:]  # "96" in "596"
+                                _hangul = _comm_m.group(2)
+                                _suffix = _comm_m.group(3)
+                                # 숫자→한글 오인식 매핑 (OCR에서 자주 혼동)
+                                # ★ 형태 유사도 기반: 확신 높은 쌍만 유지
+                                # 충: ㅊ 상단획+ㅜ 곡선 → 5,6으로 오인식
+                                # 전: ㅈ+ㅓ+ㄴ → 1,3으로 오인식
+                                # 경: ㄱ+ㅕ 꺾임 → 2로 오인식
+                                _digit_to_hangul = {
+                                    '5': '충', '6': '충',
+                                    '1': '전', '3': '전',
+                                    '2': '경',
+                                }
+                                if _first_digit in _digit_to_hangul:
+                                    _region_char = _digit_to_hangul[_first_digit]
+                                    _commercial = _region_char + _rest_digits + _hangul + _suffix
+                                    is_valid_comm, final_comm = self.validator.validate(_commercial)
+                                    if is_valid_comm:
+                                        print(f"[COMM-FIX] 영업용 교정: {best_text} → {final_comm} "
+                                              f"(첫 숫자 '{_first_digit}'→'{_region_char}')", flush=True)
+                                        best_text = final_comm
+                                        _2line_restored = True
 
-            # ── 구형 두 줄 번호판: 상단+하단 결합 (합의 실패 시만) ──
-            # ★ 영상 모드: 2줄 처리 스킵 — 추가 PaddleOCR 2~4회 호출 절약
-            if extra_crops and not _tier1_consensus and _paddle_engine and not _is_video_mode:
-                top_texts, bot_texts = [], []
-                top_confs, bot_confs = [], []
-                for crop_name, crop_img in extra_crops[:2]:
-                    try:
-                        t, c = self._run_ocr("paddleocr", _paddle_engine, crop_img)
-                        if t and c > 0.20:
-                            raw = re.sub(r'[^0-9가-힣a-zA-Z]', '', t.strip())
-                            _num_map = {'O':'0','o':'0','I':'1','l':'1','Z':'2','S':'5','B':'8','D':'0','Q':'0','G':'6'}
-                            corrected = ''.join(_num_map.get(ch.upper(), ch) if (ch.isalpha() and not ('가' <= ch <= '힣')) else ch for ch in raw)
-                            fixed = ''.join(self.validator._KR_CONFUSION.get(ch, ch) if '가' <= ch <= '힣' else ch for ch in corrected)
-                            if fixed:
-                                if crop_name == "top":
-                                    top_texts.append(fixed); top_confs.append(c)
-                                else:
-                                    bot_texts.append(fixed); bot_confs.append(c)
-                    except Exception:
-                        continue
-                for tt in (top_texts or [""]):
-                    for bt in (bot_texts or [""]):
-                        combined = (tt + bt).strip()
-                        norm = self.validator._normalize_for_validation(combined)
-                        if self.validator.is_valid_length(norm):
-                            is_v, final = self.validator.validate(norm)
-                            if is_v:
-                                avg_c = float(np.mean((top_confs or [0.3]) + (bot_confs or [0.3])))
-                                w = 6 if re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', final) else 2
-                                for _ in range(w):
-                                    all_candidates.append((final, avg_c))
+                            # 5) 2줄 부분 인식 복원: "86아6118" → "충남86아6118"
+                            # 신형 패턴이지만 상용 한글 포함 → 지역명 누락된 2줄 가능성
+                            if (not _2line_restored
+                                    and re.match(r'^\d{2}[가-힣]\d{4}$', best_text)):
+                                _partial_hangul = re.search(r'[가-힣]', best_text).group()
+                                _is_commercial = _partial_hangul in PlateValidator._COMMERCIAL_CHARS
+                                if _is_commercial:
+                                    _partial_restored = False
+                                    # (A) CRNN에서 지역명 추출
+                                    if crnn_text:
+                                        _cr_full_m = re.match(r'^([가-힣]{2,3})(\d{2}[가-힣]\d{4})$', crnn_text)
+                                        if (_cr_full_m
+                                                and _cr_full_m.group(2) == best_text
+                                                and _cr_full_m.group(1) in PlateValidator._REGION_PREFIXES):
+                                            _restored = crnn_text
+                                            is_v, final_v = self.validator.validate(_restored)
+                                            if is_v:
+                                                print(f"[2LINE-PARTIAL] CRNN 지역명 복원: {best_text} → {final_v} "
+                                                      f"(conf={crnn_conf:.2f})", flush=True)
+                                                best_text = final_v
+                                                _2line_restored = True
+                                                _partial_restored = True
+                                    # (B) 히스토리/캐시 폴백
+                                    if not _partial_restored:
+                                        for _known in list(self.recent_plates.keys()):
+                                            if (_known.endswith(best_text)
+                                                    and len(_known) > len(best_text)
+                                                    and self._is_strict_valid_plate(_known)):
+                                                print(f"[2LINE-PARTIAL] 히스토리 복원: {best_text} → {_known}", flush=True)
+                                                best_text = _known
+                                                _2line_restored = True
+                                                _partial_restored = True
+                                                break
+                                    if not _partial_restored:
+                                        for _tk, _tc in self._ocr_track_cache.items():
+                                            _ct = _tc.get("text", "")
+                                            if (_ct.endswith(best_text)
+                                                    and len(_ct) > len(best_text)
+                                                    and self._is_strict_valid_plate(_ct)):
+                                                print(f"[2LINE-PARTIAL] 캐시 복원: {best_text} → {_ct}", flush=True)
+                                                best_text = _ct
+                                                _2line_restored = True
+                                                break
 
-            # ── CRNN 결과를 투표에 합류 (숫자 일치 시 높은 가중치) ──
-            for ct, cc in _crnn_candidates:
-                _crnn_w = 2
-                if all_candidates:
-                    _cd = re.sub(r'[^0-9]', '', ct)
-                    _dm = sum(1 for ot, _ in all_candidates if _cd and re.sub(r'[^0-9]', '', ot)[-4:] == _cd[-4:])
-                    if _dm > len(all_candidates) * 0.2:
-                        _crnn_w = 25
-                    elif _dm > 0:
-                        _crnn_w = 8
-                for _ in range(_crnn_w):
-                    all_candidates.append((ct, cc))
+                    # ★ 히스토리 기반 2LINE 복원: CRNN 실패 시 이전 결과에서 지역명 복원
+                    if (re.match(r'^[가-힣]\d{4}$', best_text)
+                            and track_key in self._ocr_track_cache):
+                        _cached = self._ocr_track_cache[track_key]
+                        _cached_text = _cached.get("text", "")
+                        if (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', _cached_text)
+                                and _cached_text.endswith(best_text)):
+                            print(f"[2LINE-HIST] 히스토리 기반 복원: {best_text} → {_cached_text}", flush=True)
+                            best_text = _cached_text
+                    best_text, best_conf = self._recover_hangul_from_cache(track_key, best_text, best_conf)
+                    self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=True)
+                    # ★ 트래킹 다수결 안정화
+                    best_text, best_conf = self._stabilize_track_text(track_key, best_text, best_conf)
 
-            # ── 위치별 분리 투표 + HangulClassifier ──
-            best_text = ""
-            best_conf = 0.0
-            if all_candidates:
-                _re_split = re.compile(r'^(\d{2,3})([가-힣])(\d{4})$')
-                _re_split_old = re.compile(r'^([가-힣]{2,3})(\d{1,2})([가-힣])(\d{4})$')
-                new_parts, old_parts, other_candidates = [], [], []
-                for txt, c in all_candidates:
-                    m_new, m_old = _re_split.match(txt), _re_split_old.match(txt)
-                    if m_new:
-                        new_parts.append((m_new.group(1), m_new.group(2), m_new.group(3), c))
-                    elif m_old:
-                        old_parts.append((m_old.group(1), m_old.group(2), m_old.group(3), m_old.group(4), c))
-                    else:
-                        other_candidates.append((txt, c))
+                if best_text and best_conf >= self.config.OCR_CONF:
+                    seen_this_frame.add(best_text)
+                    plate_info = self.recent_plates[best_text]
+                    plate_info["consecutive"] = plate_info.get("consecutive", 0) + 1
+                    plate_info["last_seen"] = time.time()
+                    plate_info["count"] += 1
+                    # ★ 2LINE CRNN 복원 보너스: 복원 성공 시 consecutive +1 (2중 검증 효과)
+                    if locals().get("_2line_restored", False) and plate_info["consecutive"] == 1:
+                        plate_info["consecutive"] = 2
+                        print(f"[2LINE-BONUS] CRNN 2LINE 복원 → consecutive=2 (자동 확인)", flush=True)
+                    # ★ 후미 기반 consecutive 공유: 같은 한글+4자리를 가진 다른 변형에서 연속 카운트 이어받기
+                    # 예: "20나8060"(1/2) → "01나8060"(1/2가 아니라 2/2로 이어받음)
+                    # ★ fragment 방어: 새 번호판이 기존보다 짧으면 상속 차단 (86아6118 ← 전86아6118 방지)
+                    _suffix_m = re.search(r'[가-힣]\d{4}$', best_text)
+                    if _suffix_m and plate_info["consecutive"] == 1:
+                        _suffix = _suffix_m.group()
+                        _now = time.time()
+                        for _other_plate, _other_info in self.recent_plates.items():
+                            if (_other_plate != best_text
+                                    and _other_plate.endswith(_suffix)
+                                    and len(best_text) >= len(_other_plate)  # ★ fragment 차단: 짧은 쪽은 상속 불가
+                                    # ★ count 기반: 최근 5초 이내 1회 이상 감지된 적 있으면 공유
+                                    and _other_info.get("count", 0) >= 1
+                                    and (_now - _other_info.get("last_seen", 0)) < 5.0):
+                                _inherited = max(_other_info.get("consecutive", 0), 1) + 1
+                                plate_info["consecutive"] = _inherited
+                                print(f"[CONSEC-SHARE] '{best_text}' ← '{_other_plate}' "
+                                      f"후미 '{_suffix}' count={_other_info['count']} → consecutive={_inherited}",
+                                      flush=True)
+                                break
+                    # 디버그: consecutive 상태 추적
+                    print(f"[CONSEC] '{best_text}' conf={best_conf:.2f} "
+                          f"consecutive={plate_info['consecutive']}/{self.consecutive_required} "
+                          f"→ {'PASS' if plate_info['consecutive'] >= self.consecutive_required else 'WAIT'}",
+                          flush=True)
+                    if plate_info["consecutive"] >= self.consecutive_required:
+                        is_alert, alert_info = (0, None)
+                        if plate_info["consecutive"] == self.consecutive_required:
+                            try:
+                                is_alert, alert_info = self.db.record_plate(
+                                    best_text, best_conf, camera_id)
+                                if is_alert and alert_info:
+                                    self._trigger_alert(best_text, alert_info)
+                            except Exception:
+                                pass
+                        self.stats["plates_shown"] += 1
+                        self.stats["confidences"].append(best_conf)
+                        results.append({
+                            "plate": best_text,
+                            "confidence": best_conf,
+                            "bbox": plate_bbox,
+                            "vehicle_bbox": [vox1, voy1, vox2, voy2],
+                            "is_alert": bool(is_alert),
+                            "alert_info": alert_info,
+                        })
 
-                combined_best, combined_conf = "", 0.0
+        elif vehicle_boxes:
+            # ═══════════════════════════════════════════════
+            # Stage 2: 각 차량 크롭 → 번호판 탐지 → OCR
+            # ═══════════════════════════════════════════════
+            for vx1, vy1, vx2, vy2, vconf, varea in vehicle_boxes:
+                # 차량 bbox를 원본 프레임 좌표로 변환
+                vox1, voy1 = int(vx1 * sx), int(vy1 * sy)
+                vox2, voy2 = int(vx2 * sx), int(vy2 * sy)
+                vox1 = max(0, vox1); voy1 = max(0, voy1)
+                vox2 = min(cw_full, vox2); voy2 = min(ch_full, voy2)
 
-                # 신형 번호판 위치별 투표
-                if new_parts:
-                    pfx_c, hg_c, sfx_c = Counter(), Counter(), Counter()
-                    hg_confs = defaultdict(list)
-                    for pfx, hg, sfx, c in new_parts:
-                        pfx_c[pfx] += 1; hg_c[hg] += 1; sfx_c[sfx] += 1; hg_confs[hg].append(c)
-                    best_pfx = pfx_c.most_common(1)[0][0]
-                    best_hg = max(hg_confs.keys(), key=lambda k: sum(hg_confs[k]))
-                    # ★ 한글 초성 교차검증 (HangulClassifier)
-                    # ★ 영상 모드: 스킵 — PaddleOCR 6회 호출 절약, 트래커가 보정
-                    if not _is_video_mode and self._hangul_clf._ready and 'paddleocr' in self.ocr_engines and _clf_scale >= 1.0:
-                        try:
-                            _sc, _pd = _clf_scale, _clf_pad
-                            _px1, _py1 = _pd + (ox1 - rx1) * _sc, _pd + (oy1 - ry1) * _sc
-                            _pw, _ph = (ox2 - ox1) * _sc, (oy2 - oy1) * _sc
-                            _rh, _rw = roi_for_ocr.shape[:2]
-                            _hx1, _hx2 = max(0, int(_px1 + _pw * 0.26)), min(_rw, int(_px1 + _pw * 0.52))
-                            _hy1, _hy2 = max(0, int(_py1 + _ph * 0.20)), min(_rh, int(_py1 + _ph * 0.80))
-                            if _hx2 > _hx1 + 10 and _hy2 > _hy1 + 10:
-                                _hcrop = roi_for_ocr[_hy1:_hy2, _hx1:_hx2]
-                                _new_hg, _changed = self._hangul_clf.check_override(
-                                    best_hg, _hcrop, self.ocr_engines['paddleocr'], self.ocr_engines)
-                                if _changed:
-                                    best_hg = _new_hg
-                        except Exception:
-                            pass
-                    best_sfx = sfx_c.most_common(1)[0][0]
-                    synth = best_pfx + best_hg + best_sfx
-                    is_v, final_synth = self.validator.validate(synth)
-                    if is_v:
-                        combined_best = final_synth
-                        combined_conf = sum(c for _, _, _, c in new_parts) / len(new_parts)
-                    else:
-                        cnt_new = Counter(p + h + s for p, h, s, _ in new_parts)
-                        top = cnt_new.most_common(1)[0][0]
-                        combined_best = top
-                        combined_conf = sum(c for p, h, s, c in new_parts if p+h+s == top) / cnt_new[top]
-
-                # 구형 번호판 위치별 투표
-                if old_parts:
-                    rg_c, nm_c, hg_c2, sfx_c2 = Counter(), Counter(), Counter(), Counter()
-                    hg_confs_old = defaultdict(list)
-                    for rg, nm, hg, sfx, c in old_parts:
-                        rg_c[rg] += 1; nm_c[nm] += 1; hg_c2[hg] += 1; sfx_c2[sfx] += 1; hg_confs_old[hg].append(c)
-                    synth_old = rg_c.most_common(1)[0][0] + nm_c.most_common(1)[0][0] + \
-                        max(hg_confs_old.keys(), key=lambda k: sum(hg_confs_old[k])) + sfx_c2.most_common(1)[0][0]
-                    is_v, final_old = self.validator.validate(synth_old)
-                    if is_v:
-                        old_conf = sum(c for _, _, _, _, c in old_parts) / len(old_parts)
-                        if len(old_parts) > len(new_parts) or not combined_best:
-                            combined_best, combined_conf = final_old, old_conf
-
-                if other_candidates and not combined_best:
-                    cnt_o = Counter(t for t, _ in other_candidates)
-                    top_o = cnt_o.most_common(1)[0][0]
-                    combined_best = top_o
-                    combined_conf = sum(c for t, c in other_candidates if t == top_o) / cnt_o[top_o]
-
-                # 최종 결과 결정
-                cnt_all = Counter(t for t, _ in all_candidates)
-                whole_best = cnt_all.most_common(1)[0][0]
-                whole_count = cnt_all[whole_best]
-                whole_confs = [c for t, c in all_candidates if t == whole_best]
-                whole_conf = sum(whole_confs) / len(whole_confs)
-                if combined_best:
-                    best_text = combined_best
-                    _bt_c = [c for t, c in all_candidates if t == combined_best]
-                    best_conf = (max(_bt_c) * 0.6 + sum(_bt_c)/len(_bt_c) * 0.4) if _bt_c else combined_conf
-                else:
-                    best_text = whole_best
-                    best_conf = max(whole_confs) * 0.6 + whole_conf * 0.4
-
-                # 합의 강도 보너스
-                _tv = sum(cnt_all.values())
-                if _tv > 0:
-                    _tr = whole_count / _tv
-                    if _tr >= 0.80 and whole_count >= 3:
-                        best_conf = min(best_conf * 1.15, 1.0)
-                    elif _tr >= 0.60 and whole_count >= 2:
-                        best_conf = min(best_conf * 1.08, 1.0)
-
-                # 지역명 교정
-                _VR = set(PlateValidator._REGION_PREFIXES)
-                _re_wr = re.compile(r'^([가-힣]{2,3})(\d{2}[가-힣]\d{4})$')
-                _re_nr = re.compile(r'^\d{2,3}[가-힣]\d{4}$')
-                vrc = {}
-                for ct, cc in all_candidates:
-                    m_r = _re_wr.match(ct)
-                    if m_r and m_r.group(1) in _VR:
-                        vrc[m_r.group(1)] = vrc.get(m_r.group(1), 0) + 1
-                if _re_nr.match(best_text) and vrc:
-                    tr = max(vrc, key=vrc.get)
-                    is_v, final = self.validator.validate(tr + best_text)
-                    if is_v:
-                        best_text = final
-                elif _re_wr.match(best_text):
-                    mc = _re_wr.match(best_text)
-                    if mc.group(1) not in _VR and vrc:
-                        tr = max(vrc, key=vrc.get)
-                        is_v, final = self.validator.validate(tr + mc.group(2))
-                        if is_v:
-                            best_text = final
-
-            if best_text and best_conf >= self.config.OCR_CONF:
-                # ★ 번호 범위 검증 페널티 (앞 2~3자리 숫자 범위)
-                _num_range_penalty = 1.0
-                _m_prefix = re.match(r'^(?:[가-힣]{2,3})?(\d{2,3})[가-힣]\d{4}$', best_text)
-                if _m_prefix:
-                    _pnum = int(_m_prefix.group(1))
-                    if len(_m_prefix.group(1)) == 3:
-                        # 신형 3자리: 100~997 정상, 000~099/998~999 비정상
-                        if _pnum < 100 or _pnum > 997:
-                            _num_range_penalty = 0.70  # 30% 감점
-                    # 2자리(구형)는 01~99 모두 정상 → 페널티 없음
-
-                # ★ OCR 신뢰도 기반 bbox 페널티 완화
-                # OCR이 강한 합의를 달성하면 bbox 크기 불확실성이 해소됨
-                # → 소형 번호판이라도 OCR 정확하면 페널티 감면
-                if best_conf >= 0.90:
-                    _bbox_relief = 0.6   # 고신뢰: 페널티 60% 감면
-                elif best_conf >= 0.80:
-                    _bbox_relief = 0.4   # 중신뢰: 40% 감면
-                elif best_conf >= 0.70:
-                    _bbox_relief = 0.2   # 저신뢰: 20% 감면
-                else:
-                    _bbox_relief = 0.0   # 불확실: 감면 없음
-                _bbox_conf_penalty += (1.0 - _bbox_conf_penalty) * _bbox_relief
-
-                # ★ bbox 크기 + 색상 + 번호범위 기반 신뢰도 페널티 적용
-                # ★ 페널티 곱셈에 바닥값 0.70 보호 (과도한 감점 방지: 0.42→0.70 이상)
-                _combined_penalty = max(_bbox_conf_penalty * _color_conf_penalty * _num_range_penalty, 0.70)
-                best_conf *= _combined_penalty
-
-                # ★ 패턴 검증 통과 + OCR 합의 강도에 따른 적응형 신뢰도 floor
-                # OCR 원본 conf(페널티 적용 전)가 높을수록 floor도 높게 설정
-                # → bbox가 작아도 OCR이 확신하면 높은 최종 신뢰도 보장
-                _raw_conf_before_penalty = best_conf / max(_combined_penalty, 0.01)
-                if _raw_conf_before_penalty >= 0.95:
-                    _floor = 0.92 if not _is_small_plate else 0.90
-                elif _raw_conf_before_penalty >= 0.85:
-                    _floor = 0.85 if not _is_small_plate else 0.80
-                elif _raw_conf_before_penalty >= 0.75:
-                    _floor = 0.78 if not _is_small_plate else 0.72
-                else:
-                    _floor = 0.70 if not _is_small_plate else 0.60
-                best_conf = max(best_conf, _floor)
-
-                # ★ 신뢰도 최종 필터: 소형 0.40, 일반 0.45, 대형(가까운 차) 0.40 (완화)
-                _is_large_plate = det_w >= 150
-                if _is_small_plate:
-                    _conf_threshold = 0.40
-                elif _is_large_plate:
-                    _conf_threshold = 0.40
-                else:
-                    _conf_threshold = 0.45
-                if best_conf < _conf_threshold:
-                    self.stats["filtered_by_confidence"] = self.stats.get("filtered_by_confidence", 0) + 1
+                vehicle_crop = crop_src[voy1:voy2, vox1:vox2]
+                bw = vox2 - vox1; bh = voy2 - voy1
+                if bw < 50 or bh < 20:
+                    continue  # Skip tiny plates
+                if vehicle_crop.size == 0:
                     continue
 
-                # ── PlateTracker: 이미 매칭된 트랙 재사용 (OCR 스킵 사전체크에서 매칭 완료) ──
-                matched_trk, is_new_track = _pre_trk, _pre_is_new
+                # Stage2: 번호판 탐지 (best.pt)
+                # 차량이 프레임 우측 절반에 있으면 좌측 부분만 크롭 (번호판은 차량 앞쪽)
+                if vx1 > cw_det * 0.4:
+                    crop_w = vox2 - vox1
+                    vehicle_crop = vehicle_crop[:, :int(crop_w * 0.6)]
+                    if vehicle_crop.size == 0:
+                        vehicle_crop = crop_src[voy1:voy2, vox1:vox2]
+                plate_detections = self.model(vehicle_crop, conf=0.05, imgsz=640, verbose=False)
+                n_plates = len(plate_detections[0].boxes)
+                print(f"[PLATE-DBG2] stage2 plates={n_plates}", flush=True)
 
-                # ★ 텍스트 기반 트랙 병합: IoU로 새 트랙이 됐지만 같은 텍스트의 기존 트랙이 있으면 병합
-                # → 차량 이동으로 IoU < 0.30 → 새 트랙 생성 → 동일 번호판 텍스트로 기존 트랙과 연결
-                # ★ 중심 거리 200px 이상이면 다른 차량으로 판단 → 병합 거부
-                if is_new_track and best_text:
-                    _new_cx = (cur_bbox[0] + cur_bbox[2]) / 2
-                    _new_cy = (cur_bbox[1] + cur_bbox[3]) / 2
-                    for _exist_trk in self._tracker.tracks:
-                        if _exist_trk is matched_trk:
-                            continue
-                        if _exist_trk["texts"]:
-                            _exist_top = max(_exist_trk["texts"], key=_exist_trk["texts"].get)
-                            if _exist_top == best_text:
-                                # ★ 중심 거리 체크: 200px 이상이면 다른 차량
-                                _e_bbox = _exist_trk["bbox"]
-                                _exist_cx = (_e_bbox[0] + _e_bbox[2]) / 2
-                                _exist_cy = (_e_bbox[1] + _e_bbox[3]) / 2
-                                _cdist = (((_new_cx - _exist_cx) ** 2) + ((_new_cy - _exist_cy) ** 2)) ** 0.5
-                                if _cdist >= 200:
-                                    continue  # 거리 200px+ → 같은 텍스트라도 다른 차량
-                                # 기존 트랙 데이터를 새 트랙으로 이전
-                                matched_trk["texts"] = _exist_trk["texts"]
-                                matched_trk["best_conf"] = max(matched_trk["best_conf"], _exist_trk["best_conf"])
-                                matched_trk["_detect_count"] = _exist_trk.get("_detect_count", 0) + 1
-                                matched_trk["consecutive"] = _exist_trk["consecutive"] + 1
-                                matched_trk["recorded"] = _exist_trk["recorded"]
-                                # 기존 트랙 무효화
-                                _exist_trk["texts"] = defaultdict(int)
-                                _exist_trk["last_frame"] = 0
-                                is_new_track = False
-                                break
+                # ★ 폴백: best.pt 미탐지 → 차량 하단 40% 직접 OCR
+                if n_plates == 0 and bh > 40:
+                    bottom_crop = crop_src[voy1 + int(bh * 0.6):voy2, vox1:vox2]
+                    if bottom_crop.size > 0:
+                        fb_text, fb_conf = self._ocr_plate_roi(bottom_crop)
+                        if fb_text and fb_conf >= self.config.OCR_CONF:
+                            fb_bbox = [vox1, voy1 + int(bh * 0.6), vox2, voy2]
+                            print(f"[FALLBACK-OCR] text={fb_text} conf={fb_conf:.2f}", flush=True)
+                            seen_this_frame.add(fb_text)
+                            plate_info = self.recent_plates[fb_text]
+                            plate_info["consecutive"] = plate_info.get("consecutive", 0) + 1
+                            plate_info["last_seen"] = time.time()
+                            plate_info["count"] += 1
+                            if plate_info["consecutive"] >= self.consecutive_required:
+                                is_alert, alert_info = (0, None)
+                                if plate_info["consecutive"] == self.consecutive_required:
+                                    try:
+                                        is_alert, alert_info = self.db.record_plate(fb_text, fb_conf, camera_id)
+                                    except Exception:
+                                        pass
+                                results.append({
+                                    "plate": fb_text, "confidence": fb_conf,
+                                    "bbox": fb_bbox, "vehicle_bbox": [vox1, voy1, vox2, voy2],
+                                    "is_alert": bool(is_alert), "alert_info": alert_info,
+                                })
 
-                # ★ 투표 decay: 새 텍스트가 기존 최다 투표와 다르면 이전 투표 전부 삭제
-                # → 새 차량이 즉시(프레임 1) 이전 차량을 역전
-                # → 차량 교체 시 잔존 투표 완전 제거 (Ghost 근본 차단)
-                if matched_trk["texts"] and not is_new_track:
-                    _cur_top = max(matched_trk["texts"], key=matched_trk["texts"].get)
-                    if best_text != _cur_top:
-                        # ★ 소형→근거리 대체: 근거리 결과(bbox >= 100px)가 소형 결과를 즉시 교체
-                        # 소형 결과(bbox < 70px)끼리 충돌 시에는 decay 하지 않음 (불안정하므로)
-                        _cur_top_from_small = matched_trk.get("_last_small_plate", False)
-                        if _is_small_plate and _cur_top_from_small:
-                            pass  # 소형끼리는 유지 (불안정한 교체 방지)
-                        else:
-                            matched_trk["texts"].clear()
+                for pdet in plate_detections[0].boxes:
+                    px1, py1, px2, py2 = map(int, pdet.xyxy[0].tolist())
+                    pconf = float(pdet.conf[0])
 
-                # ★ 소형 번호판 투표 가중치: 1표, 일반: bbox 크기 비례 (1~3표)
-                if _is_small_plate:
-                    _vote_weight = 1
-                elif det_w >= 120:
-                    _vote_weight = 3   # 대형 bbox → 3표 (근거리 고신뢰)
-                elif det_w >= 100:
-                    _vote_weight = 2   # 중대형 → 2표
+                    # 번호판 bbox → 원본 프레임 전역 좌표 변환
+                    plate_x1_global = vox1 + px1
+                    plate_y1_global = voy1 + py1
+                    plate_x2_global = vox1 + px2
+                    plate_y2_global = voy1 + py2
+
+                    # 마진 확장
+                    pw = plate_x2_global - plate_x1_global
+                    ph = plate_y2_global - plate_y1_global
+                    margin_x = int(pw * 0.2)
+                    margin_y = int(ph * 0.25)
+                    rx1 = max(0, plate_x1_global - margin_x)
+                    ry1 = max(0, plate_y1_global - margin_y)
+                    rx2 = min(cw_full, plate_x2_global + margin_x)
+                    ry2 = min(ch_full, plate_y2_global + margin_y)
+                    roi = crop_src[ry1:ry2, rx1:rx2]
+
+                    if roi.size == 0:
+                        continue
+
+                    plate_bbox = [plate_x1_global, plate_y1_global,
+                                  plate_x2_global, plate_y2_global]
+                    track_key = self._make_track_key(plate_bbox)
+                    seen_track_keys.add(track_key)  # ★ 고스트 방지
+                    # ★ 캐시 무효화: frames_absent > 0 또는 bbox 중심 급변 시 새 차량으로 판단
+                    if track_key in self._ocr_track_cache:
+                        _cache = self._ocr_track_cache[track_key]
+                        _need_reset = False
+                        if _cache.get("frames_absent", 0) > 0:
+                            _need_reset = True
+                        _last_bbox = _cache.get("bbox")
+                        if _last_bbox and not _need_reset:
+                            _lcx = (_last_bbox[0] + _last_bbox[2]) / 2
+                            _lcy = (_last_bbox[1] + _last_bbox[3]) / 2
+                            _ccx = (plate_bbox[0] + plate_bbox[2]) / 2
+                            _ccy = (plate_bbox[1] + plate_bbox[3]) / 2
+                            if ((_lcx - _ccx)**2 + (_lcy - _ccy)**2) ** 0.5 > 25:
+                                _need_reset = True
+                        if _need_reset:
+                            print(f"[GHOST-RESET] 캐시 초기화: key={track_key}", flush=True)
+                            del self._ocr_track_cache[track_key]
+                    skip_ocr = self._should_skip_ocr(track_key, plate_bbox)
+
+                    if skip_ocr:
+                        best_text, best_conf = self._get_cached_ocr(track_key)
+                        self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=False)
+                    else:
+                        best_text, best_conf = self._ocr_plate_roi(roi, use_multiframe)
+                        # ★ 히스토리 기반 2LINE 복원
+                        if (re.match(r'^[가-힣]\d{4}$', best_text)
+                                and track_key in self._ocr_track_cache):
+                            _cached = self._ocr_track_cache[track_key]
+                            _cached_text = _cached.get("text", "")
+                            if (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', _cached_text)
+                                    and _cached_text.endswith(best_text)):
+                                print(f"[2LINE-HIST] 히스토리 기반 복원: {best_text} → {_cached_text}", flush=True)
+                                best_text = _cached_text
+                        best_text, best_conf = self._recover_hangul_from_cache(track_key, best_text, best_conf)
+                        self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=True)
+                    # ★ 트래킹 다수결 안정화
+                    best_text, best_conf = self._stabilize_track_text(track_key, best_text, best_conf)
+
+                    if best_text and best_conf >= self.config.OCR_CONF:
+                        seen_this_frame.add(best_text)
+                        plate_info = self.recent_plates[best_text]
+                        plate_info["consecutive"] = plate_info.get("consecutive", 0) + 1
+                        plate_info["last_seen"] = time.time()
+                        plate_info["count"] += 1
+
+                        if plate_info["consecutive"] >= self.consecutive_required:
+                            is_alert, alert_info = (0, None)
+                            if plate_info["consecutive"] == self.consecutive_required:
+                                try:
+                                    is_alert, alert_info = self.db.record_plate(
+                                        best_text, best_conf, camera_id
+                                    )
+                                    if is_alert and alert_info:
+                                        self._trigger_alert(best_text, alert_info)
+                                except Exception:
+                                    pass
+                            self.stats["plates_shown"] += 1
+                            self.stats["confidences"].append(best_conf)
+                            results.append({
+                                "plate": best_text,
+                                "confidence": best_conf,
+                                "bbox": plate_bbox,
+                                "vehicle_bbox": [vox1, voy1, vox2, voy2],
+                                "is_alert": bool(is_alert),
+                                "alert_info": alert_info,
+                            })
+        else:
+            # ═══════════════════════════════════════════════
+            # 폴백: 차량 0대 → 기존 1-Stage (번호판 직접 탐지)
+            # ═══════════════════════════════════════════════
+            detections = self.model(frame, conf=self.config.DETECT_CONF, verbose=False)
+
+            for det in detections[0].boxes:
+                x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
+                conf = float(det.conf[0])
+
+                ox1, oy1 = int(x1 * sx), int(y1 * sy)
+                ox2, oy2 = int(x2 * sx), int(y2 * sy)
+
+                # ROI 필터: 번호판 중심이 ROI 밖이면 스킵
+                if ThresholdConfig.ROI_ENABLED:
+                    pcx = (ox1 + ox2) // 2
+                    pcy = (oy1 + oy2) // 2
+                    r_x1 = int(ThresholdConfig.ROI_X1 * cw_full / 1920)
+                    r_y1 = int(ThresholdConfig.ROI_Y1 * ch_full / 1080)
+                    r_x2 = int(ThresholdConfig.ROI_X2 * cw_full / 1920)
+                    r_y2 = int(ThresholdConfig.ROI_Y2 * ch_full / 1080)
+                    if not (r_x1 <= pcx <= r_x2 and r_y1 <= pcy <= r_y2):
+                        continue
+
+                margin_x = int((ox2 - ox1) * 0.1)
+                margin_y = int((oy2 - oy1) * 0.15)
+                rx1 = max(0, ox1 - margin_x)
+                ry1 = max(0, oy1 - margin_y)
+                rx2 = min(cw_full, ox2 + margin_x)
+                ry2 = min(ch_full, oy2 + margin_y)
+                roi = crop_src[ry1:ry2, rx1:rx2]
+
+                if roi.size == 0:
+                    continue
+
+                plate_bbox = [ox1, oy1, ox2, oy2]
+                track_key = self._make_track_key(plate_bbox)
+                seen_track_keys.add(track_key)  # ★ 고스트 방지
+                # ★ 캐시 무효화: frames_absent > 0 또는 bbox 중심 급변 시 새 차량으로 판단
+                if track_key in self._ocr_track_cache:
+                    _cache = self._ocr_track_cache[track_key]
+                    _need_reset = False
+                    # 조건1: 미감지 이력 있음 → 재출현 = 새 차량
+                    if _cache.get("frames_absent", 0) > 0:
+                        _need_reset = True
+                    # 조건2: bbox 중심 25px 이상 점프 → 같은 키지만 다른 물체
+                    _last_bbox = _cache.get("bbox")
+                    if _last_bbox and not _need_reset:
+                        _lcx = (_last_bbox[0] + _last_bbox[2]) / 2
+                        _lcy = (_last_bbox[1] + _last_bbox[3]) / 2
+                        _ccx = (plate_bbox[0] + plate_bbox[2]) / 2
+                        _ccy = (plate_bbox[1] + plate_bbox[3]) / 2
+                        if ((_lcx - _ccx)**2 + (_lcy - _ccy)**2) ** 0.5 > 25:
+                            _need_reset = True
+                    if _need_reset:
+                        print(f"[GHOST-RESET] 캐시 초기화: key={track_key}", flush=True)
+                        del self._ocr_track_cache[track_key]
+                skip_ocr = self._should_skip_ocr(track_key, plate_bbox)
+
+                if skip_ocr:
+                    best_text, best_conf = self._get_cached_ocr(track_key)
+                    self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=False)
                 else:
-                    _vote_weight = 1   # 중소형 → 1표
-                # ── Ghost 방지: 투표 전 텍스트 불일치 체크 ──
-                if self._tracker._should_reset_texts(matched_trk, [ox1, oy1, ox2, oy2], new_text=best_text):
-                    self._tracker._reset_track_texts(matched_trk)
-                matched_trk["texts"][best_text] += _vote_weight
-                matched_trk["_last_small_plate"] = _is_small_plate
+                    best_text, best_conf = self._ocr_plate_roi(roi, use_multiframe)
+                    # ★ 히스토리 기반 2LINE 복원
+                    if (re.match(r'^[가-힣]\d{4}$', best_text)
+                            and track_key in self._ocr_track_cache):
+                        _cached = self._ocr_track_cache[track_key]
+                        _cached_text = _cached.get("text", "")
+                        if (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', _cached_text)
+                                and _cached_text.endswith(best_text)):
+                            print(f"[2LINE-HIST] 히스토리 기반 복원: {best_text} → {_cached_text}", flush=True)
+                            best_text = _cached_text
+                    best_text, best_conf = self._recover_hangul_from_cache(track_key, best_text, best_conf)
+                    self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=True)
+                # ★ 트래킹 다수결 안정화
+                best_text, best_conf = self._stabilize_track_text(track_key, best_text, best_conf)
 
-                # 해당 위치에서 가장 많이 읽힌 텍스트 사용
-                top_text = max(matched_trk["texts"], key=matched_trk["texts"].get)
-                top_conf = max(best_conf, matched_trk.get("best_conf", 0))
-                matched_trk["best_conf"] = top_conf
+                if best_text and best_conf >= self.config.OCR_CONF:
+                    seen_this_frame.add(best_text)
+                    plate_info = self.recent_plates[best_text]
+                    plate_info["consecutive"] = plate_info.get("consecutive", 0) + 1
+                    plate_info["last_seen"] = time.time()
+                    plate_info["count"] += 1
 
-                # 기존 text 기반 추적도 유지 (호환성)
-                seen_this_frame.add(top_text)
-                plate_info = self.recent_plates[top_text]
-                plate_info["consecutive"] = matched_trk["consecutive"]
-                plate_info["last_seen"] = time.time()
-                plate_info["count"] += 1
+                    if plate_info["consecutive"] >= self.consecutive_required:
+                        is_alert, alert_info = (0, None)
+                        if plate_info["consecutive"] == self.consecutive_required:
+                            try:
+                                is_alert, alert_info = self.db.record_plate(
+                                    best_text, best_conf, camera_id
+                                )
+                                if is_alert and alert_info:
+                                    self._trigger_alert(best_text, alert_info)
+                            except Exception:
+                                pass
+                        self.stats["plates_shown"] += 1
+                        self.stats["confidences"].append(best_conf)
+                        results.append({
+                            "plate": best_text,
+                            "confidence": best_conf,
+                            "bbox": plate_bbox,
+                            "vehicle_bbox": None,
+                            "is_alert": bool(is_alert),
+                            "alert_info": alert_info,
+                        })
 
-                # ★ 표시 기준: consecutive >= N 또는 감지 프레임 >= N (비연속 허용)
-                # _detect_count: 투표 가중치 무관, 실제 감지된 프레임 수
-                _detect_count = matched_trk.get("_detect_count", matched_trk["consecutive"])
-                _show = (matched_trk["consecutive"] >= self.consecutive_required
-                         or _detect_count >= self.consecutive_required)
-                if _show:
-                    is_alert, alert_info = (0, None)
-                    if not matched_trk["recorded"]:
-                        matched_trk["recorded"] = True
-                        try:
-                            is_alert, alert_info = self.db.record_plate(
-                                top_text, top_conf, camera_id
-                            )
-                            if is_alert and alert_info:
-                                self._trigger_alert(top_text, alert_info)
-                        except Exception:
-                            pass
-                    self.stats["plates_shown"] += 1
-                    self.stats["confidences"].append(top_conf)
+        # ── OCR conf 필터 + 중복 제거 (conf ≥ 0.30으로 완화 — 저해상도/2LINE 결과 보호) ──
+        _before_filter = len(results)
+        results = [r for r in results if r.get("confidence", 0) >= 0.30]
+        results = self._deduplicate_results(results)
+        # ★ 최종 변이 통합: 전역 히스토리에서 같은 숫자부의 최다 득표 텍스트로 강제 교체
+        results = self._unify_plate_variants(results)
+        if _before_filter > 0 and len(results) == 0:
+            print(f"[FILTER] {_before_filter}개 결과 → conf<0.30 필터로 전부 제거됨!", flush=True)
 
-                    # ★ 프레임 카운트 (해당 위치에서 해당 텍스트가 읽힌 횟수)
-                    _frame_count = matched_trk["texts"].get(top_text, 1)
-                    # ★ 다중 프레임 투표 보너스 (반복 감지 → 신뢰도 보강)
-                    if _frame_count >= 5:
-                        _frame_bonus = 0.10   # 5프레임 이상 → +10%
-                    elif _frame_count >= 3:
-                        _frame_bonus = 0.05   # 3프레임 이상 → +5%
-                    elif _frame_count >= 2:
-                        _frame_bonus = 0.02   # 2프레임 → +2%
-                    else:
-                        _frame_bonus = 0
-                    _adj_conf = min(top_conf + _frame_bonus, 1.0)
-                    _conf_level = self.validator.get_confidence_level(_adj_conf)
-                    # ★ 영상 모드: frame_count 1회도 출력 허용 (엔진 consecutive로 이미 필터됨)
-                    if _is_small_plate:
-                        _conf_level += "(원거리)"
-
-                    # ★ bbox 면적 및 번호판 줄 수 판단
-                    _bbox_w = ox2 - ox1
-                    _bbox_h = oy2 - oy1
-                    _bbox_area = _bbox_w * _bbox_h
-                    _aspect = _bbox_w / max(_bbox_h, 1)
-                    _plate_lines = 1 if _aspect > 2.5 else 2
-
-                    # ★ 번호판 색상 감지 (ROI의 HSV 분석)
-                    _plate_color = "흰색바탕_검은글씨"  # 기본값
-                    if _is_green_plate:
-                        _plate_color = "초록색바탕_흰글씨"
-                    else:
-                        try:
-                            _hsv_roi = cv2.cvtColor(roi, cv2.COLOR_BGR2HSV)
-                            _h_mean = np.mean(_hsv_roi[:, :, 0])
-                            _s_mean = np.mean(_hsv_roi[:, :, 1])
-                            _v_mean = np.mean(_hsv_roi[:, :, 2])
-                            if 20 < _h_mean < 35 and _s_mean > 60:
-                                _plate_color = "노란색바탕_검은글씨"
-                            elif 95 < _h_mean < 130 and _s_mean > 40:
-                                _plate_color = "파란색바탕_흰글씨"
-                        except Exception:
-                            pass
-
-                    # [평가기준 20점] 차량번호 인식 표시 (강화 출력 형식)
-                    # velocity/area_rate: 고의적 길막 시맨틱 판정용 (DistanceChecker 등에서 사용)
-                    results.append({
-                        # ── 기존 호환 필드 (plate_gui.py 등) ──
-                        "plate": top_text,
-                        "confidence": top_conf,
-                        "bbox": [ox1, oy1, ox2, oy2],
-                        "is_alert": bool(is_alert),
-                        "alert_info": alert_info,
-                        "velocity": matched_trk.get("velocity", (0.0, 0.0)),
-                        "area_rate": matched_trk.get("area_rate", 0.0),
-                        # ── 강화 필드 (LPR 프롬프트 규격) ──
-                        "plate_number": top_text,
-                        "confidence_level": _conf_level,
-                        "plate_type": self.validator.classify_plate_type(top_text),
-                        "vehicle_type": self.validator.classify_vehicle_type(top_text),
-                        "plate_lines": _plate_lines,
-                        "plate_color": _plate_color,
-                        "bbox_area": _bbox_area,
-                        "frame_count": _frame_count,
-                        "is_valid_format": True,
-                        "rejection_reason": None,
-                    })
-
-        # ── PlateTracker: 프레임 종료 (미감지 트랙 처리 + TTL 만료) ──
-        self._tracker.end_frame()
-        self._pos_trackers = self._tracker.tracks
-
-        # 기존 text 기반 리셋도 유지
+        # ★ 이번 프레임에 없던 번호판은 연속 카운트 점진적 감소 (grace period)
+        # 1프레임 미감지 시 -1, 0 이하가 되면 0 유지 (즉시 리셋 → 점진 감소로 변경)
         for key in list(self.recent_plates.keys()):
             if key not in seen_this_frame:
-                self.recent_plates[key]["consecutive"] = 0
+                _cur = self.recent_plates[key].get("consecutive", 0)
+                self.recent_plates[key]["consecutive"] = max(0, _cur - 1)
 
-        # ── 차선 필터: 화면 우측 90% 이상 영역 번호판 제외 (옆 차선 오인식 방지) ──
-        results = [r for r in results if r.get('bbox', [0])[0] < frame.shape[1] * 0.90]
+        # ★ 고스트 방지: 이번 프레임에 미감지된 트랙 → frames_absent 증가
+        # 3프레임 연속 미감지 시 캐시 삭제 → 새 차량이 같은 위치 진입해도 구 트랙 재사용 안 함
+        for _tk in list(self._ocr_track_cache.keys()):
+            if _tk not in seen_track_keys:
+                self._ocr_track_cache[_tk]["frames_absent"] = (
+                    self._ocr_track_cache[_tk].get("frames_absent", 0) + 1
+                )
+                if self._ocr_track_cache[_tk]["frames_absent"] >= 3:
+                    print(f"[GHOST] 트랙 만료: key={_tk} (3프레임 미감지)", flush=True)
+                    del self._ocr_track_cache[_tk]
+            else:
+                self._ocr_track_cache[_tk]["frames_absent"] = 0
+
+        # OCR 트랙 캐시: 오래된 엔트리 정리 (15개 초과 시 가장 오래된 것 제거)
+        if len(self._ocr_track_cache) > 15:
+            sorted_keys = sorted(self._ocr_track_cache.keys(),
+                                 key=lambda k: self._ocr_track_cache[k].get("frame_since_ocr", 0),
+                                 reverse=True)
+            for k in sorted_keys[10:]:
+                del self._ocr_track_cache[k]
+
+        # 캐시 갱신 (프레임 스킵 시 재사용)
+        self._cached_results = list(results)
+
+        # 디버그: 최종 리턴 결과 추적
+        if results:
+            print(f"[ENGINE-RETURN] {len(results)}개 결과 → "
+                  + ", ".join(f"{r['plate']}({r['confidence']:.2f})" for r in results),
+                  flush=True)
+        else:
+            # 캐시 히트인 경우만 표시 안함 (매 프레임 출력 방지)
+            if self._frame_counter % self._frame_skip_interval == 1:
+                print(f"[ENGINE-RETURN] YOLO 실행했지만 결과 0개 (consecutive_req={self.consecutive_required})",
+                      flush=True)
 
         return results
 
-    @staticmethod
-    def _bbox_iou(a, b):
-        """두 bbox [x1,y1,x2,y2] 간 IoU 계산"""
-        x1 = max(a[0], b[0]); y1 = max(a[1], b[1])
-        x2 = min(a[2], b[2]); y2 = min(a[3], b[3])
-        inter = max(0, x2 - x1) * max(0, y2 - y1)
-        area_a = (a[2] - a[0]) * (a[3] - a[1])
-        area_b = (b[2] - b[0]) * (b[3] - b[1])
-        union = area_a + area_b - inter
-        return inter / union if union > 0 else 0
+    # ── CRNN 한글 검증 ──
+    def _load_crnn(self):
+        """plate_ocr_crnn.pth 로드 (없으면 스킵)"""
+        import torch
+        import torch.nn as nn
+        crnn_path = Path(__file__).parent / "plate_ocr_crnn.pth"
+        if not crnn_path.exists():
+            print("[CRNN] plate_ocr_crnn.pth 없음 — 한글 검증 비활성화")
+            return
+        try:
+            ckpt = torch.load(str(crnn_path), map_location="cpu", weights_only=False)
+            self._crnn_idx2char = {int(k): v for k, v in ckpt["idx2char"].items()}
+            self._crnn_vocab = set(ckpt["vocab"])
+            nc = ckpt["num_classes"]
+            hid = ckpt["hidden_size"]
+            nl = ckpt["num_layers"]
+
+            class _CRNN(nn.Module):
+                def __init__(s):
+                    super().__init__()
+                    s.cnn = nn.Sequential(
+                        nn.Conv2d(1,64,3,1,1),nn.BatchNorm2d(64),nn.ReLU(True),nn.MaxPool2d(2,2),
+                        nn.Conv2d(64,128,3,1,1),nn.BatchNorm2d(128),nn.ReLU(True),nn.MaxPool2d(2,2),
+                        nn.Conv2d(128,256,3,1,1),nn.BatchNorm2d(256),nn.ReLU(True),
+                        nn.Conv2d(256,256,3,1,1),nn.BatchNorm2d(256),nn.ReLU(True),
+                        nn.MaxPool2d((2,2),(2,1),(0,1)),
+                        nn.Conv2d(256,512,3,1,1),nn.BatchNorm2d(512),nn.ReLU(True),
+                        nn.Conv2d(512,512,3,1,1),nn.BatchNorm2d(512),nn.ReLU(True),
+                        nn.MaxPool2d((2,2),(2,1),(0,1)),
+                        nn.Conv2d(512,512,3,1,1),nn.BatchNorm2d(512),nn.ReLU(True),
+                        nn.MaxPool2d((2,2),(2,1),(0,1)),
+                        nn.Conv2d(512,512,(2,1),1,0),nn.BatchNorm2d(512),nn.ReLU(True),
+                    )
+                    s.rnn = nn.LSTM(512,hid,nl,bidirectional=True,batch_first=True,dropout=0.2)
+                    s.fc = nn.Linear(hid*2, nc)
+                def forward(s, x):
+                    c = s.cnn(x).squeeze(2).permute(0,2,1)
+                    r,_ = s.rnn(c)
+                    return s.fc(r).permute(1,0,2)
+
+            m = _CRNN()
+            m.load_state_dict(ckpt["model_state"])
+            m.eval()
+            self._crnn_model = m
+            print(f"[CRNN] 로드 완료: {nc} classes, acc={ckpt.get('accuracy','?')}")
+        except Exception as e:
+            print(f"[CRNN] 로드 실패: {e}")
+
+    def _crnn_read_plate(self, roi, return_confidence=False):
+        """CRNN으로 번호판 ROI 읽기 → 텍스트 반환 (선택적 신뢰도 포함)
+
+        Args:
+            roi: 번호판 ROI 이미지 (BGR)
+            return_confidence: True면 (텍스트, 신뢰도) 튜플 반환
+
+        Returns:
+            return_confidence=False: 텍스트 문자열
+            return_confidence=True: (텍스트, 평균_신뢰도) 튜플
+        """
+        import torch
+        if self._crnn_model is None:
+            return ("", 0.0) if return_confidence else ""
+        h, w = roi.shape[:2]
+        ratio = 64 / h
+        nw = min(int(w * ratio), 256)
+        resized = cv2.resize(roi, (nw, 64), interpolation=cv2.INTER_CUBIC)
+        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
+        if nw < 256:
+            gray = np.concatenate([gray, np.ones((64, 256 - nw), dtype=np.uint8) * 255], axis=1)
+        t = torch.FloatTensor(gray.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)
+        with torch.no_grad():
+            out = self._crnn_model(t)
+        # softmax로 각 타임스텝별 신뢰도 계산
+        probs = torch.nn.functional.softmax(out, dim=2)
+        max_probs, preds = probs.max(2)
+        preds = preds.transpose(0, 1)
+        max_probs = max_probs.transpose(0, 1)
+        chars = []
+        char_confs = []
+        prev = -1
+        for ti in range(preds.size(1)):
+            p = preds[0, ti].item()
+            if p != 0 and p != prev and p in self._crnn_idx2char:
+                chars.append(self._crnn_idx2char[p])
+                char_confs.append(max_probs[0, ti].item())
+            prev = p
+        text = "".join(chars)
+        if return_confidence:
+            # 평균 신뢰도 계산 (글자가 없으면 0.0)
+            avg_conf = sum(char_confs) / len(char_confs) if char_confs else 0.0
+            return text, avg_conf
+        return text
+
+    def _verify_korean_with_crnn(self, paddle_text, roi, crnn_text=None, crnn_conf=None):
+        """PaddleOCR 결과의 한글을 CRNN 결과로 교차검증.
+
+        PaddleOCR: 숫자 정확, 한글 부정확
+        CRNN: 한글 정확 (전용 79자 사전)
+        → PaddleOCR 숫자 + CRNN 한글 = 최적 조합
+
+        ★ 과적합 방어: CRNN 숫자가 PaddleOCR과 크게 다르면 교정 거부
+        """
+        if self._crnn_model is None:
+            return paddle_text
+
+        # PaddleOCR 결과에서 한글 위치 확인
+        m = re.match(r'^(\d{2,3})([가-힣])(\d{4})$', paddle_text)
+        if not m:
+            return paddle_text
+
+        # CRNN으로 같은 ROI 읽기 (신뢰도 포함)
+        if crnn_conf is None:
+            crnn_conf = 1.0  # 기본값 (외부에서 전달된 경우)
+        if crnn_text is None:
+            crnn_text, crnn_conf = self._crnn_read_plate(roi, return_confidence=True)
+        if not crnn_text:
+            return paddle_text
+
+        # ── 과적합 방어 1: CRNN 신뢰도 검증 ──
+        # 신뢰도 0.70 미만이면 CRNN 결과를 신뢰하지 않음
+        # (정상 교정 케이스 최저 0.79, 과적합은 숫자 불일치로 별도 차단)
+        if crnn_conf < 0.70:
+            print(f"[CRNN-SKIP] 신뢰도 부족 {crnn_conf:.2f}<0.70, PaddleOCR 유지: {paddle_text}", flush=True)
+            return paddle_text
+
+        # ── 과적합 방어 2: 숫자 교차검증 ──
+        # CRNN 결과의 숫자가 PaddleOCR 숫자와 일치하는지 확인
+        # (과적합된 CRNN은 완전히 다른 번호판 숫자를 출력함)
+        paddle_digits = m.group(1) + m.group(3)  # 예: "86" + "6118" = "866118"
+        crnn_digits = re.sub(r'[^0-9]', '', crnn_text)  # CRNN 결과에서 숫자만 추출
+
+        if crnn_digits and paddle_digits:
+            # 앞 2자리(번호 앞부분) 또는 뒤 4자리(번호 뒷부분) 중 하나라도 일치해야 교정 허용
+            paddle_prefix = m.group(1)  # 앞 2~3자리
+            paddle_suffix = m.group(3)  # 뒤 4자리
+            crnn_has_prefix = paddle_prefix in crnn_digits[:len(paddle_prefix)+1]
+            crnn_has_suffix = paddle_suffix in crnn_digits[-5:]  # 여유 1자리 포함 검색
+
+            if not crnn_has_prefix and not crnn_has_suffix:
+                print(f"[CRNN-SKIP] 숫자 불일치 paddle={paddle_digits} crnn={crnn_digits}, PaddleOCR 유지: {paddle_text}", flush=True)
+                return paddle_text
+
+        # CRNN 결과에서 한글 추출
+        mc = re.match(r'^\d{2,3}([가-힣])\d{4}$', crnn_text)
+        if not mc:
+            crnn_hangul = [ch for ch in crnn_text if '\uac00' <= ch <= '\ud7a3']
+
+            # ★ 구형/영업용 2줄: CRNN 한글 2+개 (지역명 포함)
+            # "경기76바7789", "충남86아6118", "충86다6118" 등
+            if len(crnn_hangul) >= 2:
+                _p_tail = m.group(2) + m.group(3)  # PaddleOCR 후미 "바7789", "아6118"
+                _c_tail_m = re.search(r'[가-힣]\d{4}$', crnn_text)
+                if _c_tail_m and _c_tail_m.group() == _p_tail:
+                    # (A) 구형 지역: "경기76바7789", "충남86아6118"
+                    _cr_region_m = re.match(r'^([가-힣]{2,3})\d{2}[가-힣]\d{4}$', crnn_text)
+                    if _cr_region_m and _cr_region_m.group(1) in PlateValidator._REGION_PREFIXES:
+                        print(f"[CRNN-2LINE] 구형 복원: {paddle_text} → {crnn_text} "
+                              f"(conf={crnn_conf:.2f})", flush=True)
+                        return crnn_text
+                    # (B) 영업용 1글자 지역: "충86다6118"
+                    if re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', crnn_text):
+                        print(f"[CRNN-COMM] 영업용 복원: {paddle_text} → {crnn_text} "
+                              f"(conf={crnn_conf:.2f})", flush=True)
+                        return crnn_text
+
+                # (C) 영업용 body 매칭: PaddleOCR "586다6118" → CRNN "충86다6118"
+                # prefix 3자리 중 첫 숫자가 한글로 치환된 패턴
+                if len(m.group(1)) == 3:
+                    _crnn_comm_m = re.match(r'^([가-힣])(\d{2}[가-힣]\d{4})$', crnn_text)
+                    if _crnn_comm_m:
+                        _paddle_body = m.group(1)[1:] + m.group(2) + m.group(3)
+                        if _crnn_comm_m.group(2) == _paddle_body and crnn_conf >= 0.75:
+                            print(f"[CRNN-COMM] 영업용 body: {paddle_text} → {crnn_text} "
+                                  f"(conf={crnn_conf:.2f})", flush=True)
+                            return crnn_text
+
+                return paddle_text
+
+            if len(crnn_hangul) != 1:
+                return paddle_text
+            crnn_kr = crnn_hangul[0]
+        else:
+            crnn_kr = mc.group(1)
+
+        paddle_kr = m.group(2)
+        # ★ 한글 교정
+        _corrected_kr = crnn_kr if (crnn_kr != paddle_kr and crnn_kr in _VALID_PLATE_HANGUL_ALL) else paddle_kr
+        if _corrected_kr != paddle_kr:
+            print(f"[CRNN-VERIFY] {paddle_kr}→{_corrected_kr} (crnn={crnn_text}, conf={crnn_conf:.2f})", flush=True)
+
+        # ★ 앞자리 prefix 교정: 뒤 4자리 일치 + 앞자리 불일치 시 CRNN prefix 채택
+        # 예: PaddleOCR "56다7117" + CRNN "36다7117" → 뒤 "7117" 일치, 앞 56→36 교정
+        _corrected_prefix = m.group(1)  # 기본: PaddleOCR prefix
+        if mc and crnn_conf and crnn_conf >= 0.70:
+            crnn_prefix_m = re.match(r'^(\d{2,3})[가-힣]\d{4}$', crnn_text)
+            if crnn_prefix_m:
+                crnn_prefix = crnn_prefix_m.group(1)
+                crnn_suffix_m = re.search(r'(\d{4})$', crnn_text)
+                paddle_suffix = m.group(3)
+                # 뒤 4자리 일치 + 앞자리 불일치 → CRNN prefix가 더 정확
+                if (crnn_suffix_m and crnn_suffix_m.group(1) == paddle_suffix
+                        and crnn_prefix != _corrected_prefix
+                        and len(crnn_prefix) == len(_corrected_prefix)):
+                    print(f"[CRNN-PREFIX] 앞자리 교정: {_corrected_prefix}→{crnn_prefix} "
+                          f"(뒤4자리 '{paddle_suffix}' 일치, conf={crnn_conf:.2f})", flush=True)
+                    _corrected_prefix = crnn_prefix
+
+        result = _corrected_prefix + _corrected_kr + m.group(3)
+        if result != paddle_text:
+            return result
+        return paddle_text
+
+    # ── CTC 한글 필터: post_op monkey-patch ──
+    _ctc_patched = False
+
+    @classmethod
+    def _patch_ctc_postop(cls, post_op):
+        """CTCLabelDecode.__call__에 마스크를 주입 (monkey-patch).
+
+        원본 파이프라인 그대로 유지, argmax 직전에만 마스크 적용.
+        """
+        if cls._ctc_patched:
+            return
+
+        # ★ 번호판 용도 한글: 가~후 전체 (초·추·코·쿠·토·투·포·푸·후·부 누락 수정)
+        plate_hangul = set(
+            '가거고구나너노누다더도두라러로루마머모무'
+            '바배버보부사서소수아어오우자저조주'
+            '차처초카커코타터토파퍼포하허호'
+            '추쿠투푸후'
+        )
+        # ★ 지역명 한글: 구형 번호판 "서울12가3456" 등 지역 접두사 인식용
+        region_hangul = set(
+            '서울부산대구인천광주대전울산세종'
+            '경기강원충북충남전북전남경북경남제주'
+        )
+        digits = set('0123456789')
+        valid = plate_hangul | region_hangul | digits
+        n = len(post_op.character)
+        mask = np.full(n, -1e9, dtype=np.float32)
+        mask[0] = 0.0  # blank
+        for i, ch in enumerate(post_op.character):
+            if ch in valid:
+                mask[i] = 0.0
+        cnt = int((mask == 0.0).sum())
+        print(f"[CTC] 마스크 패치: {cnt}/{n} chars allowed", flush=True)
+
+        _orig_call = post_op.__class__.__call__
+
+        def _patched_call(self_post, pred, return_word_box=False, **kwargs):
+            preds = np.array(pred[0])
+            # ★ 마스크 적용: 유효 문자 외 -inf
+            preds = preds + mask[np.newaxis, :]
+            pred_patched = [preds]
+            return _orig_call(self_post, pred_patched,
+                              return_word_box=return_word_box, **kwargs)
+
+        post_op.__class__.__call__ = _patched_call
+        cls._ctc_patched = True
 
     def _run_ocr(self, engine_name, engine, image):
-        """OCR 실행. 구형 두 줄 번호판 대응: y좌표 정렬 + 분할 읽기 + allowlist."""
+        """OCR 실행 (CTC 필터 적용 — monkey-patch 방식).
+        기존 rec_model.predict() 파이프라인 그대로 사용,
+        post_op 단계에서만 logits 마스킹.
+        """
+        import re as _re
         try:
             if engine_name == "paddleocr":
-                result = engine.ocr(image, cls=True)
-                if result and result[0]:
-                    # y좌표 기준 정렬 (상→하)
-                    lines = sorted(result[0], key=lambda l: l[0][0][1])
-                    texts = [l[1][0] for l in lines]
-                    confs = [l[1][1] for l in lines]
-                    if texts:
-                        text = "".join(texts)
-                        conf = float(np.mean(confs))
-                        # CRNN 교차검증: 1/i, 니/나 등 혼동 시 신뢰도 보정 (14니3234 오류 완화)
-                        if HAS_POSTFILTER_V2 and getattr(self, "_last_crnn_raw", None):
-                            delta = verify_paddle_with_crnn(clean_ocr_text_v2(text), self._last_crnn_raw)
-                            conf = min(1.0, conf + float(delta))
-                        return text, conf
-            elif engine_name == "tesseract":
-                gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY) if len(image.shape) == 3 else image
-                # PSM 7 = single text line (번호판 1줄)
-                custom_config = r'--oem 3 --psm 7 -l kor+eng'
-                text = pytesseract.image_to_string(gray, config=custom_config)
-                text = text.strip().replace('\n', '').replace(' ', '')
-                if text:
-                    try:
-                        data = pytesseract.image_to_data(
-                            gray, config=custom_config,
-                            output_type=pytesseract.Output.DICT
-                        )
-                        confs = [int(c) for c in data['conf'] if int(c) > 0]
-                        conf = float(np.mean(confs)) / 100.0 if confs else 0.5
-                    except Exception:
-                        conf = 0.5
-                    return text, conf
-            elif engine_name == "crnn":
-                # CRNN은 process_frame에서 직접 호출 (여기 도달하면 안 됨)
-                text, conf = engine.recognize(image)
-                if text:
-                    return text, conf
-        except Exception:
-            pass
+                # ── CTC 마스크 패치 (최초 1회) ──
+                rec_model = engine.paddlex_pipeline.text_rec_model
+                self._patch_ctc_postop(rec_model.post_op)
+
+                # ── rec-only (기존과 동일, 내부에서 마스킹됨) ──
+                rec_text, rec_score = "", 0.0
+                try:
+                    rec_results = list(rec_model.predict([image]))
+                    if rec_results:
+                        res = rec_results[0]
+                        rec_text = res.get('rec_text', '')
+                        rec_score = float(res.get('rec_score', 0))
+                        if rec_text and rec_score >= 0.7 and _re.search(r'[가-힣]', rec_text):
+                            return rec_text, rec_score
+                except Exception:
+                    pass
+
+                if not rec_text or rec_score < 0.3 or len(rec_text.strip()) < 3:
+                    if rec_text and rec_score > 0:
+                        return rec_text, rec_score
+                    return "", 0.0
+
+                # ── Fallback: full det+rec ──
+                try:
+                    for res in engine.predict(image):
+                        texts = res.get('rec_texts', [])
+                        scores = res.get('rec_scores', [])
+                        if texts:
+                            text = "".join(texts)
+                            conf = sum(scores) / len(scores) if scores else 0.0
+                            if text:
+                                return text, conf
+                except Exception:
+                    pass
+
+                if rec_text:
+                    return rec_text, rec_score
+        except Exception as _e:
+            print(f"[OCR-ERROR] {type(_e).__name__}: {_e}", flush=True)
         return "", 0.0
 
     def _trigger_alert(self, plate_number, alert_info):
@@ -2539,64 +2478,57 @@ class PlateEnginePro:
             writer = cv2.VideoWriter(out_path, fourcc, fps, (w, h))
 
         frame_count = 0
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT)) or 0
         total_plates = 0
-        recognized_plates = {}  # {plate_text: max_conf}
         start_time = time.time()
-        print(f"[시작] 영상 처리: {source} ({w}x{h} @ {fps}fps, {total_frames}프레임)", flush=True)
+        print(f"[시작] 영상 처리: {source} ({w}x{h} @ {fps}fps)")
+
+        paused = False
 
         while cap.isOpened():
             ret, frame = cap.read()
             if not ret:
                 break
-            frame_count += 1
-            results = self.process_frame(frame, camera_id)
-            total_plates += len(results)
+            if not paused:
+                frame_count += 1
 
-            for r in results:
-                x1, y1, x2, y2 = r["bbox"]
-                color = (0, 0, 255) if r["is_alert"] else (0, 255, 0)
-                thickness = 3 if r["is_alert"] else 2
-                cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
-                label = f"{r['plate']} ({r['confidence']:.0%})"
-                cv2.putText(frame, label, (x1, y1 - 10),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
-                if r["is_alert"]:
-                    cv2.putText(frame, "!! ALERT !!", (x1, y2 + 25),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
-                # 인식된 번호판 기록
-                pt = r["plate"]
-                if pt not in recognized_plates or r["confidence"] > recognized_plates[pt]:
-                    recognized_plates[pt] = r["confidence"]
-                print(f"  [frame {frame_count}] {r['plate']} ({r['confidence']:.0%})", flush=True)
+                # process_frame 내부의 _frame_skip_interval이 YOLO 스킵 처리
+                results = self.process_frame(frame, camera_id)
+                total_plates += len(results)
 
-            elapsed = time.time() - start_time
-            current_fps = frame_count / elapsed if elapsed > 0 else 0
-            info = f"FPS: {current_fps:.1f} | Plates: {total_plates}"
-            cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+                # 캐시된 결과로 OSD 그리기 (매 프레임)
+                for r in results:
+                    x1, y1, x2, y2 = r["bbox"]
+                    color = (0, 0, 255) if r["is_alert"] else (0, 255, 0)
+                    thickness = 3 if r["is_alert"] else 2
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), color, thickness)
+                    label = f"{r['plate']} ({r['confidence']:.0%})"
+                    frame = draw_korean_text(frame, label, (x1, y1 - 30), color, 24)
+                    if r["is_alert"]:
+                        cv2.putText(frame, "!! ALERT !!", (x1, y2 + 25),
+                                    cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 0, 255), 3)
 
-            if writer:
-                writer.write(frame)
+                elapsed = time.time() - start_time
+                current_fps = frame_count / elapsed if elapsed > 0 else 0
+                info = f"FPS: {current_fps:.1f} | Plates: {total_plates}"
+                cv2.putText(frame, info, (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
+
+                if writer:
+                    writer.write(frame)
             if show:
-                cv2.imshow("ANPR Pro", frame)
-                if cv2.waitKey(1) & 0xFF == ord("q"):
+                disp = cv2.resize(frame, (960, 540)) if frame.shape[1] > 960 else frame
+                cv2.imshow("ANPR Pro", disp)
+                key = cv2.waitKey(1 if not paused else 0) & 0xFF
+                if key == ord("q"):
                     break
-
-            # 진행률 출력 (100프레임마다)
-            if frame_count % 100 == 0:
-                pct = (frame_count / total_frames * 100) if total_frames else 0
-                print(f"  ... {frame_count}/{total_frames} ({pct:.0f}%) | {current_fps:.1f} FPS | 인식: {len(recognized_plates)}대", flush=True)
+                if key == ord(" "):  # spacebar toggle pause
+                    paused = not paused
 
         cap.release()
         if writer:
             writer.release()
         cv2.destroyAllWindows()
         elapsed = time.time() - start_time
-        print(f"\n[완료] {frame_count}프레임, {total_plates}회 인식, 고유 {len(recognized_plates)}대, 평균 {frame_count/elapsed:.1f} FPS", flush=True)
-        if recognized_plates:
-            print(f"[인식결과]", flush=True)
-            for plate, conf in sorted(recognized_plates.items(), key=lambda x: -x[1]):
-                print(f"  {plate} (최대 신뢰도: {conf:.0%})", flush=True)
+        print(f"\n[완료] {frame_count}프레임, {total_plates}대 인식, 평균 {frame_count/elapsed:.1f} FPS")
 
 
 # ============================================
@@ -2724,9 +2656,6 @@ def process_frame_unified(
 # 실행
 # ============================================
 if __name__ == "__main__":
-    import multiprocessing
-    multiprocessing.freeze_support()
-
     import argparse
 
     parser = argparse.ArgumentParser(description="ANPR Pro Engine")

@@ -28,24 +28,25 @@ from plate_engine_pro import ImagePreprocessor, PlateEngineConfig, PlateValidato
 
 # ── OCR 엔진 로드 ──
 paddle_ocr = None
+_paddle_v34 = False
 try:
     from paddleocr import PaddleOCR
-    paddle_kwargs = dict(lang="korean", use_angle_cls=True, show_log=False)
-    _paddle_model_root = Path("C:/tools/paddleocr_models")
-    if _paddle_model_root.exists():
-        paddle_kwargs["det_model_dir"] = str(_paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer")
-        paddle_kwargs["rec_model_dir"] = str(_paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer")
-        paddle_kwargs["cls_model_dir"] = str(_paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer")
-    paddle_ocr = PaddleOCR(**paddle_kwargs)
+    # v3.4.0+ 호환: use_textline_orientation
+    try:
+        paddle_ocr = PaddleOCR(lang="korean", use_textline_orientation=False)
+        _paddle_v34 = True
+    except (TypeError, ValueError):
+        # 구버전 fallback
+        paddle_kwargs = dict(lang="korean", use_angle_cls=True)
+        _paddle_model_root = Path("C:/tools/paddleocr_models")
+        if _paddle_model_root.exists():
+            paddle_kwargs["det_model_dir"] = str(_paddle_model_root / "det/ml/Multilingual_PP-OCRv3_det_infer")
+            paddle_kwargs["rec_model_dir"] = str(_paddle_model_root / "rec/korean/korean_PP-OCRv4_rec_infer")
+            paddle_kwargs["cls_model_dir"] = str(_paddle_model_root / "cls/ch_ppocr_mobile_v2.0_cls_infer")
+        paddle_ocr = PaddleOCR(**paddle_kwargs)
 except Exception:
     pass
 
-reader = None
-try:
-    import easyocr
-    reader = easyocr.Reader(["ko", "en"], gpu=True, verbose=False)
-except ImportError:
-    pass
 
 
 def extract_gt(filename: str) -> str:
@@ -56,7 +57,7 @@ def extract_gt(filename: str) -> str:
 
 
 def ocr_image(img, preprocessor, validator, config):
-    """19종 전처리 × (PaddleOCR + EasyOCR) → 앙상블 투표"""
+    """19종 전처리 × PaddleOCR → 앙상블 투표"""
     from collections import Counter
     all_candidates = []  # [(cleaned_text, confidence), ...]
 
@@ -73,32 +74,33 @@ def ocr_image(img, preprocessor, validator, config):
             # PaddleOCR
             if paddle_ocr is not None:
                 try:
-                    result = paddle_ocr.ocr(processed, cls=True)
-                    if result and result[0]:
-                        texts = [line[1][0] for line in result[0]]
-                        confs = [line[1][1] for line in result[0]]
-                        text = "".join(texts)
-                        conf = float(np.mean(confs))
-                        cleaned = validator.clean_ocr_text(text)
-                        if conf > 0.3 and len(cleaned) >= 4:
-                            all_candidates.append((cleaned, conf))
+                    if _paddle_v34:
+                        # v3.4.0+: OCRResult 딕셔너리
+                        result = paddle_ocr.ocr(processed)
+                        if result and result[0]:
+                            r = result[0]
+                            if hasattr(r, '__getitem__') and 'rec_texts' in r:
+                                texts = r['rec_texts']
+                                confs = r['rec_scores']
+                                text = "".join(texts)
+                                conf = float(np.mean(confs)) if confs else 0
+                                cleaned = validator.clean_ocr_text(text)
+                                if conf > 0.3 and len(cleaned) >= 4:
+                                    all_candidates.append((cleaned, conf))
+                    else:
+                        # 구버전: [[bbox, (text, conf)], ...]
+                        result = paddle_ocr.ocr(processed, cls=False)
+                        if result and result[0]:
+                            texts = [line[1][0] for line in result[0]]
+                            confs = [line[1][1] for line in result[0]]
+                            text = "".join(texts)
+                            conf = float(np.mean(confs))
+                            cleaned = validator.clean_ocr_text(text)
+                            if conf > 0.3 and len(cleaned) >= 4:
+                                all_candidates.append((cleaned, conf))
                 except Exception:
                     pass
 
-            # EasyOCR
-            if reader is not None:
-                try:
-                    result = reader.readtext(processed)
-                    if result:
-                        texts = [r[1] for r in result]
-                        confs = [r[2] for r in result]
-                        text = "".join(texts)
-                        conf = float(np.mean(confs))
-                        cleaned = validator.clean_ocr_text(text)
-                        if conf > 0.3 and len(cleaned) >= 4:
-                            all_candidates.append((cleaned, conf))
-                except Exception:
-                    pass
         except Exception:
             continue
 
@@ -141,7 +143,6 @@ def main():
 
     ocr_names = []
     if paddle_ocr: ocr_names.append("PaddleOCR")
-    if reader: ocr_names.append("EasyOCR")
 
     print("=" * 60)
     print(f"번호판 인식 정확도 벤치마크 ({len(sample)}장 샘플)")

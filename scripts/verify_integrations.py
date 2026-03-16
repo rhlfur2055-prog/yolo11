@@ -2,7 +2,7 @@
 """
 가벼운 통합 검증 (OCR 없음, 30초 이내)
 - 영상 1개 로드 확인
-- YOLO 번호판 감지 5프레임만 (EasyOCR/PaddleOCR 미사용)
+- YOLO 번호판 감지 5프레임만 (OCR 미사용)
 - API 서버 8765 포트 응답 확인
 """
 import os

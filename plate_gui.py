@@ -90,9 +90,9 @@ def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
     if w < 45 or h < 15:
         return False
 
-    # 위치 필터 — 상단 5%, 하단 5% 제외 (CCTV 각도 대응)
+    # 위치 필터 — 상단 3% 제외 (하단 필터 제거: 톨게이트 근접 차량 대응)
     frame_h = frame_shape[0]
-    if y1 < frame_h * 0.05 or y2 > frame_h * 0.95:
+    if y1 < frame_h * 0.03:
         return False
 
     # bbox 크기별 신뢰도 차등 적용
@@ -148,7 +148,7 @@ class PlateTracker:
     # ★ OCR 4-8초 지연 → 그 사이 결과 유지 필요 (30fps 기준 120-240프레임)
     DISPLAY_HOLD_FRAMES = 30  # 1초 유지 (30fps × 1) — 잔상 최소화
     # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
-    GAP_TOLERANCE = 5  # 즉시 차량 교체 감지
+    GAP_TOLERANCE = 2  # 즉시 차량 교체 감지 (5→2 고스트 방지)
 
     def __init__(self, iou_threshold: float = 0.35, max_ttl: int = 8):
         self.iou_threshold = iou_threshold
@@ -281,6 +281,20 @@ class PlateTracker:
                 if det_valid and det_text:
                     # 새 OCR 결과가 있으면: 신뢰도 비교 후 교체
                     track["last_ocr_frame"] = frame_idx
+
+                    # ★ Ghost 완전 제거: 뒷4자리 비교로 다른 차량 즉시 감지
+                    #   캐시 뒷4자리 vs 엔진 뒷4자리 → 일치 2자리 미만이면 캐시 삭제
+                    _cached_text = track.get("plate_text", "")
+                    if _cached_text and len(_cached_text) >= 4 and len(det_text) >= 4:
+                        _cached_tail = _cached_text[-4:]
+                        _new_tail = det_text[-4:]
+                        _match_count = sum(1 for a, b in zip(_cached_tail, _new_tail) if a == b)
+                        if _match_count < 2:
+                            track["plate_text"] = ""
+                            track["confidence"] = 0
+                            track["ocr_count"] = 0
+                            track["det_data"] = {}
+
                     # 같은 번호면 연속 카운트 증가, 다른 번호면 리셋
                     if det_text == track.get("plate_text", ""):
                         track["ocr_count"] = track.get("ocr_count", 0) + 1
@@ -446,14 +460,27 @@ def draw_korean_text(
     pos: tuple[int, int],
     font_size: int = 22,
     color: tuple[int, int, int] = (0, 255, 0),
+    bg: bool = False,
+    bg_alpha: float = 0.7,
 ) -> np.ndarray:
-    """BGR 프레임 위에 한글 텍스트를 렌더링한다. frame을 복사해 반환."""
+    """BGR 프레임 위에 한글 텍스트를 렌더링한다. frame을 복사해 반환.
+    bg=True 이면 검은 반투명 배경을 먼저 그린다."""
     pil_img = Image.fromarray(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
     draw = ImageDraw.Draw(pil_img)
     font = _get_font(font_size)
     x, y = pos
-    # 검은 외곽선
     rgb_color = (color[2], color[1], color[0])  # BGR -> RGB
+    # 반투명 배경 박스
+    if bg:
+        bbox = draw.textbbox((x, y), text, font=font)
+        pad = 4
+        bg_box = (bbox[0] - pad, bbox[1] - pad, bbox[2] + pad, bbox[3] + pad)
+        overlay = Image.new("RGBA", pil_img.size, (0, 0, 0, 0))
+        ov_draw = ImageDraw.Draw(overlay)
+        ov_draw.rectangle(bg_box, fill=(0, 0, 0, int(255 * bg_alpha)))
+        pil_img = Image.alpha_composite(pil_img.convert("RGBA"), overlay).convert("RGB")
+        draw = ImageDraw.Draw(pil_img)
+    # 검은 외곽선
     for dx, dy in [(-1, -1), (1, -1), (-1, 1), (1, 1), (0, -2), (0, 2), (-2, 0), (2, 0)]:
         draw.text((x + dx, y + dy), text, font=font, fill=(0, 0, 0))
     draw.text((x, y), text, font=font, fill=rgb_color)
@@ -641,15 +668,42 @@ class DetectionWorker(threading.Thread):
             except queue.Empty:
                 continue
 
+            # ★ 프레임 스킵: OCR 처리 중 큐에 쌓인 오래된 프레임 버리기
+            # (최신 프레임만 처리 → 실시간 응답 속도 향상)
+            _skipped = 0
+            while not self.detection_queue.empty():
+                try:
+                    frame_idx, frame, ts = self.detection_queue.get_nowait()
+                    _skipped += 1
+                except queue.Empty:
+                    break
+
             # ★ Phase 1은 별도 Fast YOLO 스레드에서 현재 표시 프레임 기반으로 실행
             # (DetectionWorker는 OCR에 집중)
 
             # ══════════════════════════════════════════════════
-            # Phase 2: 전체 OCR 처리 → 초록 박스 + 번호판 텍스트
+            # Phase 2: OCR 처리 → 초록 박스 + 번호판 텍스트
+            # ★ MareArts 방식: 영상 모드에서는 process_frame_realtime 사용
+            #   (OCR 1~2회 + 트래커 누적 = 5~10배 빠름)
             # ══════════════════════════════════════════════════
             t0 = time.time()
             if self.pro_engine is not None:
-                if self.engine_mode in ("fast", "auto") and getattr(self.fast_engine, "available", False):
+                # ★ 영상 모드 판별: consecutive_required > 1이면 영상 모드
+                _is_realtime = getattr(self.pro_engine, 'consecutive_required', 1) > 1
+                if _is_realtime and hasattr(self.pro_engine, 'process_frame_realtime'):
+                    # ★ MareArts 방식 실시간 경로
+                    pro_results = self.pro_engine.process_frame_realtime(frame, "CAM01")
+                    results = _pro_engine_results_to_gui(pro_results, frame)
+                    elapsed_ms = (time.time() - t0) * 1000
+                    data = {
+                        "frame_idx": frame_idx,
+                        "timestamp": ts,
+                        "results": results,
+                        "process_ms": elapsed_ms,
+                        "process_ms_pro": elapsed_ms,
+                        "process_ms_fast": 0.0,
+                    }
+                elif self.engine_mode in ("fast", "auto") and getattr(self.fast_engine, "available", False):
                     results_list, ms_pro, ms_fast = self._process_frame_unified(
                         frame, "CAM01",
                         engine_pro=self.pro_engine,
@@ -671,6 +725,14 @@ class DetectionWorker(threading.Thread):
                     pro_results = self.pro_engine.process_frame(
                         frame, "CAM01", use_multiframe=self.use_multiframe
                     )
+                    # 디버그: 엔진 raw 결과 추적
+                    if pro_results:
+                        print(f"[WORKER] frame={frame_idx} engine_results={len(pro_results)}", flush=True)
+                        for pr in pro_results:
+                            print(f"  engine → plate='{pr.get('plate','')}' "
+                                  f"conf={pr.get('confidence',0):.2f} "
+                                  f"bbox={pr.get('bbox',[])}",
+                                  flush=True)
                     results = _pro_engine_results_to_gui(pro_results, frame)
                     elapsed_ms = (time.time() - t0) * 1000
                     data = {
@@ -694,6 +756,7 @@ class DetectionWorker(threading.Thread):
             try:
                 self.results_queue.put_nowait(data)
             except queue.Full:
+                print(f"[WORKER] ⚠️ results_queue FULL! 결과 드롭 가능", flush=True)
                 try:
                     self.results_queue.get_nowait()
                 except queue.Empty:
@@ -732,12 +795,13 @@ class PlateGUIApp(tk.Tk):
         self._latest_detections: list[dict] = []
         self._detection_lock = threading.Lock()
         self._detection_ts: float = 0.0  # 마지막 감지 결과 수신 시각
-        self._DETECTION_DISPLAY_TTL: float = 3.0  # Phase 2 유지 시간 (process_frame 결과 표시 시간 확보)
+        self._DETECTION_DISPLAY_TTL: float = 0.5  # Phase 2 유지 시간 (잔상 방지: 0.5초, 실제 YOLO 빈 결과 시 즉시 클리어)
 
         # ★ Fast YOLO 스레드: 현재 표시 프레임에 대해 실시간 YOLO 탐지
         self._current_display_frame = None  # 현재 표시 중인 프레임
         self._phase1_bboxes: list[dict] = []  # Fast YOLO Phase 1 결과
         self._phase1_lock = threading.Lock()
+        self._phase1_last_active: float = 0.0  # Phase1 마지막 감지 시각
         self._fast_yolo_active = False
         self._detection_history: list[dict] = []
         self._plate_tracker = PlateTracker(iou_threshold=0.35, max_ttl=5)
@@ -946,10 +1010,11 @@ class PlateGUIApp(tk.Tk):
             self.stats_var.set("엔진 로딩 타임아웃 - 재생 시작")
         else:
             self.stats_var.set("엔진 로딩 완료! 재생 시작")
-            # ★ 영상 모드 활성화: consecutive_required=2 → imgsz 축소, SAHI 비활성
-            #   Phase 1 (fast loop)은 즉시 표시, Phase 2는 트래커 2프레임 확인 후 표시
+            # ★ 영상 모드: consecutive_required=1 (즉시 표시)
+            #   Ghost Detection은 PlateTracker가 담당 → 중복 보호 불필요
+            #   =2이면 프레임 스킵(3프레임)과 충돌 → 첫 감지 후 3-9초 대기 필요 → Det:0 원인
             if self.detection_worker.pro_engine:
-                self.detection_worker.pro_engine.consecutive_required = 2
+                self.detection_worker.pro_engine.consecutive_required = 1
         self.update()
 
         self.playing_event.set()
@@ -998,6 +1063,8 @@ class PlateGUIApp(tk.Tk):
                 with self._phase1_lock:
                     self._phase1_bboxes = phase1
                     self._fast_ms = _fast_ms
+                    if phase1:  # 감지 성공 시 시각 갱신
+                        self._phase1_last_active = time.time()
             except Exception:
                 pass
             time.sleep(0.02)  # YOLO ~200-500ms + 최소 딜레이
@@ -1005,7 +1072,7 @@ class PlateGUIApp(tk.Tk):
     # ─── 디스플레이 루프 (30 FPS) ───
 
     def _refresh_display(self) -> None:
-        # 1) 인식 결과 수신 (validate_bbox + PlateTracker 적용)
+        # 1) 인식 결과 수신 (엔진 트래커가 이미 처리 → GUI 트래커 제거)
         while self.results_queue is not None:
             try:
                 data = self.results_queue.get_nowait()
@@ -1022,23 +1089,31 @@ class PlateGUIApp(tk.Tk):
                         if validate_bbox(bbox, frame_shape, conf):
                             validated.append(det)
 
-                    # ── PlateTracker: Ghost Detection 방지 ──
-                    tracked = self._plate_tracker.update(validated, frame_idx)
+                    # ★ GUI PlateTracker 제거 — process_frame_realtime 엔진 내부
+                    #   트래커가 이미 Ghost Detection 처리 완료
+                    #   이중 트래커는 고스트 텍스트 원인이었음
 
-                    # ★ Phase 2 결과가 있을 때만 교체 — 빈 결과로 덮어쓰기 방지
-                    #   (OCR이 빈 결과 반환 시 기존 Phase 2 유지 → TTL로 자연 만료)
-                    _has_phase2 = any(
-                        d.get("is_valid_plate") and d.get("text")
-                        for d in tracked
-                    )
-                    if _has_phase2:
-                        self._latest_detections = tracked
+                    # ★ Phase 2 교체 로직 (잔상 방지):
+                    #   - 감지 결과 있으면 → 즉시 교체
+                    #   - 빈 결과 + 실제 YOLO 처리(>100ms) → 즉시 클리어 (차량 떠남)
+                    #   - 빈 결과 + 캐시(<100ms) → 유지 (YOLO가 아직 재검증 안 함)
+                    _proc_ms = data["process_ms"]
+                    if validated:
+                        self._latest_detections = validated
                         self._detection_ts = time.time()
-                    elif tracked:
-                        # Phase 1만 있는 경우 (OCR 미완료): 기존 Phase 2 유지
-                        pass
+                    elif _proc_ms >= 100:
+                        # 실제 YOLO 처리했는데 결과 없음 → 차량 떠남 → 즉시 클리어
+                        self._latest_detections = []
+                    # 디버그: GUI 수신 결과 추적
+                    print(f"[GUI-RX] frame={frame_idx} raw={len(raw_results)} "
+                          f"valid={len(validated)} proc={data['process_ms']:.0f}ms "
+                          f"latest={len(self._latest_detections)}", flush=True)
+                    for v in validated:
+                        print(f"  → {v.get('text','')} conf={v.get('ocr_confidence',0):.2f} "
+                              f"valid={v.get('is_valid_plate')} bbox={v.get('bbox',[])}",
+                              flush=True)
 
-                    if data["process_ms"] > 0:
+                    if data["process_ms"] >= 50:  # 캐시 결과(<50ms) 제외 → FPS 정확도 개선
                         self._process_ms = data["process_ms"]
                         self._process_ms_pro = data.get("process_ms_pro", 0)
                         self._process_ms_fast = data.get("process_ms_fast", 0)
@@ -1046,7 +1121,7 @@ class PlateGUIApp(tk.Tk):
                         if len(self._det_fps_samples) > 10:
                             self._det_fps_samples.pop(0)
                     ts = data.get("timestamp", 0)
-                    for det in tracked:
+                    for det in validated:
                         text = det.get("text", "")
                         conf = det.get("ocr_confidence", det.get("confidence", 0))
                         is_valid = det.get("is_valid_plate", False)
@@ -1071,64 +1146,91 @@ class PlateGUIApp(tk.Tk):
             self._current_display_frame = frame
 
             with self._detection_lock:
-                # ★ 감지 결과 TTL: PlateTracker가 staleness 관리하므로 충분한 시간 유지
+                # ★ 감지 결과 TTL: 1.5초로 단축 (3초는 고스트 잔상 유발)
                 _det_age = time.time() - self._detection_ts
-                if _det_age > self._DETECTION_DISPLAY_TTL:
+                if _det_age > 1.5:
                     self._latest_detections = []
 
-                # ★ Phase 1 (Fast YOLO 실시간 bbox) + Phase 2 (OCR 확정) 결합
-                #   핵심: Phase 1의 현재 프레임 bbox 위치 + Phase 2의 OCR 텍스트
                 phase2_dets = list(self._latest_detections)
-                with self._phase1_lock:
-                    phase1_dets = list(self._phase1_bboxes)
 
-                merged = []
-                used_p2 = set()
+            with self._phase1_lock:
+                phase1_dets = list(self._phase1_bboxes)
 
-                for p1 in phase1_dets:
-                    p1_bbox = p1.get("bbox", [])
-                    if len(p1_bbox) < 4:
-                        continue
-                    # Phase 2 중 가장 가까운 것 찾기 (IoU 또는 중심 거리)
+            # ★ Phase1이 0.5초 이상 없으면 Phase2 고스트 차단
+            # 단, OCR 결과가 최근(1.5초 이내)이면 유지 — 빠른 차량이 지나간 후에도 표시
+            # (01나8060 같은 빠른 차량: 차가 지나간 후에야 OCR 완료 → 이전 코드에서 폐기됨)
+            if not phase1_dets and time.time() - self._phase1_last_active > 0.5:
+                _ocr_fresh = time.time() - self._detection_ts < 1.5
+                if not _ocr_fresh:
+                    phase2_dets = []
+
+            merged = []
+
+            # ★ 고스트 방지: Phase1 고신뢰 bbox만 매칭 후보로 사용 (conf ≥ 0.5)
+            # + 최대 매칭 거리 상한 (영상 너비의 25%)
+            # → 화면 왼쪽 구조물 오감지나 전 차량 고스트가 엉뚱한 위치에 붙는 현상 방지
+            _fw = frame.shape[1] if frame is not None else 1280
+            MAX_MATCH_DIST = _fw * 0.15  # 15% of frame width (25%→15% 고스트 방지)
+
+            # 1) Phase 2 결과: Phase1이 있으면 가장 가까운 bbox로 위치 보정
+            # MAX_MATCH_DIST 초과 시 → 매칭 실패 → merged에 추가 안 함 (고스트 차단)
+            matched_p1_indices = set()
+            for p2 in phase2_dets:
+                p2_bbox = p2.get("bbox", [])
+                if len(p2_bbox) < 4:
+                    continue
+                combined = dict(p2)
+                if phase1_dets:
+                    # Phase1의 모든 bbox 중 중심 거리가 가장 가까운 것으로 위치 보정
+                    p2_cx = (p2_bbox[0] + p2_bbox[2]) / 2
+                    p2_cy = (p2_bbox[1] + p2_bbox[3]) / 2
+                    best_dist = float("inf")
                     best_idx = -1
-                    best_iou = 0.15  # 최소 IoU (차가 이동해도 약간은 겹침)
-                    p1_cx = (p1_bbox[0] + p1_bbox[2]) / 2
-                    p1_cy = (p1_bbox[1] + p1_bbox[3]) / 2
-                    for i, p2 in enumerate(phase2_dets):
-                        if i in used_p2:
+                    for i, p1 in enumerate(phase1_dets):
+                        p1b = p1.get("bbox", [])
+                        if len(p1b) < 4:
                             continue
-                        p2_bbox = p2.get("bbox", [])
-                        if len(p2_bbox) < 4:
+                        # 저신뢰 Phase1 bbox 제외 (오감지 필터)
+                        if p1.get("confidence", 1.0) < 0.45:
                             continue
-                        iou = PlateTracker.calculate_iou(p1_bbox, p2_bbox)
-                        if iou >= best_iou:
-                            best_iou = iou
+                        # ★ 너무 작은 bbox 제외 — 그릴/엠블럼 오감지 차단
+                        # 진짜 번호판은 최소 80×25px 이상
+                        _pb_w = p1b[2] - p1b[0]
+                        _pb_h = p1b[3] - p1b[1]
+                        if _pb_w < 80 or _pb_h < 25:
+                            continue
+                        p1_cx = (p1b[0] + p1b[2]) / 2
+                        p1_cy = (p1b[1] + p1b[3]) / 2
+                        dist = ((p2_cx - p1_cx) ** 2 + (p2_cy - p1_cy) ** 2) ** 0.5
+                        if dist < best_dist:
+                            best_dist = dist
                             best_idx = i
-                        elif best_idx < 0:
-                            # IoU 없어도 중심 거리 가까우면 매칭 (차가 이동한 경우)
-                            p2_cx = (p2_bbox[0] + p2_bbox[2]) / 2
-                            p2_cy = (p2_bbox[1] + p2_bbox[3]) / 2
-                            dist = ((p1_cx - p2_cx)**2 + (p1_cy - p2_cy)**2) ** 0.5
-                            if dist < 200:  # 200px 이내면 같은 차량
-                                best_idx = i
+                    if best_idx >= 0 and best_dist <= MAX_MATCH_DIST:
+                        # ★ 현재 프레임 Phase1 위치로 bbox 갱신 → 라벨이 항상 번호판 위에
+                        combined["bbox"] = phase1_dets[best_idx]["bbox"]
+                        matched_p1_indices.add(best_idx)
+                    # else: Phase1 매칭 실패 → Phase2 자체 bbox로 표시
+                    # (엔진 레벨 frames_absent 만료가 고스트 방지 역할 담당)
+                merged.append(combined)
 
-                    if best_idx >= 0:
-                        # ★ Phase 1 bbox(현재 위치) + Phase 2 텍스트/데이터 결합
-                        combined = dict(phase2_dets[best_idx])
-                        combined["bbox"] = p1_bbox  # 현재 프레임의 정확한 위치
-                        merged.append(combined)
-                        used_p2.add(best_idx)
-                    else:
-                        # 매칭 없음 → 순수 Phase 1 (탐지중)
-                        merged.append(p1)
+            # 2) Phase 1 중 Phase 2와 매칭 안 된 것 → "탐지중..." 표시
+            # ★ 오감지 필터: 저신뢰 또는 비율이 이상한 bbox는 탐지중... 표시 안 함
+            # (SUV 엠블럼/그릴은 정사각형에 가까움 → W/H < 1.5 이면 제외)
+            for i, p1 in enumerate(phase1_dets):
+                if i not in matched_p1_indices:
+                    # 신뢰도 필터
+                    if p1.get("confidence", 0) < 0.45:
+                        continue
+                    # 번호판 종횡비 필터 (번호판은 가로가 세로의 1.5배 이상)
+                    p1b = p1.get("bbox", [])
+                    if len(p1b) >= 4:
+                        _pw = p1b[2] - p1b[0]
+                        _ph = max(p1b[3] - p1b[1], 1)
+                        if _pw / _ph < 1.5:
+                            continue
+                    merged.append(p1)
 
-                # 매칭 안 된 Phase 2도 추가 (최근 인식이라 화면에 남겨야 할 수도)
-                for i, p2 in enumerate(phase2_dets):
-                    if i not in used_p2:
-                        # 오래된 Phase 2 bbox는 현재 프레임과 안 맞으므로 추가 안 함
-                        pass
-
-                annotated = self._draw_overlay(frame, merged)
+            annotated = self._draw_overlay(frame, merged)
 
             # 리사이즈 (종횡비 유지)
             label_w = self.video_label.winfo_width()
@@ -1195,7 +1297,7 @@ class PlateGUIApp(tk.Tk):
             x1, y1, x2, y2 = [int(v) for v in bbox]
 
             if is_valid and text and ocr_conf >= 0.70:
-                # ★ 확실한 인식: 초록 bbox + 번호 라벨
+                # ★ 확실한 인식: 초록 bbox + 번호 라벨 (MareArts 스타일)
                 det_conf = det.get("pattern_score", ocr_conf)
                 d_val = min(99, int(det_conf * 100))
                 r_val = min(99, int(ocr_conf * 100))
@@ -1203,25 +1305,28 @@ class PlateGUIApp(tk.Tk):
                 cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
                 label = f"{text} D{d_val}/R{r_val}"
-                font_sz = max(18, min(26, (x2 - x1) // 3))
-                label_y = max(0, y1 - font_sz - 10)
-                lbl_w = len(label) * (font_sz // 2 + 2) + 10
-                # ★ 불투명 검정 배경 (addWeighted 제거 → 속도 향상)
-                cv2.rectangle(result, (x1 - 2, label_y - 2),
-                              (x1 + lbl_w, label_y + font_sz + 4), (0, 0, 0), -1)
-                result = draw_korean_text(result, label, (x1 + 2, label_y),
-                                          font_size=font_sz, color=(0, 255, 0))
+                bbox_h = y2 - y1
+                font_sz = max(20, int(bbox_h * 0.8))
+                # ★ 라벨을 bbox 안쪽 상단에 렌더링 (박스 밖으로 벗어나지 않게)
+                result = draw_korean_text(result, label, (x1 + 2, y1 + 2),
+                                          font_size=font_sz, color=(0, 255, 0), bg=True)
             elif is_valid and text and ocr_conf >= 0.50:
                 # ★ 중간 신뢰: 노란 bbox + 번호만 (D/R 없음)
                 cv2.rectangle(result, (x1, y1), (x2, y2), (0, 200, 255), 2)
-                label_y = max(0, y1 - 22)
-                cv2.rectangle(result, (x1, label_y - 2),
-                              (x1 + len(text) * 12, label_y + 20), (0, 0, 0), -1)
-                result = draw_korean_text(result, text, (x1 + 2, label_y),
-                                          font_size=18, color=(0, 200, 255))
-            else:
-                # ★ 저신뢰/미인식: 노란 bbox만 (텍스트 표시 안 함)
-                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 200, 255), 1)
+                bbox_h = y2 - y1
+                font_sz = max(20, int(bbox_h * 0.8))
+                # ★ 라벨을 bbox 안쪽 상단에 렌더링
+                result = draw_korean_text(result, text, (x1 + 2, y1 + 2),
+                                          font_size=font_sz, color=(0, 200, 255), bg=True)
+            elif det.get("phase") == 1 and det.get("confidence", 0) >= 0.5:
+                # ★ Phase 1: 번호판 bbox 직접 탐지 (best.pt 별도 인스턴스)
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                bbox_h = y2 - y1
+                font_sz = max(18, min(int(bbox_h * 1.2), 36))  # 번호판 높이 기준, 최대 36px
+                # ★ 라벨을 bbox 안쪽 상단에 렌더링
+                result = draw_korean_text(result, "탐지중...", (x1 + 2, y1 + 2),
+                                          font_size=font_sz, color=(0, 255, 0), bg=True)
+            # ★ 미인식/저신뢰: bbox 표시 안 함 (엠블럼 오감지 방지)
 
         return result
 
