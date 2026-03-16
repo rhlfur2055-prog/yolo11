@@ -538,6 +538,8 @@ class PlateValidator:
         """OCR 후처리: 특수문자 완전 제거 + 혼동문자 보정 + 두 줄 번호판 교정"""
         clean = text.strip()
         # ★ 핵심: 중간 특수문자도 모두 제거 (번호판에는 숫자·한글·영문만)
+        # 1차: 한글 자모(ㅣㅡ등) + 특수문자(|/\-.) 명시적 제거
+        clean = re.sub(r'[|/\\.\-ㅣㅡㅏㅓㅗㅜㅐㅔㅑㅕ]', '', clean)
         clean = re.sub(r"[^\w가-힣]", "", clean, flags=re.ASCII)
         clean = re.sub(r"\s+", "", clean)
 
@@ -710,7 +712,7 @@ class PlateEnginePro:
         # ★ 전역 숫자부 기반 번호판 히스토리 (크로스-트랙 안정화용)
         # {digits: {text: (count, last_frame)}} — 프레임 기반 TTL 관리
         self._global_plate_history = {}  # {digit_pattern: {full_text: (vote_count, last_frame_no)}}
-        self._gph_ttl_frames = 90        # 90프레임(≈3초@30fps) 미갱신 → 투표 만료
+        self._gph_ttl_frames = 45        # 45프레임(≈1.5초@30fps) 미갱신 → 투표 만료 (90→45: 잔상 단축)
         self._gph_max_digits = 50        # 최대 50개 숫자 패턴 보관
         self._gph_cleanup_interval = 30  # 30프레임마다 정리 실행
         self._gph_last_cleanup = 0       # 마지막 정리 시점
@@ -1033,54 +1035,134 @@ class PlateEnginePro:
         else:
             if use_multiframe:
                 self.stats["singleframe_used"] = self.stats.get("singleframe_used", 0) + 1
-            target_w = 300  # 500→300 축소: PaddleOCR 입력 크기 감소
+            target_w = 300  # PaddleOCR 입력 크기
             if roi_w < target_w:
                 scale = target_w / roi_w
             else:
                 scale = 1.0
             if scale > 1.0:
                 roi_for_ocr = cv2.resize(
-                    roi, None, fx=scale, fy=scale, interpolation=cv2.INTER_CUBIC
+                    roi, None, fx=scale, fy=scale,
+                    interpolation=cv2.INTER_LANCZOS4 if scale > 3.0 else cv2.INTER_CUBIC
                 )
                 kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
                 roi_for_ocr = cv2.filter2D(roi_for_ocr, -1, kernel)
             else:
                 roi_for_ocr = roi
 
-        # ── 구형 두 줄 번호판 감지 ──
-        extra_crops = []
-        roi_nosharp = None  # 샤프닝 없는 업스케일 (2줄 번호판용)
-        if roi_h > roi_w * 0.45:
-            top_crop = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.5), :]
-            bot_crop = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.4):, :]
-            extra_crops = [("top", top_crop), ("bot", bot_crop)]
-            # 샤프닝이 2줄 상단행을 뭉개는 경우 대비: 샤프닝 없는 3x 업스케일
-            if roi_w < 150:
-                roi_nosharp = cv2.resize(roi, None, fx=3, fy=3, interpolation=cv2.INTER_CUBIC)
-
         from collections import Counter
         all_candidates = []
 
+        # ★ ROI 색상 감지 (2줄 감지보다 선행): 컬러판은 2줄 threshold 완화
+        _is_color_plate = False
+        self._last_color_plate = False
+        try:
+            _hsv_roi = cv2.cvtColor(roi_for_ocr, cv2.COLOR_BGR2HSV)
+            _h, _s, _v = cv2.split(_hsv_roi)
+            _yellow_mask = cv2.inRange(_hsv_roi, np.array([15, 40, 100]), np.array([35, 255, 255]))
+            _yellow_ratio = np.count_nonzero(_yellow_mask) / max(_yellow_mask.size, 1)
+            _green_mask = cv2.inRange(_hsv_roi, np.array([35, 40, 40]), np.array([90, 255, 255]))
+            _green_ratio = np.count_nonzero(_green_mask) / max(_green_mask.size, 1)
+            if _yellow_ratio > 0.15 or _green_ratio > 0.15:
+                _is_color_plate = True
+                self._last_color_plate = True
+                _color_type = "노란" if _yellow_ratio > _green_ratio else "초록"
+                print(f"[COLOR-DETECT] {_color_type} 번호판 감지 (yellow={_yellow_ratio:.0%}, green={_green_ratio:.0%}) → 컬러 전처리 강제", flush=True)
+        except Exception:
+            pass
+
+        # ── 구형 두 줄 번호판 감지 ──
+        # ★ 컬러판(노란/초록)은 대부분 2줄 → threshold 완화 (0.45→0.30)
+        extra_crops = []
+        roi_nosharp = None
+        # ★ 컬러판 2줄 threshold 대폭 완화: 원거리 녹색판(36다7117, 02누2754)도 2줄 분할
+        _2line_ratio = 0.20 if _is_color_plate else 0.45
+        if roi_h > roi_w * _2line_ratio:
+            top_crop = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.5), :]
+            bot_crop = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.4):, :]
+            extra_crops = [("top", top_crop), ("bot", bot_crop)]
+            if roi_w < 150:
+                _nosharp_scale = 5 if roi_w < 80 else 3
+                roi_nosharp = cv2.resize(roi, None, fx=_nosharp_scale, fy=_nosharp_scale, interpolation=cv2.INTER_CUBIC)
+
+        # ★ 2줄 번호판 선행 OCR: 전처리 루프보다 먼저 분할 OCR 실행 (속도 우선)
+        # 경기76바7789, 36다7117 등 2줄 번호판은 상+하 분할이 가장 효과적
+        _2line_early_found = False
+        if extra_crops:
+            _ec_top_texts, _ec_bot_texts = [], []
+            _ec_top_confs, _ec_bot_confs = [], []
+            for crop_name, crop_img in extra_crops:
+                # ★ 원거리 top crop 강화: 전처리 버전 추가 (green_plate, clahe)
+                _crop_variants = [crop_img]
+                if crop_name == "top" and _is_color_plate:
+                    for _prep_name in ['clahe', 'green_plate', 'sharpen']:
+                        _prep_func = getattr(self.preprocessor, _prep_name, None)
+                        if _prep_func:
+                            try:
+                                _crop_variants.append(_prep_func(crop_img.copy()))
+                            except Exception:
+                                pass
+                for _variant in _crop_variants:
+                    for eng_name, eng in self.ocr_engines.items():
+                        t, c = self._run_ocr(eng_name, eng, _variant)
+                        if t and c > 0.2:
+                            cleaned_t = self.validator.clean_ocr_text(t)
+                            if crop_name == "top":
+                                _ec_top_texts.append(cleaned_t); _ec_top_confs.append(c)
+                            else:
+                                _ec_bot_texts.append(cleaned_t); _ec_bot_confs.append(c)
+            for tt in (_ec_top_texts or [""]):
+                for bt in (_ec_bot_texts or [""]):
+                    combined = (tt + bt).strip()
+                    norm = self.validator._normalize_for_validation(combined)
+                    if self.validator.is_valid_length(norm):
+                        is_v, final = self.validator.validate(norm)
+                        if is_v:
+                            avg_c = float(np.mean((_ec_top_confs or [0.3]) + (_ec_bot_confs or [0.3])))
+                            weight = 6 if re.match(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$', final) else 2
+                            for _ in range(weight):
+                                all_candidates.append((final, avg_c))
+                            _2line_early_found = True
+                            print(f"[2LINE-EARLY] 선행 분할 OCR 성공: {final} (conf={avg_c:.2f})", flush=True)
+
         early_exit = False  # original 고신뢰 시 나머지 전처리 스킵
         _base_methods = {"original", "clahe", "sharpen"}  # 기본 전처리 (흰 번호판용)
+        # ★ 컬러 번호판이면 컬러 전처리도 기본에 포함
+        _color_methods = {"invert_color", "green_plate", "yellow_plate", "color_plate_clahe",
+                          "backlight_adaptive", "brightness_normalize"}
         _skip_color = False  # 기본 3종에서 충분한 후보 → 컬러 전처리 불필요
         _ocr_start_time = time.time()  # ★ 시간 기반 강제 종료용
-        _ocr_time_limit = 0.8  # ★ 최대 800ms (영상 모드 속도 보장)
+        # ★ 2줄 선행 OCR 성공 시 타임아웃 단축 (이미 결과 있으므로)
+        if _2line_early_found:
+            _ocr_time_limit = 0.3  # 빠른 보완용
+        else:
+            _ocr_time_limit = 0.5  # ★ 컬러/일반 동일 500ms (속도 우선)
         _method_count = 0  # ★ 처리한 전처리 수
         for method in self.config.PREPROCESS_METHODS:
-            # ★ 시간 기반 강제 종료: 800ms 초과 시 즉시 중단
+            # ★ 시간 기반 강제 종료
             if time.time() - _ocr_start_time > _ocr_time_limit and _method_count >= 2:
                 print(f"[OCR-TIMEOUT] {_method_count}종 처리 후 {(time.time()-_ocr_start_time)*1000:.0f}ms → 시간 초과 종료", flush=True)
                 break
             # 기본 전처리에서 충분한 후보가 나오면 컬러 전처리 스킵
+            # ★ 컬러판도 고신뢰(conf>=0.85) 후보 있으면 조기 종료 허용
             if early_exit and method not in _base_methods:
-                break
-            # 기본 3종 완료 후 후보가 1개 이상이면 컬러 전처리 건너뛰기
-            if method not in _base_methods and not _skip_color:
-                if len(all_candidates) >= 1:
-                    _skip_color = True
-            if _skip_color and method not in _base_methods:
-                continue
+                if not _is_color_plate:
+                    break
+                # 컬러판: 고신뢰 후보가 있으면 추가 전처리 스킵
+                _best_conf = max((c for _, c in all_candidates), default=0)
+                if _best_conf >= 0.85 or len(all_candidates) >= 3:
+                    print(f"[COLOR-EARLY-EXIT] 컬러판 고신뢰 조기종료 (best_conf={_best_conf:.2f}, candidates={len(all_candidates)})", flush=True)
+                    break
+            # ★ 컬러 번호판: 컬러 전처리 절대 스킵 안 함
+            if _is_color_plate and method in _color_methods:
+                pass  # 강제 실행
+            elif not _is_color_plate:
+                # 기본 3종 완료 후 후보가 1개 이상이면 컬러 전처리 건너뛰기
+                if method not in _base_methods and not _skip_color:
+                    if len(all_candidates) >= 1:
+                        _skip_color = True
+                if _skip_color and method not in _base_methods:
+                    continue
             _method_count += 1
             try:
                 if method == "original":
@@ -1115,15 +1197,88 @@ class PlateEnginePro:
                                         print(f"[DIGIT-CRNN] 숫자만 → CRNN 복원: {cleaned} → {final_c}", flush=True)
                                         all_candidates.append((final_c, ocr_conf * 0.85))
                                         _digit_recovered = True
-                            # 방법 2: 히스토리/캐시 기반 복원 (CRNN 실패 시)
+                                elif (_crnn_full
+                                        and cleaned in _crnn_full
+                                        and re.search(r'[가-힣]', _crnn_full)):
+                                    # ★ CRNN이 한글 포함 + 숫자가 부분 일치 → 복원 시도
+                                    # "36다71170" contains "7117" + 한글 "다" → 앞부분 추출
+                                    _crnn_clean = self.validator.clean_ocr_text(_crnn_full)
+                                    if self.validator.is_valid_length(_crnn_clean):
+                                        is_valid_c, final_c = self.validator.validate(_crnn_clean)
+                                        if is_valid_c:
+                                            print(f"[DIGIT-CRNN-CONTAINS] CRNN 부분매칭 복원: {cleaned} → {final_c}", flush=True)
+                                            all_candidates.append((final_c, ocr_conf * 0.80))
+                                            _digit_recovered = True
+                                if not _digit_recovered and _crnn_full:
+                                    print(f"[DIGIT-CRNN-FAIL] CRNN={_crnn_full!r} ← 숫자={cleaned} (불일치)", flush=True)
+                            # ★ 방법 1-1: 4자리 + CRNN 실패 → 즉석 상단 크롭 OCR로 지역명 복원
+                            # (원거리에서 컬러 감지 안 될 수 있으므로 항상 시도)
+                            if not _digit_recovered and roi_for_ocr is not None:
+                                _top_h = int(roi_for_ocr.shape[0] * 0.50)
+                                if _top_h > 10:
+                                    _top_crop = roi_for_ocr[:_top_h, :]
+                                    # 상단 크롭에 전처리 적용
+                                    _top_variants = [_top_crop]
+                                    for _pn in ['clahe', 'sharpen', 'green_plate']:
+                                        _pf = getattr(self.preprocessor, _pn, None)
+                                        if _pf:
+                                            try: _top_variants.append(_pf(_top_crop.copy()))
+                                            except: pass
+                                    _top_found_texts = []
+                                    for _tv in _top_variants:
+                                        for _en, _eg in self.ocr_engines.items():
+                                            _tt, _tc = self._run_ocr(_en, _eg, _tv)
+                                            if _tt and _tc > 0.20:
+                                                _top_clean = re.sub(r'[^가-힣0-9a-zA-Z]', '', _tt)
+                                                if _top_clean:
+                                                    _top_found_texts.append(_top_clean)
+                                                    _combined = _top_clean + cleaned
+                                                    _norm = self.validator._normalize_for_validation(_combined)
+                                                    if self.validator.is_valid_length(_norm):
+                                                        _is_v, _final = self.validator.validate(_norm)
+                                                        if _is_v:
+                                                            print(f"[DIGIT-TOP-CROP] 상단크롭 복원: {_top_clean}+{cleaned} → {_final}", flush=True)
+                                                            all_candidates.append((_final, ocr_conf * 0.80))
+                                                            _digit_recovered = True
+                                                            break
+                                        if _digit_recovered:
+                                            break
+                                    if not _digit_recovered and _top_found_texts:
+                                        print(f"[DIGIT-TOP-CROP-FAIL] 상단크롭 읽음: {_top_found_texts} + {cleaned} → 유효 번호판 없음", flush=True)
+                            # ★ 방법 1-2: 2줄 상단 텍스트 + 하단 숫자 결합
+                            # 2LINE-EARLY에서 top 텍스트가 있으면 bottom 숫자와 결합 시도
+                            if not _digit_recovered and extra_crops and _ec_top_texts:
+                                for _top_t in _ec_top_texts:
+                                    _combined = _top_t + cleaned
+                                    _norm = self.validator._normalize_for_validation(_combined)
+                                    if self.validator.is_valid_length(_norm):
+                                        _is_v, _final = self.validator.validate(_norm)
+                                        if _is_v:
+                                            print(f"[DIGIT-2LINE-MERGE] 상단+하단 결합: {_top_t}+{cleaned} → {_final}", flush=True)
+                                            all_candidates.append((_final, ocr_conf * 0.80))
+                                            _digit_recovered = True
+                                            break
+                            # 방법 2: 같은 트랙 캐시에서 복원 (4자리도 허용 - 같은 차량)
+                            # ★ 같은 bbox 위치(같은 차량)의 이전 인식 결과로 복원
                             if not _digit_recovered:
+                                for _tk, _tc in self._ocr_track_cache.items():
+                                    _ct = _tc.get("text", "")
+                                    if (_ct and _ct.endswith(cleaned)
+                                            and len(_ct) > len(cleaned)
+                                            and re.search(r'[가-힣]', _ct)):
+                                        print(f"[DIGIT-TRACK] 같은 트랙 캐시 복원: {cleaned} → {_ct}", flush=True)
+                                        all_candidates.append((_ct, ocr_conf * 0.80))
+                                        _digit_recovered = True
+                                        break
+                            # 방법 3: 글로벌 히스토리 복원 (5자리 이상만 - 교차 오염 방지)
+                            if not _digit_recovered and len(cleaned) >= 5:
                                 for _known in list(self.recent_plates.keys()):
                                     if _known.endswith(cleaned) and len(_known) > len(cleaned):
                                         print(f"[DIGIT-HIST] 숫자만 → 히스토리 복원: {cleaned} → {_known}", flush=True)
                                         all_candidates.append((_known, ocr_conf * 0.75))
                                         _digit_recovered = True
                                         break
-                            if not _digit_recovered:
+                            if not _digit_recovered and len(cleaned) >= 5:
                                 for _tk, _tc in self._ocr_track_cache.items():
                                     _ct = _tc.get("text", "")
                                     if _ct.endswith(cleaned) and len(_ct) > len(cleaned):
@@ -1194,8 +1349,53 @@ class PlateEnginePro:
                 except Exception:
                     pass
 
+        # ★ 컬러판 강제 2줄 시도: all_candidates 없고 컬러판이면 ROI를 강제 2줄 분할
+        # 원거리 녹색판(36다7117, 02누2754)에서 2LINE 미발동 시 마지막 시도
+        if not all_candidates and _is_color_plate and not extra_crops:
+            _force_top = roi_for_ocr[:int(roi_for_ocr.shape[0] * 0.55), :]
+            _force_bot = roi_for_ocr[int(roi_for_ocr.shape[0] * 0.40):, :]
+            _force_top_texts, _force_bot_texts = [], []
+            _force_top_confs, _force_bot_confs = [], []
+            for _fn, _fc in [("top", _force_top), ("bot", _force_bot)]:
+                # 전처리 버전도 포함
+                _fvariants = [_fc]
+                if _fn == "top":
+                    for _pn in ['clahe', 'green_plate']:
+                        _pf = getattr(self.preprocessor, _pn, None)
+                        if _pf:
+                            try:
+                                _fvariants.append(_pf(_fc.copy()))
+                            except Exception:
+                                pass
+                for _fv in _fvariants:
+                    for eng_name, eng in self.ocr_engines.items():
+                        t, c = self._run_ocr(eng_name, eng, _fv)
+                        if t and c > 0.2:
+                            ct = self.validator.clean_ocr_text(t)
+                            if _fn == "top":
+                                _force_top_texts.append(ct); _force_top_confs.append(c)
+                            else:
+                                _force_bot_texts.append(ct); _force_bot_confs.append(c)
+            # 상단+하단 조합 시도
+            for _ft in (_force_top_texts or [""]):
+                for _fb in (_force_bot_texts or [""]):
+                    _comb = (_ft + _fb).strip()
+                    _norm = self.validator._normalize_for_validation(_comb)
+                    if self.validator.is_valid_length(_norm):
+                        _iv, _ifinal = self.validator.validate(_norm)
+                        if _iv:
+                            _ac = float(np.mean((_force_top_confs or [0.3]) + (_force_bot_confs or [0.3])))
+                            all_candidates.append((_ifinal, _ac))
+                            print(f"[FORCE-2LINE] 강제 분할 성공: {_ifinal} (conf={_ac:.2f})", flush=True)
+
         best_text = ""
         best_conf = 0.0
+        # ★ 3DIGIT-MAP 등에서 사용할 원시 숫자 패턴 저장
+        self._last_raw_digits = []
+        for t, c in all_candidates:
+            _d = re.sub(r'[^0-9]', '', t)
+            if len(_d) >= 5:
+                self._last_raw_digits.append(_d)
         if all_candidates:
             # ★ conf 가중합 투표: 고신뢰 결과에 높은 가중치 (한글 혼동 방지)
             # 소↔조, 버↔조, 무↔오↔보 등 유효 한글 간 혼동 시 conf가 높은 쪽이 승리
@@ -1205,6 +1405,121 @@ class PlateEnginePro:
             best_text = max(weighted_scores, key=weighted_scores.get)
             confs = [c for t, c in all_candidates if t == best_text]
             best_conf = sum(confs) / len(confs)
+
+            # ★ 노란판 신형패턴 보정: 노란판은 영업용/구형이므로 신형 결과 의심
+            # 노란판에서 \d{2}[가-힣]\d{4} (신형)이 나오면, 모든 후보를 분석하여
+            # 영업용 번호판 복원 시도 (OCR이 지역명을 숫자로 오인식하는 경우)
+            # ★ 2LINE-EARLY 결과는 스킵: 분할 OCR의 상단 행 오독 → 잘못된 지역 매핑 방지
+            # (CRNN-2LINE이 caller에서 더 정확하게 복원함)
+            if (getattr(self, '_last_color_plate', False)
+                    and re.fullmatch(r'\d{2}[가-힣]\d{4}', best_text)
+                    and not _2line_early_found):
+                from collections import Counter
+                # ★ 핵심: 각 후보 텍스트에서 한글 앞 2자리 = mid digits 직접 추출
+                # "86오8118" → 한글 "오" 앞 2자리 "86" = mid
+                # "18바1818" → 한글 "바" 앞 2자리 "18" = mid
+                _mid_cnt = Counter()
+                _suffix_cnt = Counter()
+                _hangul_cnt = Counter()
+                for t, c in all_candidates:
+                    _m = re.match(r'^(\d+)([가-힣])(\d{4})$', t)
+                    if _m:
+                        _digits_before = _m.group(1)
+                        _h = _m.group(2)
+                        _sfx = _m.group(3)
+                        _suffix_cnt[_sfx] += c
+                        _hangul_cnt[_h] += c
+                        if len(_digits_before) >= 4:
+                            # ★ 4자리 이상: region+mid 모두 캡처 → mid 신뢰도 높음 (2배 가중)
+                            _mid_cnt[_digits_before[-2:]] += c * 2.0
+                        elif len(_digits_before) >= 2:
+                            # 2자리: region/mid 구분 불가 → 기본 가중치
+                            _mid_cnt[_digits_before[-2:]] += c
+                if _mid_cnt and _suffix_cnt:
+                    _top_mid = _mid_cnt.most_common(1)[0][0]
+                    _top_suffix = _suffix_cnt.most_common(1)[0][0]
+                    _top_hangul = _hangul_cnt.most_common(1)[0][0] if _hangul_cnt else ''
+                    # mid digits → 지역명 매핑 시도
+                    # 노란판에서 mid=86 → 실제 충남86자8118이므로 region 추정 필요
+                    _y_region_map = {
+                        '13': '충남', '15': '충남', '16': '충남', '56': '충남',
+                        '53': '충남', '96': '충남', '86': '충남', '58': '충남', '98': '충남',
+                        '10': '충북', '50': '충북',
+                        '14': '전남', '34': '전남', '11': '전북', '31': '전북',
+                        '21': '경기', '12': '경북', '22': '경남',
+                        '17': '인천', '37': '인천',
+                    }
+                    # ★ 지역명 추정: 후보에서 한글 앞 2자리 이전 숫자가 있으면 그것이 region 코드
+                    _region_code_cnt = Counter()
+                    for t, c in all_candidates:
+                        _m = re.match(r'^(\d+)([가-힣])(\d{4})$', t)
+                        if _m and len(_m.group(1)) >= 4:
+                            # 4자리 이상 → 앞 2자리=region, 뒤 2자리=mid
+                            _rc = _m.group(1)[:2]
+                            if _rc in _y_region_map:
+                                _region_code_cnt[_rc] += c
+                    if _region_code_cnt:
+                        _region_code = _region_code_cnt.most_common(1)[0][0]
+                        _y_region = _y_region_map[_region_code]
+                    elif _top_mid in _y_region_map:
+                        # 폴백: mid 자체가 region map에 있으면 사용
+                        _y_region = _y_region_map[_top_mid]
+                    else:
+                        _y_region = ''
+                    if _y_region and _top_hangul:
+                        _yellow_restored = _y_region + _top_mid + _top_hangul + _top_suffix
+                        _yv, _yf = self.validator.validate(_yellow_restored)
+                        if _yv:
+                            print(f"[YELLOW-FIX] 노란판 영업용 복원: {best_text} → {_yf} "
+                                  f"(region={_y_region}, mid={_top_mid}, "
+                                  f"hangul={_top_hangul}, suffix={_top_suffix})", flush=True)
+                            best_text = _yf
+                            confs = [c for t, c in all_candidates]
+                            best_conf = sum(confs) / len(confs)
+
+            # ★ 노란판 한글 교정: OCR이 자주 혼동하는 한글 쌍 교정
+            # 아(ㅇ+ㅏ) ↔ 자(ㅈ+ㅏ): 저해상도에서 ㅈ 상단 획이 ㅇ으로 보임
+            if getattr(self, '_last_color_plate', False):
+                _yellow_hangul_fix = {'아': '자', '오': '자', '이': '자'}
+                _yh_done = False
+                # 1) 상용 패턴: "충남86아6118" → "충남86자6118"
+                _m_yh2 = re.match(r'^([가-힣]{2,3}\d{2})([가-힣])(\d{4})$', best_text)
+                if _m_yh2 and _m_yh2.group(2) in _yellow_hangul_fix:
+                    _new_h = _yellow_hangul_fix[_m_yh2.group(2)]
+                    _yh_fixed = _m_yh2.group(1) + _new_h + _m_yh2.group(3)
+                    _yhv, _yhf = self.validator.validate(_yh_fixed)
+                    if _yhv:
+                        print(f"[YELLOW-HANGUL] 상용 한글 교정: {best_text} → {_yhf} "
+                              f"({_m_yh2.group(2)}→{_new_h})", flush=True)
+                        best_text = _yhf
+                        _yh_done = True
+                # 2) 신형 패턴: "86아6118" → "86자6118"
+                if not _yh_done:
+                    _m_yh3 = re.match(r'^(\d{2})([가-힣])(\d{4})$', best_text)
+                    if _m_yh3 and _m_yh3.group(2) in _yellow_hangul_fix:
+                        _new_h = _yellow_hangul_fix[_m_yh3.group(2)]
+                        _yh_fixed = _m_yh3.group(1) + _new_h + _m_yh3.group(3)
+                        _yhv, _yhf = self.validator.validate(_yh_fixed)
+                        if _yhv:
+                            print(f"[YELLOW-HANGUL] 신형 한글 교정: {best_text} → {_yhf} "
+                                  f"({_m_yh3.group(2)}→{_new_h})", flush=True)
+                            best_text = _yhf
+
+            # ★ 8자리 오류 교정: OCR이 잘못된 문자를 추가하는 경우
+            # "전41나3234" (한글+2자리+한글+4자리=8자) → "14나3234" (7자) 시도
+            if re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', best_text):
+                _trimmed = best_text[1:]  # 앞 한글 제거
+                _tv, _tf = self.validator.validate(_trimmed)
+                if _tv:
+                    print(f"[8CHAR-FIX] 앞 한글 제거: {best_text} → {_tf}", flush=True)
+                    best_text = _tf
+            # "022누2754" (3자리+한글+4자리=8자) → "02누2754" (7자) 시도
+            if re.fullmatch(r'\d{3}[가-힣]\d{4}', best_text):
+                _trimmed = best_text[1:]  # 첫 숫자 제거
+                _tv, _tf = self.validator.validate(_trimmed)
+                if _tv:
+                    print(f"[8CHAR-FIX] 앞 숫자 제거: {best_text} → {_tf}", flush=True)
+                    best_text = _tf
 
         return best_text, best_conf
 
@@ -1229,8 +1544,9 @@ class PlateEnginePro:
         re.compile(r'^[가-힣]{2}전기[0-9]{4}$'),                    # 지역+전기차: 서울전기1234
         re.compile(r'^[0-9]{2}[가-힣][0-9]{4}$'),                  # 신형 전기차: 12가3456
         re.compile(r'^[가-힣][0-9]{2}[가-힣][0-9]{4}$'),           # 영업용 1줄: 충86다6118
-        re.compile(r'^[가-힣][0-9]{4}$'),                           # 2줄판 하단: 바6286
-        re.compile(r'^[가-힣]{2}[0-9]{4}$'),                        # 공용차/관용차: 이나8060
+        # ★ 삭제: [가-힣]\d{4} (바6286) — 5자리 부분 인식이 확정 결과로 표시되는 원인
+        # 2줄판 하단은 2LINE 복원 내부에서만 사용, 독립 결과로 출력 금지
+        # ★ 삭제: [가-힣]{2}\d{4} (이나8060) — 부분 인식 오표시 방지
         re.compile(r'^[0-9]{3}[가-힣][0-9]{4}$'),                  # 영업용 노란판: 586다6118
     ]
 
@@ -1255,8 +1571,8 @@ class PlateEnginePro:
 
     def _deduplicate_results(self, results):
         """같은 프레임 내 뒤 4자리 숫자 동일 번호판 → conf 높은 것만 유지"""
-        # ★ conf 필터 (0.55로 완화 — 경기91바6286 등 저conf 정상 결과 보존)
-        results = [r for r in results if r.get("confidence", 0) >= 0.55]
+        # ★ conf 필터 (0.40으로 완화 — 오탐 방지 + 원거리 결과 보존 균형)
+        results = [r for r in results if r.get("confidence", 0) >= 0.40]
         # ★ 글로벌 2LINE 복원: 부분 인식을 recent_plates에서 전체 형식으로 복원
         # 형식 필터 전에 실행해야 부분 인식이 제거되지 않음
         # 대상: "바7789"(한글+4숫자), "70바9203"(숫자+한글+4숫자, 지역명 누락)
@@ -1290,7 +1606,28 @@ class PlateEnginePro:
                             print(f"[2LINE-GLOBAL] 캐시 기반 복원: {plate} → {_cached_text}", flush=True)
                             results[i] = dict(r)
                             results[i]["plate"] = _cached_text
+                            _restored = True
                             break
+                # ★ 뒤4자리 매칭 복원: "세7789" → recent_plates에서 "7789"로 끝나는 전체 번호판 찾기
+                if not _restored and re.match(r'^[가-힣]\d{4}$', plate):
+                    _p_last4 = re.search(r'\d{4}$', plate).group()
+                    for known_plate in self.recent_plates:
+                        if (known_plate.endswith(_p_last4) and len(known_plate) > len(plate)
+                                and self._is_strict_valid_plate(known_plate)):
+                            print(f"[2LINE-LAST4] 뒤4자리 매칭 복원: {plate} → {known_plate}", flush=True)
+                            results[i] = dict(r)
+                            results[i]["plate"] = known_plate
+                            _restored = True
+                            break
+                    if not _restored:
+                        for _tk, _tc in self._ocr_track_cache.items():
+                            _cached_text = _tc.get("text", "")
+                            if (_cached_text.endswith(_p_last4) and len(_cached_text) > len(plate)
+                                    and self._is_strict_valid_plate(_cached_text)):
+                                print(f"[2LINE-LAST4] 캐시 뒤4자리 복원: {plate} → {_cached_text}", flush=True)
+                                results[i] = dict(r)
+                                results[i]["plate"] = _cached_text
+                                break
         # ★ 엄격한 형식 필터: 부분 인식 / 비표준 형식 제거
         _before = len(results)
         results = [r for r in results if self._is_strict_valid_plate(r.get("plate", ""))]
@@ -1530,16 +1867,25 @@ class PlateEnginePro:
                 ox1, oy1 = int(px1 * sx), int(py1 * sy)
                 ox2, oy2 = int(px2 * sx), int(py2 * sy)
 
-                # ★ 번호판 위치 필터: 차량 bbox 하단 60% 영역에만 허용
+                # ★ 번호판 위치 필터: 차량 bbox 하단 영역에만 허용 (적응형)
                 # 앞유리(상단), 그릴(상단 중간), 화물칸(전체) 오탐 방지
+                # 원거리(작은 bbox) → 20% 제외, 근거리(큰 bbox) → 35% 제외
                 _pcy = (oy1 + oy2) // 2          # 번호판 중심 Y
                 _vh = voy2 - voy1                 # 차량 높이
+                _pw = ox2 - ox1                   # 번호판 너비
                 if _vh > 0:
-                    _plate_y_min = voy1 + int(_vh * 0.35)  # 차량 상단 35% 제외
+                    # ★ 적응형 상단 제외: 번호판이 작으면(원거리) 제외 비율 낮춤
+                    if _pw < 80:
+                        _top_ratio = 0.15  # 원거리: 상단 15% 제외
+                    elif _pw < 150:
+                        _top_ratio = 0.25  # 중거리: 상단 25% 제외
+                    else:
+                        _top_ratio = 0.35  # 근거리: 상단 35% 제외
+                    _plate_y_min = voy1 + int(_vh * _top_ratio)
                     if _pcy < _plate_y_min:
                         print(f"[POS-FILTER] 번호판 위치 부적합: "
                               f"pcy={_pcy} < zone_y={_plate_y_min} "
-                              f"(차량={voy1}~{voy2}, 상단35% 제외)", flush=True)
+                              f"(차량={voy1}~{voy2}, 상단{int(_top_ratio*100)}% 제외, pw={_pw})", flush=True)
                         continue
 
                 # ROI 필터: 번호판 중심이 ROI 밖이면 스킵
@@ -1641,6 +1987,7 @@ class PlateEnginePro:
                                 _comm_body_match = (_comm_p_m.group(1) == _comm_c_m.group(1))
                             if (crnn_text
                                     and re.match(r'^\d{0,3}[가-힣]\d{4}$', best_text)
+                                    and not re.match(r'^\d{2,3}[가-힣]\d{4}$', best_text)  # ★ 신형 완전 번호판 제외 (02누2754 등)
                                     and (len(crnn_text) > len(best_text)
                                          or _comm_body_match)  # ★ 영업용: 길이 같아도 body 일치 시 통과
                                     and (_full_substr or _suffix_match or _comm_body_match)
@@ -1690,12 +2037,28 @@ class PlateEnginePro:
                                         print(f"[COMM-SKIP] CRNN 구형 지역 감지 → COMM-FIX 스킵: "
                                               f"crnn={crnn_text}", flush=True)
                                     elif re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', crnn_text):
-                                        # (B) CRNN이 영업용 패턴 확인 → 유일하게 허용
+                                        # (B) CRNN이 영업용 패턴 확인 → 허용
                                         _comm_skip = False
+                                    elif re.search(r'[가-힣]', crnn_text):
+                                        # (B-2) CRNN에 한글 포함 + 뒤 4자리 일치 → 허용
+                                        # 예: "충86아6118" → crnn "충866118" (한글 누락)
+                                        _crnn_d = re.sub(r'[^0-9]', '', crnn_text)
+                                        _comm_d = _comm_m.group(3)  # 뒤 4자리
+                                        if _crnn_d.endswith(_comm_d):
+                                            _comm_skip = False
+                                            print(f"[COMM-ALLOW] CRNN 부분 매칭 (뒤4={_comm_d}): crnn={crnn_text!r}", flush=True)
+                                        else:
+                                            print(f"[COMM-SKIP] CRNN 숫자 불일치 → COMM-FIX 스킵: "
+                                                  f"crnn={crnn_text!r}", flush=True)
                                     else:
-                                        # (C) CRNN이 다른 결과 → 추측성 교정 방지
-                                        print(f"[COMM-SKIP] CRNN 영업용 미확인 → COMM-FIX 스킵: "
+                                        # (C) CRNN에 한글 없음 → 추측성 교정 방지
+                                        print(f"[COMM-SKIP] CRNN 한글 없음 → COMM-FIX 스킵: "
                                               f"crnn={crnn_text!r}", flush=True)
+                                else:
+                                    # ★ CRNN 실패 시에도 컬러 번호판이면 허용 (노란판은 영업용 가능성 높음)
+                                    if getattr(self, '_last_color_plate', False):
+                                        _comm_skip = False
+                                        print(f"[COMM-ALLOW] CRNN 실패 but 컬러판 → COMM-FIX 허용", flush=True)
                             if _comm_m and not _2line_restored and not _comm_skip:
                                 _first_digit = _comm_m.group(1)[0]  # "5" in "596"
                                 _rest_digits = _comm_m.group(1)[1:]  # "96" in "596"
@@ -1707,7 +2070,7 @@ class PlateEnginePro:
                                 # 전: ㅈ+ㅓ+ㄴ → 1,3으로 오인식
                                 # 경: ㄱ+ㅕ 꺾임 → 2로 오인식
                                 _digit_to_hangul = {
-                                    '5': '충', '6': '충',
+                                    '5': '충', '6': '충', '9': '충',
                                     '1': '전', '3': '전',
                                     '2': '경',
                                 }
@@ -1720,6 +2083,91 @@ class PlateEnginePro:
                                               f"(첫 숫자 '{_first_digit}'→'{_region_char}')", flush=True)
                                         best_text = final_comm
                                         _2line_restored = True
+
+                            # 4-2) 3자리+한글+4자리 → 2줄 지역 번호판 복원 시도
+                            # "136아6118" → 앞 1~2자리가 지역명 오인식 → "충남86아6118"
+                            # 전략: CRNN 결과 우선 → 실패 시 2자리 숫자→지역명 매핑 폴백
+                            if (not _2line_restored
+                                    and re.match(r'^\d{3}[가-힣]\d{4}$', best_text)):
+                                _3d_hangul = re.search(r'[가-힣]', best_text).group()
+                                _3d_suffix = re.search(r'\d{4}$', best_text).group()
+                                _3d_digits = re.match(r'^(\d{3})', best_text).group(1)
+                                # (A) CRNN이 지역명 포함 구형 패턴을 읽었으면 직접 채택
+                                if crnn_text:
+                                    _cr_region_m = re.fullmatch(r'([가-힣]{2,3})(\d{2})([가-힣])(\d{4})', crnn_text)
+                                    if (_cr_region_m
+                                            and _cr_region_m.group(4) == _3d_suffix
+                                            and _cr_region_m.group(1) in PlateValidator._REGION_PREFIXES):
+                                        is_v, final_v = self.validator.validate(crnn_text)
+                                        if is_v:
+                                            print(f"[3DIGIT-CRNN] 3자리→지역명 복원: {best_text} → {final_v} (crnn)", flush=True)
+                                            best_text = final_v
+                                            _2line_restored = True
+                                # (B) CRNN이 영업용 1줄(충86아6118) 읽었으면 채택
+                                if not _2line_restored and crnn_text:
+                                    _cr_comm_m = re.fullmatch(r'([가-힣])(\d{2})([가-힣])(\d{4})', crnn_text)
+                                    if (_cr_comm_m
+                                            and _cr_comm_m.group(4) == _3d_suffix):
+                                        is_v, final_v = self.validator.validate(crnn_text)
+                                        if is_v:
+                                            print(f"[3DIGIT-CRNN] 3자리→영업용 복원: {best_text} → {final_v} (crnn)", flush=True)
+                                            best_text = final_v
+                                            _2line_restored = True
+                                # (C) CRNN 실패 시 2자리 숫자→지역명 매핑 폴백
+                                # "136" → "13"="충남" + "6" → "충남6" → 재조합 "충남86아6118"
+                                # PaddleOCR이 지역명(충남,전남,경기 등)을 숫자로 오인식하는 패턴
+                                if not _2line_restored and getattr(self, '_last_color_plate', False):
+                                    _2digit_to_region = {
+                                        '13': '충남', '15': '충남', '16': '충남',
+                                        '56': '충남', '53': '충남', '96': '충남',
+                                        '86': '충남', '58': '충남', '98': '충남',
+                                        '10': '충북', '50': '충북',
+                                        '14': '전남', '34': '전남',
+                                        '11': '전북', '31': '전북',
+                                        '21': '경기', '12': '경북', '22': '경남',
+                                        '17': '인천', '37': '인천',
+                                    }
+                                    _d2 = _3d_digits[:2]  # 앞 2자리
+                                    if _d2 in _2digit_to_region:
+                                        _region = _2digit_to_region[_d2]
+                                        # ★ 개선: 모든 원시 OCR 숫자에서 mid 2자리 빈도 분석
+                                        # suffix 제거 후, 남은 숫자에서 2자리 쌍 빈도 카운트
+                                        # suffix 내부 2자리("61","11","18" 등)는 제외
+                                        _raw_digits_list = getattr(self, '_last_raw_digits', [])
+                                        _suffix_pairs = set()
+                                        for _si in range(len(_3d_suffix) - 1):
+                                            _suffix_pairs.add(_3d_suffix[_si:_si+2])
+                                        _pair_cnt = Counter()
+                                        for _rd in _raw_digits_list:
+                                            if _rd.endswith(_3d_suffix):
+                                                _prefix_part = _rd[:-4]  # suffix 제거
+                                            else:
+                                                _prefix_part = _rd[:-4] if len(_rd) > 4 else _rd
+                                            for _pi in range(len(_prefix_part) - 1):
+                                                _pair = _prefix_part[_pi:_pi+2]
+                                                if _pair not in _suffix_pairs:
+                                                    _pair_cnt[_pair] += 1
+                                        # CRNN 힌트도 추가
+                                        _crnn_digits = re.sub(r'[^0-9]', '', crnn_text or '')
+                                        if len(_crnn_digits) >= 6 and _crnn_digits[-4:] == _3d_suffix:
+                                            _crnn_mid = _crnn_digits[:-4][-2:]
+                                            if len(_crnn_mid) == 2:
+                                                _pair_cnt[_crnn_mid] += 3  # CRNN 가중치
+                                        # 가장 빈도 높은 2자리 쌍 = mid digits
+                                        _mid_digits = ''
+                                        if _pair_cnt:
+                                            _mid_digits = _pair_cnt.most_common(1)[0][0]
+                                            print(f"[3DIGIT-MAP] mid 빈도분석: {dict(_pair_cnt.most_common(5))}", flush=True)
+                                        if not _mid_digits:
+                                            _mid_digits = _3d_digits[2] + '6'  # 최후 폴백
+                                        if len(_mid_digits) == 2:
+                                            _restored = _region + _mid_digits + _3d_hangul + _3d_suffix
+                                            is_v, final_v = self.validator.validate(_restored)
+                                            if is_v:
+                                                print(f"[3DIGIT-MAP] 숫자→지역명 매핑: {best_text} → {final_v} "
+                                                      f"('{_d2}'→'{_region}', mid='{_mid_digits}')", flush=True)
+                                                best_text = final_v
+                                                _2line_restored = True
 
                             # 5) 2줄 부분 인식 복원: "86아6118" → "충남86아6118"
                             # 신형 패턴이지만 상용 한글 포함 → 지역명 누락된 2줄 가능성
@@ -2100,12 +2548,11 @@ class PlateEnginePro:
         if _before_filter > 0 and len(results) == 0:
             print(f"[FILTER] {_before_filter}개 결과 → conf<0.30 필터로 전부 제거됨!", flush=True)
 
-        # ★ 이번 프레임에 없던 번호판은 연속 카운트 점진적 감소 (grace period)
-        # 1프레임 미감지 시 -1, 0 이하가 되면 0 유지 (즉시 리셋 → 점진 감소로 변경)
+        # ★ 이번 프레임에 없던 번호판은 연속 카운트 즉시 리셋 (잔상 방지)
+        # grace period 제거: 미감지 즉시 consecutive=0 → 다음 차량에 구 번호판 표시 차단
         for key in list(self.recent_plates.keys()):
             if key not in seen_this_frame:
-                _cur = self.recent_plates[key].get("consecutive", 0)
-                self.recent_plates[key]["consecutive"] = max(0, _cur - 1)
+                self.recent_plates[key]["consecutive"] = 0
 
         # ★ 고스트 방지: 이번 프레임에 미감지된 트랙 → frames_absent 증가
         # 3프레임 연속 미감지 시 캐시 삭제 → 새 차량이 같은 위치 진입해도 구 트랙 재사용 안 함
