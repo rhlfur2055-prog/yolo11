@@ -1101,9 +1101,9 @@ class PlateGUIApp(tk.Tk):
                     if validated:
                         self._latest_detections = validated
                         self._detection_ts = time.time()
-                    elif _proc_ms >= 100:
-                        # 실제 YOLO 처리했는데 결과 없음 → 차량 떠남 → 즉시 클리어
-                        self._latest_detections = []
+                    # ★ 빈 결과로 즉시 클리어 하지 않음 — TTL(1.5초)이 만료 담당
+                    # 이전: _proc_ms >= 100이면 클리어 → OCR 결과가 다음 빈 프레임에 사라짐
+                    # 지금: 새 결과 올 때만 교체, 없으면 TTL까지 유지
                     # 디버그: GUI 수신 결과 추적
                     print(f"[GUI-RX] frame={frame_idx} raw={len(raw_results)} "
                           f"valid={len(validated)} proc={data['process_ms']:.0f}ms "
@@ -1146,9 +1146,10 @@ class PlateGUIApp(tk.Tk):
             self._current_display_frame = frame
 
             with self._detection_lock:
-                # ★ 감지 결과 TTL: 1.5초로 단축 (3초는 고스트 잔상 유발)
+                # ★ 감지 결과 TTL: 3초 (거리 기반 매칭이 교차 오염 방지)
+                # Phase1 없으면 즉시 클리어, Phase1 있으면 3초까지 유지
                 _det_age = time.time() - self._detection_ts
-                if _det_age > 1.5:
+                if _det_age > 3.0:
                     self._latest_detections = []
 
                 phase2_dets = list(self._latest_detections)
@@ -1156,78 +1157,116 @@ class PlateGUIApp(tk.Tk):
             with self._phase1_lock:
                 phase1_dets = list(self._phase1_bboxes)
 
-            # ★ Phase1이 0.5초 이상 없으면 Phase2 고스트 차단
-            # 단, OCR 결과가 최근(1.5초 이내)이면 유지 — 빠른 차량이 지나간 후에도 표시
-            # (01나8060 같은 빠른 차량: 차가 지나간 후에야 OCR 완료 → 이전 코드에서 폐기됨)
-            if not phase1_dets and time.time() - self._phase1_last_active > 0.5:
-                _ocr_fresh = time.time() - self._detection_ts < 1.5
-                if not _ocr_fresh:
-                    phase2_dets = []
-
             merged = []
 
-            # ★ 고스트 방지: Phase1 고신뢰 bbox만 매칭 후보로 사용 (conf ≥ 0.5)
-            # + 최대 매칭 거리 상한 (영상 너비의 25%)
-            # → 화면 왼쪽 구조물 오감지나 전 차량 고스트가 엉뚱한 위치에 붙는 현상 방지
-            _fw = frame.shape[1] if frame is not None else 1280
-            MAX_MATCH_DIST = _fw * 0.15  # 15% of frame width (25%→15% 고스트 방지)
+            # ★ 새 차량 진입 감지: Phase1이 0→1+ 전환 시 이전 OCR 클리어
+            _has_p1 = len(phase1_dets) > 0
+            if not _has_p1:
+                self._phase1_empty_since = getattr(self, '_phase1_empty_since', 0) or time.time()
+            else:
+                _empty_dur = time.time() - getattr(self, '_phase1_empty_since', 0) if getattr(self, '_phase1_empty_since', 0) > 0 else 0
+                if _empty_dur > 0.3:
+                    # ★ Phase1이 0.3초 이상 비었다가 복귀 → 새 차량 → 이전 OCR 클리어
+                    with self._detection_lock:
+                        self._latest_detections = []
+                        self._detection_ts = 0
+                    phase2_dets = []
+                self._phase1_empty_since = 0
 
-            # 1) Phase 2 결과: Phase1이 있으면 가장 가까운 bbox로 위치 보정
-            # MAX_MATCH_DIST 초과 시 → 매칭 실패 → merged에 추가 안 함 (고스트 차단)
-            matched_p1_indices = set()
-            for p2 in phase2_dets:
-                p2_bbox = p2.get("bbox", [])
-                if len(p2_bbox) < 4:
+            # ★ Phase1 없으면 Phase2 표시 안 함 (잔상 완전 차단)
+            if not phase1_dets:
+                phase2_dets = []
+
+            # ★ Phase1-Phase2 매칭: 가장 가까운 Phase1에 무조건 매칭
+            # 거리 제한 제거 — TTL(3초) + 새차량감지(0.3초갭)로 잔상 방지
+            _fw = frame.shape[1] if frame is not None else 1920
+            _fh = frame.shape[0] if frame is not None else 1080
+
+            # Phase1 유효 bbox 필터링
+            _valid_p1 = []
+            for i, p1 in enumerate(phase1_dets):
+                p1b = p1.get("bbox", [])
+                if len(p1b) < 4:
                     continue
+                if p1.get("confidence", 1.0) < 0.45:
+                    continue
+                _pw = p1b[2] - p1b[0]
+                _ph = max(p1b[3] - p1b[1], 1)
+                if _pw < 40 or _ph < 15:
+                    continue
+                # Phase1 bbox 중심점
+                _cx = (p1b[0] + p1b[2]) / 2
+                _cy = (p1b[1] + p1b[3]) / 2
+                _valid_p1.append((i, _cx, _cy, p1))
+
+            matched_p1_indices = set()
+
+            # ★ 번호판다운 Phase1 bbox만 추출 (종횡비 1.5 이상)
+            _plate_like_p1 = [(i, cx, cy, p1) for i, cx, cy, p1 in _valid_p1
+                              if (p1["bbox"][2] - p1["bbox"][0]) /
+                                 max(p1["bbox"][3] - p1["bbox"][1], 1) >= 1.5]
+
+            # Phase2 결과 → 가장 가까운 Phase1 bbox에 매칭
+            for p2 in phase2_dets:
+                p2b = p2.get("bbox", [])
+                if len(p2b) < 4:
+                    continue
+                _p2cx = (p2b[0] + p2b[2]) / 2
+                _p2cy = (p2b[1] + p2b[3]) / 2
+
+                # 1차: 거리 기반 매칭
+                best_dist = float("inf")
+                best_idx = -1
+                best_p1 = None
+                for idx, cx, cy, p1 in _valid_p1:
+                    if idx in matched_p1_indices:
+                        continue
+                    _dist = ((cx - _p2cx) ** 2 + (cy - _p2cy) ** 2) ** 0.5
+                    if _dist < best_dist:
+                        best_dist = _dist
+                        best_idx = idx
+                        best_p1 = p1
+
                 combined = dict(p2)
-                if phase1_dets:
-                    # Phase1의 모든 bbox 중 중심 거리가 가장 가까운 것으로 위치 보정
-                    p2_cx = (p2_bbox[0] + p2_bbox[2]) / 2
-                    p2_cy = (p2_bbox[1] + p2_bbox[3]) / 2
-                    best_dist = float("inf")
-                    best_idx = -1
-                    for i, p1 in enumerate(phase1_dets):
-                        p1b = p1.get("bbox", [])
-                        if len(p1b) < 4:
-                            continue
-                        # 저신뢰 Phase1 bbox 제외 (오감지 필터)
-                        if p1.get("confidence", 1.0) < 0.45:
-                            continue
-                        # ★ 너무 작은 bbox 제외 — 그릴/엠블럼 오감지 차단
-                        # 진짜 번호판은 최소 80×25px 이상
-                        _pb_w = p1b[2] - p1b[0]
-                        _pb_h = p1b[3] - p1b[1]
-                        if _pb_w < 80 or _pb_h < 25:
-                            continue
-                        p1_cx = (p1b[0] + p1b[2]) / 2
-                        p1_cy = (p1b[1] + p1b[3]) / 2
-                        dist = ((p2_cx - p1_cx) ** 2 + (p2_cy - p1_cy) ** 2) ** 0.5
-                        if dist < best_dist:
-                            best_dist = dist
-                            best_idx = i
-                    if best_idx >= 0 and best_dist <= MAX_MATCH_DIST:
-                        # ★ 현재 프레임 Phase1 위치로 bbox 갱신 → 라벨이 항상 번호판 위에
-                        combined["bbox"] = phase1_dets[best_idx]["bbox"]
-                        matched_p1_indices.add(best_idx)
-                    # else: Phase1 매칭 실패 → Phase2 자체 bbox로 표시
-                    # (엔진 레벨 frames_absent 만료가 고스트 방지 역할 담당)
-                merged.append(combined)
+                # ★ 거리 제한 없이 가장 가까운 Phase1에 무조건 매칭
+                # 잔상 방지는 TTL(3초) + 새차량감지(Phase1 0.3초 갭→클리어)로 처리
+                if best_p1 is not None:
+                    combined["bbox"] = best_p1["bbox"]
+                    matched_p1_indices.add(best_idx)
+                    merged.append(combined)
+                elif (len(_plate_like_p1) >= 1
+                      and _det_age < 3.0):
+                    # ★ 폴백: valid_p1에 매칭 안 됐지만 plate_like Phase1 존재
+                    for _fb_idx, _, _, _fb_p1 in _plate_like_p1:
+                        if _fb_idx not in matched_p1_indices:
+                            combined["bbox"] = _fb_p1["bbox"]
+                            matched_p1_indices.add(_fb_idx)
+                            merged.append(combined)
+                            break
 
             # 2) Phase 1 중 Phase 2와 매칭 안 된 것 → "탐지중..." 표시
-            # ★ 오감지 필터: 저신뢰 또는 비율이 이상한 bbox는 탐지중... 표시 안 함
-            # (SUV 엠블럼/그릴은 정사각형에 가까움 → W/H < 1.5 이면 제외)
+            # ★ 오감지 필터: 저신뢰, 비율 이상, 프레임 가장자리 bbox 제외
             for i, p1 in enumerate(phase1_dets):
                 if i not in matched_p1_indices:
-                    # 신뢰도 필터
-                    if p1.get("confidence", 0) < 0.45:
+                    if p1.get("confidence", 0) < 0.50:
                         continue
-                    # 번호판 종횡비 필터 (번호판은 가로가 세로의 1.5배 이상)
                     p1b = p1.get("bbox", [])
-                    if len(p1b) >= 4:
-                        _pw = p1b[2] - p1b[0]
-                        _ph = max(p1b[3] - p1b[1], 1)
-                        if _pw / _ph < 1.5:
-                            continue
+                    if len(p1b) < 4:
+                        continue
+                    _pw = p1b[2] - p1b[0]
+                    _ph = max(p1b[3] - p1b[1], 1)
+                    # 번호판 종횡비 필터 (가로 > 세로 × 1.5)
+                    if _pw / _ph < 1.5:
+                        continue
+                    # ★ 프레임 하단 20% 가장자리 bbox 제외 (도로/바닥/워터마크 오탐지)
+                    if p1b[3] > _fh * 0.80:
+                        continue
+                    # ★ 프레임 우측 5% 가장자리 초과 bbox 제외
+                    if p1b[0] > _fw * 0.95:
+                        continue
+                    # ★ 최소 크기 필터 (너무 작은 bbox는 번호판이 아님)
+                    if _pw < 50 or _ph < 15:
+                        continue
                     merged.append(p1)
 
             annotated = self._draw_overlay(frame, merged)
@@ -1268,25 +1307,69 @@ class PlateGUIApp(tk.Tk):
     MAX_PHASE1_DISPLAY = 5   # YOLO 탐지 즉시 박스 (OCR 전 노란 박스)
 
     def _draw_overlay(self, frame: np.ndarray, detections: list[dict]) -> np.ndarray:
-        """MareArts ANPR 스타일 오버레이 (속도 극대화 버전)
-        - 좌상단: YOLO26 ANPR + FPS (최소 오버레이)
-        - 초록 bbox + 라벨 (R70 이상만 표시)
-        - frame.copy() 최소화 → FPS 극대화
+        """MareArts ANPR 스타일 오버레이 — 프로페셔널 UI
+        - 좌상단: 시스템 정보 패널 (타이틀 + FPS + 해상도)
+        - 번호판 bbox: 두꺼운 초록 테두리 + 상단 배너 라벨
+        - 우측: 감지 이력 사이드 패널 (최근 5건)
         """
-        result = frame  # ★ copy() 제거 — FPS 극대화 (원본 직접 그리기)
+        result = frame  # ★ copy() 제거 — FPS 극대화
         h, w = result.shape[:2]
 
-        # ── 좌상단 FPS 패널 (최소한의 오버레이) ──
+        # ── 좌상단 시스템 정보 패널 ──
         fps = 0
         if hasattr(self, '_det_fps_samples') and self._det_fps_samples:
             fps = sum(self._det_fps_samples) / len(self._det_fps_samples)
-        cv2.rectangle(result, (5, 5), (200, 55), (0, 0, 0), -1)
-        cv2.putText(result, "YOLO26 ANPR", (12, 25),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
-        cv2.putText(result, f"FPS:{fps:.0f} {w}x{h}", (12, 48),
-                    cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 255), 1)
+        # 반투명 배경 패널
+        _panel_overlay = result.copy()
+        cv2.rectangle(_panel_overlay, (0, 0), (220, 65), (20, 20, 20), -1)
+        cv2.addWeighted(_panel_overlay, 0.7, result, 0.3, 0, result)
+        # 타이틀 + 초록 액센트 바
+        cv2.rectangle(result, (0, 0), (5, 65), (0, 255, 0), -1)
+        cv2.putText(result, "YOLO26 ANPR", (14, 24),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
+        cv2.putText(result, f"FPS: {fps:.0f}  |  {w}x{h}", (14, 50),
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
-        # ── R70 이상만 표시 (확실한 인식만) ──
+        # ── 우측 감지 이력 사이드 패널 (최근 5건, PIL 한글 렌더링) ──
+        _hist = getattr(self, '_detection_history', [])
+        if _hist:
+            _show_count = min(5, len(_hist))
+            _panel_w = 300
+            _row_h = 32
+            _panel_h = 30 + _show_count * _row_h
+            _px = w - _panel_w - 10
+            _py = 10
+            # 반투명 배경
+            _side_overlay = result.copy()
+            cv2.rectangle(_side_overlay, (_px, _py), (_px + _panel_w, _py + _panel_h),
+                          (20, 20, 20), -1)
+            cv2.addWeighted(_side_overlay, 0.7, result, 0.3, 0, result)
+            # 헤더 바
+            cv2.rectangle(result, (_px, _py), (_px + _panel_w, _py + 26), (0, 80, 0), -1)
+            # PIL로 한글 포함 텍스트 일괄 렌더링
+            _pil_img = Image.fromarray(cv2.cvtColor(result, cv2.COLOR_BGR2RGB))
+            _pil_draw = ImageDraw.Draw(_pil_img)
+            _font_head = _get_font(16)
+            _font_plate = _get_font(15)
+            _font_conf = _get_font(13)
+            _pil_draw.text((_px + 8, _py + 5), f"Detection Log ({len(_hist)})",
+                           font=_font_head, fill=(0, 255, 0))
+            for _i in range(_show_count):
+                _entry = _hist[_i]
+                _plate = (_entry.get("text") or _entry.get("plate", ""))[:14]
+                _conf = _entry.get("ocr_confidence", _entry.get("confidence", 0))
+                _cnt = _entry.get("count", 1)
+                _ey = _py + 30 + _i * _row_h
+                # 번호판 텍스트 (흰색)
+                _pil_draw.text((_px + 10, _ey + 2), _plate,
+                               font=_font_plate, fill=(255, 255, 255))
+                # conf + count (시안색)
+                _conf_str = f"{_conf:.0%} x{_cnt}"
+                _pil_draw.text((_px + _panel_w - 85, _ey + 4), _conf_str,
+                               font=_font_conf, fill=(0, 220, 220))
+            result = cv2.cvtColor(np.array(_pil_img), cv2.COLOR_RGB2BGR)
+
+        # ── 번호판 bbox + 라벨 (MareArts 스타일: 라벨을 bbox 위에 배치) ──
         for det in detections:
             bbox = det.get("bbox", [])
             if len(bbox) < 4:
@@ -1297,34 +1380,66 @@ class PlateGUIApp(tk.Tk):
             x1, y1, x2, y2 = [int(v) for v in bbox]
 
             if is_valid and text and ocr_conf >= 0.70:
-                # ★ 확실한 인식: 초록 bbox + 번호 라벨 (MareArts 스타일)
+                # ★ 확실한 인식: 초록 bbox + 상단 배너 라벨
                 det_conf = det.get("pattern_score", ocr_conf)
                 d_val = min(99, int(det_conf * 100))
                 r_val = min(99, int(ocr_conf * 100))
 
-                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # 두꺼운 초록 bbox (3px)
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 3)
+                # 코너 강조 (MareArts 스타일 — 코너에 짧은 굵은 선)
+                _corner_len = max(10, (x2 - x1) // 5)
+                _ct = 4  # 코너 두께
+                cv2.line(result, (x1, y1), (x1 + _corner_len, y1), (0, 255, 0), _ct)
+                cv2.line(result, (x1, y1), (x1, y1 + _corner_len), (0, 255, 0), _ct)
+                cv2.line(result, (x2, y1), (x2 - _corner_len, y1), (0, 255, 0), _ct)
+                cv2.line(result, (x2, y1), (x2, y1 + _corner_len), (0, 255, 0), _ct)
+                cv2.line(result, (x1, y2), (x1 + _corner_len, y2), (0, 255, 0), _ct)
+                cv2.line(result, (x1, y2), (x1, y2 - _corner_len), (0, 255, 0), _ct)
+                cv2.line(result, (x2, y2), (x2 - _corner_len, y2), (0, 255, 0), _ct)
+                cv2.line(result, (x2, y2), (x2, y2 - _corner_len), (0, 255, 0), _ct)
 
-                label = f"{text} D{d_val}/R{r_val}"
+                # ★ 라벨을 bbox 위쪽에 배너로 렌더링 (번호만 표시)
+                label = text
                 bbox_h = y2 - y1
-                font_sz = max(20, int(bbox_h * 0.8))
-                # ★ 라벨을 bbox 안쪽 상단에 렌더링 (박스 밖으로 벗어나지 않게)
-                result = draw_korean_text(result, label, (x1 + 2, y1 + 2),
+                font_sz = max(20, int(bbox_h * 0.7))
+                _label_y = max(font_sz + 8, y1 - 4)
+                # ★ 라벨 너비 추정: 한글 1글자 ≈ font_sz * 0.65
+                _label_w_est = int(len(label) * font_sz * 0.65)
+                _label_x = max(0, min(x1, w - _label_w_est))
+                # ★ 라벨이 프레임 밖으로 넘어가면 표시 안 함
+                if x1 > w - 20 or x2 < 20:
+                    continue
+                # ★ 라벨이 화면 상단/좌측 밖으로 나가지 않도록
+                _label_top = max(0, _label_y - font_sz - 2)
+                result = draw_korean_text(result, label, (_label_x, _label_top),
                                           font_size=font_sz, color=(0, 255, 0), bg=True)
+
             elif is_valid and text and ocr_conf >= 0.50:
-                # ★ 중간 신뢰: 노란 bbox + 번호만 (D/R 없음)
+                # ★ 중간 신뢰: 노란 bbox + 번호만 (경계 클램핑)
+                if x1 > w - 20 or x2 < 20:
+                    continue
                 cv2.rectangle(result, (x1, y1), (x2, y2), (0, 200, 255), 2)
                 bbox_h = y2 - y1
-                font_sz = max(20, int(bbox_h * 0.8))
-                # ★ 라벨을 bbox 안쪽 상단에 렌더링
-                result = draw_korean_text(result, text, (x1 + 2, y1 + 2),
+                font_sz = max(18, int(bbox_h * 0.6))
+                _label_y = max(font_sz + 8, y1 - 4)
+                _label_w_est = int(len(text) * font_sz * 0.65)
+                _label_x = max(0, min(x1, w - _label_w_est))
+                _label_top = max(0, _label_y - font_sz - 2)
+                result = draw_korean_text(result, text, (_label_x, _label_top),
                                           font_size=font_sz, color=(0, 200, 255), bg=True)
+
             elif det.get("phase") == 1 and det.get("confidence", 0) >= 0.5:
-                # ★ Phase 1: 번호판 bbox 직접 탐지 (best.pt 별도 인스턴스)
-                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 2)
+                # ★ Phase 1 탐지중: 얇은 초록 점선 스타일 bbox
+                if x1 > w - 20 or x2 < 20:
+                    continue
+                cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 1)
                 bbox_h = y2 - y1
-                font_sz = max(18, min(int(bbox_h * 1.2), 36))  # 번호판 높이 기준, 최대 36px
-                # ★ 라벨을 bbox 안쪽 상단에 렌더링
-                result = draw_korean_text(result, "탐지중...", (x1 + 2, y1 + 2),
+                font_sz = max(16, min(int(bbox_h * 0.8), 28))
+                _label_y = max(font_sz + 8, y1 - 4)
+                _label_x = max(0, min(x1, w - int(4 * font_sz * 0.65)))
+                _label_top = max(0, _label_y - font_sz - 2)
+                result = draw_korean_text(result, "탐지중...", (_label_x, _label_top),
                                           font_size=font_sz, color=(0, 255, 0), bg=True)
             # ★ 미인식/저신뢰: bbox 표시 안 함 (엠블럼 오감지 방지)
 
@@ -1337,6 +1452,14 @@ class PlateGUIApp(tk.Tk):
         if not text:
             return
         conf = det.get("ocr_confidence", det.get("confidence", 0))
+        # ★ 잔상/오인식 필터: 부분 인식(5자 이하) 및 저신뢰(70% 미만) 차단
+        # "대6282", "바6286" 같은 부분 인식이 Detection Log에 누적되는 것 방지
+        import re as _re
+        _hangul_count = len(_re.findall(r'[가-힣]', text))
+        if len(text) < 7 and _hangul_count <= 1:
+            return  # 부분 인식 차단 (최소 7자 이상 또는 한글 2자 이상)
+        if conf < 0.70:
+            return  # 저신뢰 차단
         det_norm = dict(det)
         det_norm["text"] = text
         det_norm["ocr_confidence"] = conf

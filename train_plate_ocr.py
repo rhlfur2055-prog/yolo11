@@ -36,6 +36,9 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 IMG_DIR = os.path.join(BASE_DIR, "22")
 MODEL_SAVE_PATH = os.path.join(BASE_DIR, "plate_ocr_crnn.pth")
 
+# ★ 120장 추가 학습 데이터 경로
+EXTRA_IMG_DIR = r"C:\Users\jomg2\OneDrive\文档\카카오톡 받은 파일\차량 번호판 사진_120장_샘플\차량 번호판 사진"
+
 # 한국어 폰트 경로 (합성 번호판 생성용)
 FONT_PATHS = [
     r"C:\Windows\Fonts\HANBatangB.ttf",
@@ -99,7 +102,7 @@ NUM_LAYERS = 2
 BATCH_SIZE = 128          # 배치 크기 128 (CPU 처리량 개선)
 NUM_EPOCHS = 200         # 200 에폭 (2줄 번호판 패턴 학습 충분)
 LR = 0.001
-AUG_PER_IMAGE = 0        # ★ 실제 이미지 학습셋 제외 (검증 전용 — 과적합 차단)
+AUG_PER_IMAGE = 10       # ★ 실제 이미지 10배 증강 (4시간 내 완료 최적화)
 AUG_PER_SYNTH = 1        # 합성 이미지당 증강 수 (20000장 × 1 = 20,000샘플)
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -378,11 +381,12 @@ def _draw_2line_plate(region, number, bg=(255, 255, 255), fg=(0, 0, 0), font_obj
 # 2. 실제 이미지에서 plate ROI 추출
 # ═══════════════════════════════════════════
 def extract_plate_crops():
-    """12장 이미지에서 YOLO로 번호판 ROI 추출."""
+    """12장 기본 + 120장 추가 이미지에서 YOLO로 번호판 ROI 추출."""
     from plate_engine_pro import PlateEnginePro
     engine = PlateEnginePro()
 
     crops = []
+    # ── 기본 12장 (22/ 폴더) ──
     for fname, gt in TRAIN_DATA:
         fpath = os.path.join(IMG_DIR, fname)
         if not os.path.exists(fpath):
@@ -412,8 +416,59 @@ def extract_plate_crops():
         crops.append((roi, gt))
         print(f"  [{len(crops):2d}] {gt:14s}  ROI={roi.shape[1]}x{roi.shape[0]}")
 
-    print(f"\n총 {len(crops)}개 실제 plate crop 추출")
-    return crops
+    print(f"\n  기본 {len(crops)}개 plate crop 추출")
+
+    # ── ★ 추가 120장 (카카오톡 샘플) ──
+    extra_crops = []
+    if os.path.isdir(EXTRA_IMG_DIR):
+        import re
+        extra_files = [f for f in os.listdir(EXTRA_IMG_DIR)
+                       if f.lower().endswith(('.jpeg', '.jpg', '.png'))]
+        print(f"\n[추가 데이터] {EXTRA_IMG_DIR}")
+        print(f"  발견: {len(extra_files)}장")
+        for fname in sorted(extra_files):
+            # 파일명에서 GT 추출: "006거9186.jpeg" → "006거9186"
+            gt = os.path.splitext(fname)[0]
+            # GT 유효성 검사: 숫자+한글 포함 여부
+            if not re.search(r'[가-힣]', gt) or not re.search(r'\d', gt):
+                print(f"  [스킵] 유효하지 않은 파일명: {fname}")
+                continue
+            # GT 문자가 VOCAB에 있는지 확인
+            valid = all(ch in CHAR2IDX for ch in gt)
+            if not valid:
+                missing = [ch for ch in gt if ch not in CHAR2IDX]
+                print(f"  [스킵] 미등록 문자 {missing}: {fname}")
+                continue
+            fpath = os.path.join(EXTRA_IMG_DIR, fname)
+            img = cv2.imdecode(np.fromfile(fpath, dtype=np.uint8), cv2.IMREAD_COLOR)
+            if img is None:
+                continue
+            h, w = img.shape[:2]
+            # YOLO 탐지 시도
+            dets = engine.model(img, conf=0.25, imgsz=640, verbose=False)
+            if dets[0].boxes and len(dets[0].boxes) > 0:
+                det = dets[0].boxes[0]
+                x1, y1, x2, y2 = map(int, det.xyxy[0].tolist())
+                bw, bh = x2 - x1, y2 - y1
+                mx, my = int(bw * 0.35), int(bh * 0.40)
+                rx1, ry1 = max(0, x1 - mx), max(0, y1 - my)
+                rx2, ry2 = min(w, x2 + mx), min(h, y2 + my)
+                roi = img[ry1:ry2, rx1:rx2]
+                if roi.size > 0:
+                    extra_crops.append((roi, gt))
+                else:
+                    extra_crops.append((img, gt))
+            else:
+                # YOLO 미감지 → 전체 이미지 사용
+                extra_crops.append((img, gt))
+        print(f"  추가 {len(extra_crops)}개 plate crop 추출")
+    else:
+        print(f"[경고] 추가 데이터 폴더 없음: {EXTRA_IMG_DIR}")
+
+    # 합치기
+    all_crops = crops + extra_crops
+    print(f"\n총 {len(all_crops)}개 실제 plate crop 추출 (기본 {len(crops)} + 추가 {len(extra_crops)})")
+    return all_crops
 
 
 # ═══════════════════════════════════════════
@@ -686,15 +741,16 @@ def train():
     print("\n[2/5] PIL 합성 번호판 생성 (v3.0 ~20,000장)...")
     synth_crops = make_synthetic_plates()
 
-    # ── 3단계: 데이터셋 구성 (합성만 학습, 실제는 검증 전용) ──
+    # ── 3단계: 데이터셋 구성 (합성 + 실제 혼합 학습) ──
     print(f"\n[3/5] 데이터셋 구성...")
-    print(f"  ★ 실제 이미지: 검증 전용 (학습셋 제외 — 과적합 차단)")
+    print(f"  ★ 실제 이미지: {len(real_crops)}장 × {AUG_PER_IMAGE}증강 = {len(real_crops)*AUG_PER_IMAGE}샘플 (학습 포함)")
     print(f"  합성 이미지: {len(synth_crops)}장 × {AUG_PER_SYNTH}증강 = {len(synth_crops)*AUG_PER_SYNTH:,}샘플")
 
-    # 합성 이미지만 학습
+    # 합성 + 실제 이미지 혼합 학습
     synth_ds = PlateOCRDataset(synth_crops, aug_per_image=AUG_PER_SYNTH)
+    real_ds = PlateOCRDataset(real_crops, aug_per_image=AUG_PER_IMAGE, augment=True)
     from torch.utils.data import ConcatDataset
-    combined_ds = synth_ds  # 합성만 사용
+    combined_ds = ConcatDataset([synth_ds, real_ds])
 
     # 검증: 실제 이미지만 원본으로
     val_ds = PlateOCRDataset(real_crops, aug_per_image=1, augment=False)

@@ -57,6 +57,14 @@ YOLO11x 탐지 → Manual NMS (IoU>0.65 중복 제거) → Small plate filter (<
 - TTL 30프레임 만료, grace period 3프레임
 - text-based 트랙 병합: 다른 bbox, 같은 텍스트 → 기존 트랙 재사용
 
+## 프로젝트 규모
+
+- **총 Python 코드**: ~31,400줄
+- **핵심 엔진**: ~6,800줄 (plate_engine_pro + postfilter + GUI + test)
+- **시뮬레이션**: ~5,200줄 (골든타임 + SafePlate)
+- **CRNN 학습**: ~837줄
+- **모델**: YOLO11x (mAP@50=98.4%) + CRNN (10.6M params) + PaddleOCR
+
 ## 정확도
 
 - 정적 이미지: **12/12 (100%)**
@@ -100,7 +108,6 @@ python test_ocr_accuracy.py
 ### 증거 대시보드
 
 ```bash
-python build_dashboard.py
 # 브라우저에서 evidence_dashboard.html 열기
 ```
 
@@ -108,23 +115,24 @@ python build_dashboard.py
 
 ```
 YOLO26/
-├── plate_engine_pro.py          # 메인 OCR 엔진 (~2330줄, YOLO + PaddleOCR + DIGIT-TOP-CROP)
-├── plate_gui.py                 # Tkinter GUI + 실시간 영상 처리 (~972줄)
-├── plate_ocr_postfilter_v2.py   # OCR 후처리/정제 (~650줄)
+├── plate_engine_pro.py          # 메인 OCR 엔진 (~3123줄, YOLO + PaddleOCR + DIGIT-TOP-CROP)
+├── plate_gui.py                 # Tkinter GUI + 실시간 영상 처리 (~1658줄)
+├── plate_ocr_postfilter_v2.py   # OCR 후처리/정제 (~1047줄)
 ├── plate_recognition_4k.py      # 한글 교정 함수 라이브러리 (~2925줄, 읽기 전용)
-├── train_plate_ocr.py           # CRNN 학습 스크립트 (~493줄, 수정 금지)
+├── train_plate_ocr.py           # CRNN 학습 스크립트 v4.0 (~837줄, 2줄 번호판 합성 + GPU 학습)
 ├── test_ocr_accuracy.py         # 12장 정확도 테스트 (~142줄)
 ├── build_dashboard.py           # 증거 대시보드 HTML 생성기
 ├── config.py                    # 중앙 설정
 │
-├── simulation/                  # 시뮬레이션 프레임워크 (4,826줄)
-│   ├── simulation_framework.py  #   EventBus + SimulationFramework (541줄)
+├── simulation/                  # 시뮬레이션 프레임워크 (5,257줄)
+│   ├── simulation_framework.py  #   EventBus + SimulationFramework (552줄)
 │   │
 │   ├── goldentime/              #   골든타임 2.0 — 긴급차량 미양보
 │   │   ├── siren_trigger.py     #     사이렌 감지 시뮬레이터 (264줄)
-│   │   ├── plate_evidence.py    #     연속 감지 채증 (664줄)
-│   │   ├── distance_checker.py  #     거리 판정 (604줄)
-│   │   └── evidence_export.py   #     증거 패키지 생성 (549줄)
+│   │   ├── plate_evidence.py    #     연속 감지 채증 (680줄)
+│   │   ├── distance_checker.py  #     거리 판정 (871줄)
+│   │   ├── evidence_export.py   #     증거 패키지 생성 (566줄)
+│   │   └── test_verification.py #     시뮬레이션 검증 테스트 (120줄)
 │   │
 │   └── safeplate/               #   SafePlate 4K — 물피도주 탐지
 │       ├── shock_simulator.py   #     충격 감지 시뮬레이터 (352줄)
@@ -232,6 +240,40 @@ frame_read → SHOCK_DETECTED → detection_result → DEPARTURE_DETECTED
 | `yolo26-evidence` | 증거 패키지 + 대시보드 | evidence_output/ 작업 |
 | `yolo26-ocr` | OCR 엔진 비교 + 최적화 | PaddleOCR/EasyOCR 설정 |
 
+## CRNN 재학습 (v4.0)
+
+CRNN(CNN + BiLSTM + CTC) 모델 — 번호판 텍스트 인식 보조 엔진.
+
+### 학습 데이터
+- **실제 이미지**: 12장 (검증 전용, 학습셋 제외 — 과적합 차단)
+- **합성 번호판**: ~20,607장 (PIL 기반)
+  - 신형 1줄: 43 한글 × 50 조합 = 2,150장
+  - 구형 2줄 (지역명): 17지역 × 43자 × 3 조합 = 2,193장
+  - 혼동 문자 집중 (보/무/버/소/조/오): 핵심 6자 × 200 + 나머지 9자 × 100
+  - 우선 지역 강화 (충남/경기/경남 등 8지역): 43자 × 5 = 1,720장
+  - **★ 2줄 번호판 합성**: 17지역 × 43자 × 5 = 3,655장
+  - **★ 우선 지역 2줄 3배 강화**: 8지역 × 43자 × 10 = 3,440장
+  - 녹색(영업용)/황색/백색 번호판 배경 다양화
+
+### 모델 구조
+- **CNN**: 6블록 (64→128→256→512→512→512채널), BatchNorm + ReLU
+- **RNN**: BiLSTM (hidden=256, 2층, dropout=0.2)
+- **출력**: CTC greedy decoding
+- **파라미터**: 10,587,862개
+- **입력**: 64×256 grayscale
+
+### 학습 설정
+```
+Epochs: 200 (조기종료: acc=12/12 & epoch≥150)
+Batch: 128
+Optimizer: Adam (lr=0.001)
+Scheduler: CosineAnnealing (eta_min=1e-6)
+Device: CUDA (RTX 4060) — GPU 학습 ~5시간
+```
+
+### 데이터 증강 (12종)
+밝기/대비, 가우시안 노이즈, 가우시안/모션 블러, 회전(±6°), 원근 변환, HSV jitter, JPEG 압축, 랜덤 스케일, 반전, CLAHE, 랜덤 크롭
+
 ## 의존성
 
 ```
@@ -239,7 +281,7 @@ Python 3.10+
 ultralytics          # YOLO11x
 opencv-python        # OpenCV
 paddleocr            # PaddleOCR (한국어 특화, 단독 OCR 엔진)
-torch, torchvision   # CRNN OCR 모델
+torch, torchvision   # CRNN OCR 모델 + GPU 학습
 numpy, Pillow        # 이미지 처리
 tkinter              # GUI
 ```
@@ -257,6 +299,7 @@ tkinter              # GUI
 
 | 커밋 | 내용 |
 |------|------|
+| `a300070` | README.md 파이프라인 상세 업데이트 (DIGIT-TOP-CROP, COLOR-EARLY-EXIT, 원거리 한계) |
 | `0b162ba` | 원거리 2줄 번호판 인식 개선 (DIGIT-TOP-CROP + COLOR-EARLY-EXIT) |
 | `7b3f166` | CRNN 교차검증 강화 + 2줄 번호판 복원 + COMM-FIX 가드 |
 | `eedb0e8` | README.md 추가 + 증거 정리 + 대시보드 업데이트 |

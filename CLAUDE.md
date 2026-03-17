@@ -15,9 +15,9 @@ YOLO 탐지 → ROI 크롭 (35%/40% 마진) → 500px 업스케일
 ## 파일 맵 + 소유권
 | 파일 | 역할 | 소유 터미널 | 줄 수 |
 |------|------|------------|-------|
-| `plate_engine_pro.py` | 메인 OCR 엔진 (탐지+인식+추적) | 터미널 3 | ~2330 |
-| `plate_gui.py` | Tkinter GUI + 실시간 영상 처리 | 터미널 2 | ~972 |
-| `plate_ocr_postfilter_v2.py` | OCR 후처리/정제 | 터미널 3 | ~650 |
+| `plate_engine_pro.py` | 메인 OCR 엔진 (탐지+인식+추적) | 터미널 3 | ~3123 |
+| `plate_gui.py` | Tkinter GUI + 실시간 영상 처리 | 터미널 2 | ~1658 |
+| `plate_ocr_postfilter_v2.py` | OCR 후처리/정제 | 터미널 3 | ~1047 |
 | `test_ocr_accuracy.py` | 12장 정확도 테스트 | 터미널 4 | ~142 |
 | `plate_recognition_4k.py` | 한글 교정 함수 라이브러리 | 읽기 전용 | ~2925 |
 | `plate_ocr_postfilter.py` | 구버전 후처리 (레거시) | 수정 금지 | ~263 |
@@ -44,16 +44,21 @@ YOLO 탐지 → ROI 크롭 (35%/40% 마진) → 500px 업스케일
 6. **Mock/가짜 코드 금지** — 실제 동작하는 코드만 작성
 7. **모델 파일 수정 금지** — .pt, .pth 파일 절대 건드리지 않기
 
-## 현재 이슈: Ghost Detection (실시간 영상)
-### 문제
-- 이전 차량 번호판이 다음 차량에 표시됨 (예: 58주9599 → 01나8060)
-- YOLO bbox가 번호판이 아닌 엠블럼/그릴 감지
-- 차량 간 구분 부족
+## 현재 이슈
 
-### 현재 대응 (plate_engine_pro.py)
-- `PlateTracker` 클래스: IoU 기반 bbox 매칭 (threshold=0.30)
-- TTL 프레임 만료 (30프레임 미감지 시 트랙 삭제)
-- `consecutive_required`: 연속 N프레임 감지 시 표시
+### Ghost Detection (해결됨 ✅)
+- PlateTracker IoU 기반 차량 추적 + text-based 트랙 병합
+- TTL 30프레임, grace period 3프레임
+- **5/5 PASS**
+
+### 원거리 2줄 번호판 인식 (개선 중)
+- **DIGIT-TOP-CROP**: 4자리만 인식 시 상단 50% 크롭 → 지역명 복원
+- **COLOR-EARLY-EXIT**: 컬러 번호판 고신뢰 시 조기종료
+- frame_area_ratio < 5%에서는 OCR 해상도 한계 (번호판 ~50px)
+
+### CRNN 재학습 (진행 중)
+- v4.0: 2줄 번호판 합성 추가, GPU(RTX 4060) 학습
+- 혼동 문자 교정: 나↔자, 무↔부, 보↔소
 
 ### 알려진 이슈
 - 흰색/은색 번호판: V > 80 임계값에서 그림자/음영 포함 문제
@@ -92,3 +97,7 @@ python plate_gui.py
 | 2025-02-26 | OCR 엔진 고도화 | CRNN 모델/디버그 이미지 추가, plate_engine_pro.py 확장 |
 | 2025-02-27 | Ghost Detection | PlateTracker IoU 기반 차량 추적, Ghost Detection 5/5 달성 |
 | 2025-02-27 | 문서화/정리 | 불필요 파일 정리, README.md 재작성, CLAUDE.md 이력 추가 |
+| 2026-03-14 | 골든타임 2.0 | 시뮬레이션 6계단 파이프라인 + 증거 대시보드 |
+| 2026-03-14 | SafePlate 4K | 5모듈 2200줄 + 야간모드 + 증거패키지 |
+| 2026-03-16 | 원거리 인식 개선 | DIGIT-TOP-CROP + COLOR-EARLY-EXIT + conf filter 0.40 |
+| 2026-03-16 | CRNN v4.0 재학습 | 2줄 번호판 합성 + GPU(RTX 4060) 학습 200에폭 |
