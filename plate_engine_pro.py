@@ -488,7 +488,7 @@ class PlateValidator:
             # ★ 수정: suffix를 뒤 4자리로 고정 → 앞자리 숫자 탈락 방지
             suffix = clean[-4:]  # 뒤 4자리 숫자
             if suffix.isdigit():
-                for split_pos in [2, 3]:  # 앞 2~3자리 + 한글(1자리 건너뜀) + 뒤 4자리
+                for split_pos in [2, 3, 4]:  # 앞 2~4자리 + 한글(1자리 건너뜀) + 뒤 4자리
                     if len(clean) >= split_pos + 5:
                         prefix = clean[:split_pos]
                         # 한글 자리에 있는 숫자를 한글로 매핑 시도
@@ -1533,7 +1533,7 @@ class PlateEnginePro:
     # config.py KR_PATTERNS 14개와 완전 동기화 + 영업용 노란판 추가
     _STRICT_PLATE_PATTERNS = [
         re.compile(r'^[가-힣]{2}[0-9]{2}[가-힣][0-9]{4}$'),       # 구형: 서울12가3456
-        re.compile(r'^[0-9]{2,3}[가-힣][0-9]{4}$'),                # 신형: 123가4567, 12가3456
+        re.compile(r'^[0-9]{2,4}[가-힣][0-9]{4}$'),                # 신형: 12가3456, 123가4567, 8519우6374
         re.compile(r'^[가-힣]{2,3}[0-9]{2}[가-힣][0-9]{4}$'),      # 구형지역: 경기12가3456
         re.compile(r'^[가-힣]{2}[0-9]{2}[바사아자배비하][0-9]{4}$'),# 영업/버스: 서울12바3456
         re.compile(r'^[가-힣]{2,3}[0-9]{4}[가-힣]{1}$'),           # 영업용 변형: 서울1234가
@@ -1547,7 +1547,7 @@ class PlateEnginePro:
         # ★ 삭제: [가-힣]\d{4} (바6286) — 5자리 부분 인식이 확정 결과로 표시되는 원인
         # 2줄판 하단은 2LINE 복원 내부에서만 사용, 독립 결과로 출력 금지
         # ★ 삭제: [가-힣]{2}\d{4} (이나8060) — 부분 인식 오표시 방지
-        re.compile(r'^[0-9]{3}[가-힣][0-9]{4}$'),                  # 영업용 노란판: 586다6118
+        re.compile(r'^[0-9]{3,4}[가-힣][0-9]{4}$'),                 # 영업용 노란판 + 4자리 앞번호: 586다6118, 8519우6374
     ]
 
     @classmethod
@@ -1578,10 +1578,10 @@ class PlateEnginePro:
         # 대상: "바7789"(한글+4숫자), "70바9203"(숫자+한글+4숫자, 지역명 누락)
         for i, r in enumerate(results):
             plate = r.get("plate", "")
-            # 부분 인식 패턴 확장: 한글+4숫자 또는 숫자2~3+한글+4숫자 (지역명 없는 것)
+            # 부분 인식 패턴 확장: 한글+4숫자 또는 숫자2~4+한글+4숫자 (지역명 없는 것)
             # ★ 강화: XX[가-힣]XXXX (7자리)가 recent_plates에서 Y+XX[가-힣]XXXX (8자리)와 매칭 시 복원
             _is_partial = (re.match(r'^[가-힣]\d{4}$', plate)
-                          or (re.match(r'^\d{2,3}[가-힣]\d{4}$', plate)
+                          or (re.match(r'^\d{2,4}[가-힣]\d{4}$', plate)
                               and not re.match(r'^[가-힣]', plate))
                           or (re.match(r'^\d{2}[가-힣]\d{4}$', plate)
                               and any(kp.endswith(plate) and len(kp) > len(plate)
@@ -1957,15 +1957,15 @@ class PlateEnginePro:
                             best_text = self._verify_korean_with_crnn(best_text, crnn_roi, crnn_text, crnn_conf)
                             # ★ CRNN-PREFIX 교정 시에도 2LINE 복원 보너스 적용
                             if (_before_crnn != best_text
-                                    and re.match(r'^\d{2,3}[가-힣]\d{4}$', best_text)
-                                    and re.match(r'^\d{2,3}[가-힣]\d{4}$', _before_crnn)):
-                                _b_prefix = re.match(r'^(\d{2,3})', _before_crnn).group(1)
-                                _a_prefix = re.match(r'^(\d{2,3})', best_text).group(1)
+                                    and re.match(r'^\d{2,4}[가-힣]\d{4}$', best_text)
+                                    and re.match(r'^\d{2,4}[가-힣]\d{4}$', _before_crnn)):
+                                _b_prefix = re.match(r'^(\d{2,4})', _before_crnn).group(1)
+                                _a_prefix = re.match(r'^(\d{2,4})', best_text).group(1)
                                 if _b_prefix != _a_prefix:
                                     _2line_restored = True  # prefix 교정도 확인된 결과로 보너스
                             # ★ _verify가 구형/영업용 2줄 결과를 직접 반환한 경우 복원 플래그 설정
                             if (_before_crnn != best_text
-                                    and not re.match(r'^\d{2,3}[가-힣]\d{4}$', best_text)
+                                    and not re.match(r'^\d{2,4}[가-힣]\d{4}$', best_text)
                                     and (re.fullmatch(r'[가-힣]{2,3}\d{2}[가-힣]\d{4}', best_text)
                                          or re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', best_text))):
                                 _2line_restored = True
@@ -1987,7 +1987,7 @@ class PlateEnginePro:
                                 _comm_body_match = (_comm_p_m.group(1) == _comm_c_m.group(1))
                             if (crnn_text
                                     and re.match(r'^\d{0,3}[가-힣]\d{4}$', best_text)
-                                    and not re.match(r'^\d{2,3}[가-힣]\d{4}$', best_text)  # ★ 신형 완전 번호판 제외 (02누2754 등)
+                                    and not re.match(r'^\d{2,4}[가-힣]\d{4}$', best_text)  # ★ 신형 완전 번호판 제외 (02누2754 등)
                                     and (len(crnn_text) > len(best_text)
                                          or _comm_body_match)  # ★ 영업용: 길이 같아도 body 일치 시 통과
                                     and (_full_substr or _suffix_match or _comm_body_match)
