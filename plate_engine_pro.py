@@ -1011,6 +1011,83 @@ class PlateEnginePro:
 
         return text, conf
 
+    def _merge_partial_plates(self, text, conf):
+        """★ OCR 부분 결과 병합: 같은 뒤4자리를 가진 서로 다른 부분 인식 결과를 합쳐서 전체 복원.
+        예: "85아6374"(100% x6) + "51우6374"(100% x99) → "8519우6374"
+        게임/시뮬레이션 번호판에서 OCR이 앞자리를 분할 인식하는 경우 대응."""
+        if not text or len(text) < 5:
+            return text, conf
+
+        # 현재 텍스트에서 뒤4자리 숫자 추출
+        suffix_m = re.search(r'(\d{4})$', text)
+        if not suffix_m:
+            return text, conf
+        suffix4 = suffix_m.group(1)
+
+        # 현재 텍스트에서 한글과 앞자리 분리
+        cur_m = re.match(r'^(\d{1,4})([가-힣])(\d{4})$', text)
+        if not cur_m:
+            return text, conf
+
+        cur_prefix = cur_m.group(1)  # 예: "51" 또는 "85"
+        cur_hangul = cur_m.group(2)  # 예: "우" 또는 "아"
+        cur_suffix = cur_m.group(3)  # 예: "6374"
+
+        # recent_plates에서 같은 뒤4자리를 가진 다른 결과 찾기
+        _now = time.time()
+        candidates = []
+        for plate_key, plate_data in self.recent_plates.items():
+            if plate_key == text:
+                continue
+            if (_now - plate_data.get("last_seen", 0)) > 10.0:
+                continue  # 10초 이상 오래된 결과 무시
+            other_m = re.match(r'^(\d{1,4})([가-힣])(\d{4})$', plate_key)
+            if not other_m:
+                continue
+            if other_m.group(3) != cur_suffix:
+                continue  # 뒤4자리 다르면 스킵
+
+            other_prefix = other_m.group(1)
+            other_hangul = other_m.group(2)
+            other_count = plate_data.get("count", 0)
+            candidates.append((other_prefix, other_hangul, other_count, plate_key))
+
+        if not candidates:
+            return text, conf
+
+        # ★ 병합 시도: 서로 다른 앞자리 숫자를 합치면 3~4자리가 되는지 확인
+        for other_prefix, other_hangul, other_count, other_plate in candidates:
+            # 앞자리가 서로 다르고, 합쳤을 때 3~4자리가 되는 경우
+            if cur_prefix == other_prefix:
+                continue
+
+            # 합산 시도: 긴쪽 앞자리를 기준으로 검증
+            # 예: "85" + "51" → "8519" 아니면 "5185"
+            merged1 = cur_prefix + other_prefix  # "8551" 또는 "5185"
+            merged2 = other_prefix + cur_prefix  # "5185" 또는 "8551"
+
+            for merged_prefix in [merged1, merged2]:
+                if len(merged_prefix) < 3 or len(merged_prefix) > 4:
+                    continue
+
+                # 더 자주 인식된 쪽의 한글 사용
+                cur_count = self.recent_plates.get(text, {}).get("count", 0)
+                if other_count > cur_count:
+                    merged_hangul = other_hangul
+                else:
+                    merged_hangul = cur_hangul
+
+                merged_plate = f"{merged_prefix}{merged_hangul}{cur_suffix}"
+
+                # 패턴 유효성 검증
+                if re.match(r'^\d{3,4}[가-힣]\d{4}$', merged_plate):
+                    print(f"[MERGE-PARTIAL] '{text}' + '{other_plate}' → "
+                          f"'{merged_plate}' (prefix={merged_prefix}, hangul={merged_hangul})",
+                          flush=True)
+                    return merged_plate, max(conf, 0.85)
+
+        return text, conf
+
     def _get_cached_ocr(self, track_key):
         """캐시된 OCR 결과 반환"""
         cache = self._ocr_track_cache.get(track_key)
@@ -1513,13 +1590,9 @@ class PlateEnginePro:
                 if _tv:
                     print(f"[8CHAR-FIX] 앞 한글 제거: {best_text} → {_tf}", flush=True)
                     best_text = _tf
-            # "022누2754" (3자리+한글+4자리=8자) → "02누2754" (7자) 시도
-            if re.fullmatch(r'\d{3}[가-힣]\d{4}', best_text):
-                _trimmed = best_text[1:]  # 첫 숫자 제거
-                _tv, _tf = self.validator.validate(_trimmed)
-                if _tv:
-                    print(f"[8CHAR-FIX] 앞 숫자 제거: {best_text} → {_tf}", flush=True)
-                    best_text = _tf
+            # ★ 3~4자리+한글+4자리 (8~9자)는 유효한 번호판이므로 절대 삭제하지 않음
+            # "851우6374", "8519우6374" 등 게임/시뮬레이션 번호판 보호
+            # 기존 "022누2754"→"02누2754" 변환은 폐기 (3자리 앞번호도 유효함)
 
         return best_text, best_conf
 
@@ -2226,6 +2299,8 @@ class PlateEnginePro:
                     self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=True)
                     # ★ 트래킹 다수결 안정화
                     best_text, best_conf = self._stabilize_track_text(track_key, best_text, best_conf)
+                    # ★ 부분 인식 병합 (게임/시뮬레이션 번호판 대응)
+                    best_text, best_conf = self._merge_partial_plates(best_text, best_conf)
 
                 if best_text and best_conf >= self.config.OCR_CONF:
                     seen_this_frame.add(best_text)
@@ -2403,6 +2478,8 @@ class PlateEnginePro:
                         self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=True)
                     # ★ 트래킹 다수결 안정화
                     best_text, best_conf = self._stabilize_track_text(track_key, best_text, best_conf)
+                    # ★ 부분 인식 병합 (게임/시뮬레이션 번호판 대응)
+                    best_text, best_conf = self._merge_partial_plates(best_text, best_conf)
 
                     if best_text and best_conf >= self.config.OCR_CONF:
                         seen_this_frame.add(best_text)
@@ -2509,6 +2586,8 @@ class PlateEnginePro:
                     self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=True)
                 # ★ 트래킹 다수결 안정화
                 best_text, best_conf = self._stabilize_track_text(track_key, best_text, best_conf)
+                # ★ 부분 인식 병합 (게임/시뮬레이션 번호판 대응)
+                best_text, best_conf = self._merge_partial_plates(best_text, best_conf)
 
                 if best_text and best_conf >= self.config.OCR_CONF:
                     seen_this_frame.add(best_text)
