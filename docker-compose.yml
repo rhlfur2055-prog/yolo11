@@ -1,0 +1,24 @@
+version: "3.8"
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: yolo26-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: mbc
+      POSTGRES_PASSWORD: "1234"
+      POSTGRES_DB: yolo26
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./init-db:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mbc -d yolo26"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+      start_period: 10s
+volumes:
+  pgdata:
+    driver: local

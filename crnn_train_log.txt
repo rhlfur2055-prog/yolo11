@@ -1,0 +1,177 @@
+=================================================================
+  번호판 OCR CRNN 재학습 v2.0
+=================================================================
+  Device  : cuda
+  폰트    : C:\Windows\Fonts\HANBatangB.ttf
+  문자 수 : 86 (85자 + blank)
+  에폭    : 200
+
+[1/5] 실제 이미지 Plate ROI 추출 (검증 전용)...
+C:\Users\jomg2\AppData\Local\Programs\Python\Python313\Lib\site-packages\requests\__init__.py:113: RequestsDependencyWarning: urllib3 (2.6.3) or chardet (7.0.1)/charset_normalizer (3.4.5) doesn't match a supported version!
+  warnings.warn(
+[33mConnectivity check to the model hoster has been skipped because `PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK` is enabled.[0m
+[엔진] 번호판 YOLO 모델 로드: best.pt
+[엔진] 차량 YOLO 모델 로드: yolov8n.pt
+[엔진] Phase1 Fast 번호판 모델 로드: best.pt
+����: ������ ���Ͽ� �ش�Ǵ� ������ ã�� ���߽��ϴ�.
+C:\Users\jomg2\AppData\Local\Programs\Python\Python313\Lib\site-packages\paddle\utils\cpp_extension\extension_utils.py:718: UserWarning: No ccache found. Please be aware that recompiling all source files may be required. You can download and install ccache from: https://github.com/ccache/ccache/blob/master/doc/INSTALL.md
+  warnings.warn(warning_message)
+[32mCreating model: ('PP-OCRv5_server_det', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\jomg2\.paddlex\official_models\PP-OCRv5_server_det`.[0m
+WARNING: Logging before InitGoogleLogging() is written to STDERR
+I0317 13:58:57.543042 48732 onednn_context.cc:81] oneDNN v3.6.2
+[32mCreating model: ('korean_PP-OCRv5_mobile_rec', None)[0m
+[32mModel files already exist. Using cached files. To redownload, please delete the directory manually: `C:\Users\jomg2\.paddlex\official_models\korean_PP-OCRv5_mobile_rec`.[0m
+[엔진] OCR 엔진: ['paddleocr']
+[CRNN] 로드 완료: 86 classes, acc=1.0
+  [ 1] 경기76바7789       ROI=170x110
+  [ 2] 서울70바9203       ROI=158x86
+  [ 3] 경기91바6286       ROI=137x78
+  [ 4] 01나8060         ROI=156x90
+  [ 5] 02누2754         ROI=128x73
+  [ 6] 14나3234         ROI=172x50
+  [ 7] 36다7117         ROI=177x128
+  [ 8] 48보7062         ROI=114x38
+  [ 9] 55저9392         ROI=170x64
+  [10] 58두9599         ROI=138x50
+  [11] 70버6393         ROI=190x63
+  [12] 80부5915         ROI=201x73
+
+  기본 12개 plate crop 추출
+
+[추가 데이터] C:\Users\jomg2\OneDrive\文档\카카오톡 받은 파일\차량 번호판 사진_120장_샘플\차량 번호판 사진
+  발견: 120장
+  추가 120개 plate crop 추출
+
+총 132개 실제 plate crop 추출 (기본 12 + 추가 120)
+
+[2/5] PIL 합성 번호판 생성 (v3.0 ~20,000장)...
+  합성 번호판: 20647장 (신형+구형+혼동+우선지역+★2줄번호판, v4.0)
+
+[3/5] 데이터셋 구성...
+  ★ 실제 이미지: 132장 × 10증강 = 1320샘플 (학습 포함)
+  합성 이미지: 20647장 × 1증강 = 20,647샘플
+  총 학습 샘플: 21,967
+
+[4/5] CRNN 모델 생성...
+  파라미터: 10,587,862
+
+[5/5] 학습 시작 (200 epochs)...
+  [epoch   1/200] loss=3.7054  135.4s/epoch
+  [epoch   2/200] loss=2.8617  128.7s/epoch
+  [epoch   3/200] loss=2.4247  124.8s/epoch
+  [epoch   4/200] loss=2.0565  120.6s/epoch
+  [epoch   5/200] loss=1.6743  127.1s/epoch
+  Epoch   5/200  loss=1.6743  acc=0/132 (0%)  lr=0.0009985   
+  [epoch   6/200] loss=0.9739  128.3s/epoch
+  [epoch   7/200] loss=0.5794  129.5s/epoch
+  [epoch   8/200] loss=0.4481  127.9s/epoch
+  [epoch   9/200] loss=0.3550  129.2s/epoch
+  [epoch  10/200] loss=0.2738  126.8s/epoch
+  Epoch  10/200  loss=0.2738  acc=0/132 (0%)  lr=0.0009939   
+  [epoch  11/200] loss=0.2374  130.8s/epoch
+  [epoch  12/200] loss=0.2016  130.2s/epoch
+  [epoch  13/200] loss=0.1784  123.6s/epoch
+  [epoch  14/200] loss=0.1592  123.0s/epoch
+  [epoch  15/200] loss=0.1442  126.5s/epoch
+  Epoch  15/200  loss=0.1442  acc=3/132 (2%)  lr=0.0009862  ★
+  [epoch  16/200] loss=0.1297  133.3s/epoch
+  [epoch  17/200] loss=0.1200  168.6s/epoch
+  [epoch  18/200] loss=0.0878  128.2s/epoch
+  [epoch  19/200] loss=0.0689  124.9s/epoch
+  [epoch  20/200] loss=0.0589  121.9s/epoch
+  Epoch  20/200  loss=0.0589  acc=91/132 (69%)  lr=0.0009756  ★
+  [epoch  21/200] loss=0.0495  122.7s/epoch
+  [epoch  22/200] loss=0.0440  128.2s/epoch
+  [epoch  23/200] loss=0.0359  134.7s/epoch
+  [epoch  24/200] loss=0.0446  124.9s/epoch
+  [epoch  25/200] loss=0.0283  127.5s/epoch
+  Epoch  25/200  loss=0.0283  acc=121/132 (92%)  lr=0.0009620  ★
+  [epoch  26/200] loss=0.0231  124.5s/epoch
+  [epoch  27/200] loss=0.0228  127.0s/epoch
+  [epoch  28/200] loss=0.0223  128.1s/epoch
+  [epoch  29/200] loss=0.0195  122.3s/epoch
+  [epoch  30/200] loss=0.0184  126.2s/epoch
+  Epoch  30/200  loss=0.0184  acc=128/132 (97%)  lr=0.0009456  ★
+  [epoch  31/200] loss=0.0189  124.0s/epoch
+  [epoch  32/200] loss=0.0171  130.1s/epoch
+  [epoch  33/200] loss=0.0166  126.9s/epoch
+  [epoch  34/200] loss=0.0146  128.5s/epoch
+  [epoch  35/200] loss=0.0169  125.0s/epoch
+  Epoch  35/200  loss=0.0169  acc=124/132 (94%)  lr=0.0009264   
+  [epoch  36/200] loss=0.0172  135.9s/epoch
+  [epoch  37/200] loss=0.0132  146.3s/epoch
+  [epoch  38/200] loss=0.0105  141.2s/epoch
+  [epoch  39/200] loss=0.0141  139.5s/epoch
+  [epoch  40/200] loss=0.0141  140.3s/epoch
+  Epoch  40/200  loss=0.0141  acc=129/132 (98%)  lr=0.0009046  ★
+  [epoch  41/200] loss=0.0093  141.4s/epoch
+  [epoch  42/200] loss=0.0111  141.1s/epoch
+  [epoch  43/200] loss=0.0116  137.4s/epoch
+  [epoch  44/200] loss=0.0116  132.3s/epoch
+  [epoch  45/200] loss=0.0171  135.6s/epoch
+  Epoch  45/200  loss=0.0171  acc=128/132 (97%)  lr=0.0008803   
+  [epoch  46/200] loss=0.0143  131.4s/epoch
+  [epoch  47/200] loss=0.0100  125.9s/epoch
+  [epoch  48/200] loss=0.0102  124.9s/epoch
+  [epoch  49/200] loss=0.0113  116.3s/epoch
+  [epoch  50/200] loss=0.0087  128.7s/epoch
+  Epoch  50/200  loss=0.0087  acc=130/132 (98%)  lr=0.0008537  ★
+  [epoch  51/200] loss=0.0094  126.3s/epoch
+  [epoch  52/200] loss=0.0072  128.9s/epoch
+  [epoch  53/200] loss=0.0085  132.0s/epoch
+  [epoch  54/200] loss=0.0118  135.4s/epoch
+  [epoch  55/200] loss=0.0077  138.0s/epoch
+  Epoch  55/200  loss=0.0077  acc=129/132 (98%)  lr=0.0008249   
+  [epoch  56/200] loss=0.0088  137.2s/epoch
+  [epoch  57/200] loss=0.0086  134.9s/epoch
+  [epoch  58/200] loss=0.0070  129.6s/epoch
+  [epoch  59/200] loss=0.0062  131.3s/epoch
+  [epoch  60/200] loss=0.0059  133.3s/epoch
+  Epoch  60/200  loss=0.0059  acc=130/132 (98%)  lr=0.0007941   
+  [epoch  61/200] loss=0.0063  130.2s/epoch
+  [epoch  62/200] loss=0.0074  130.7s/epoch
+  [epoch  63/200] loss=0.0060  129.0s/epoch
+  [epoch  64/200] loss=0.0131  130.1s/epoch
+  [epoch  65/200] loss=0.0069  127.7s/epoch
+  Epoch  65/200  loss=0.0069  acc=131/132 (99%)  lr=0.0007615  ★
+  [epoch  66/200] loss=0.0069  130.4s/epoch
+  [epoch  67/200] loss=0.0079  132.6s/epoch
+  [epoch  68/200] loss=0.0067  132.6s/epoch
+  [epoch  69/200] loss=0.0114  134.1s/epoch
+  [epoch  70/200] loss=0.0071  131.7s/epoch
+  Epoch  70/200  loss=0.0071  acc=130/132 (98%)  lr=0.0007273   
+  [epoch  71/200] loss=0.0065  131.1s/epoch
+  [epoch  72/200] loss=0.0057  135.2s/epoch
+  [epoch  73/200] loss=0.0057  133.0s/epoch
+  [epoch  74/200] loss=0.0053  129.3s/epoch
+  [epoch  75/200] loss=0.0056  125.6s/epoch
+  Epoch  75/200  loss=0.0056  acc=130/132 (98%)  lr=0.0006917   
+  [epoch  76/200] loss=0.0058  126.5s/epoch
+  [epoch  77/200] loss=0.0064  131.6s/epoch
+  [epoch  78/200] loss=0.0070  137.9s/epoch
+  [epoch  79/200] loss=0.0057  133.5s/epoch
+  [epoch  80/200] loss=0.0048  126.6s/epoch
+  Epoch  80/200  loss=0.0048  acc=130/132 (98%)  lr=0.0006549   
+  [epoch  81/200] loss=0.0056  126.7s/epoch
+  [epoch  82/200] loss=0.0047  126.5s/epoch
+  [epoch  83/200] loss=0.0043  127.3s/epoch
+  [epoch  84/200] loss=0.0040  128.8s/epoch
+  [epoch  85/200] loss=0.0037  129.1s/epoch
+  Epoch  85/200  loss=0.0037  acc=130/132 (98%)  lr=0.0006171   
+  [epoch  86/200] loss=0.0050  127.6s/epoch
+  [epoch  87/200] loss=0.0045  129.0s/epoch
+  [epoch  88/200] loss=0.0050  126.7s/epoch
+  [epoch  89/200] loss=0.0057  125.0s/epoch
+  [epoch  90/200] loss=0.0048  126.7s/epoch
+  Epoch  90/200  loss=0.0048  acc=131/132 (99%)  lr=0.0005786   
+  [epoch  91/200] loss=0.0045  127.1s/epoch
+  [epoch  92/200] loss=0.0033  138.1s/epoch
+  [epoch  93/200] loss=0.0047  730.3s/epoch
+  [epoch  94/200] loss=0.0031  168.9s/epoch
+  [epoch  95/200] loss=0.0043  811.9s/epoch
+  Epoch  95/200  loss=0.0043  acc=130/132 (98%)  lr=0.0005397   
+  [epoch  96/200] loss=0.0055  140.0s/epoch
+  [epoch  97/200] loss=0.0047  271.2s/epoch
+  [epoch  98/200] loss=0.0033  131.2s/epoch
+  [epoch  99/200] loss=0.0024  125.2s/epoch

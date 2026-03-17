@@ -1,0 +1,41 @@
+{
+  "version": "1.0",
+  "generated_at": "2026-03-05T21:51:53.890160",
+  "system": "GoldenTime 2.0 - YOLO26 Simulation",
+  "plate": "서울70바9203",
+  "evidence": {
+    "start_time_sec": 0.0,
+    "end_time_sec": 0.0,
+    "start_frame": 540,
+    "end_frame": 691,
+    "total_frames": 240,
+    "total_duration_sec": 8.0,
+    "first_seen_time_sec": 15.015,
+    "continuous_duration_sec": 3.503499999999999,
+    "detection_count": 6,
+    "last_confidence": 1.0,
+    "last_bbox": [
+      1121,
+      470,
+      1287,
+      561
+    ]
+  },
+  "distance_violations": [
+    {
+      "timestamp_sec": 0.0,
+      "frame_idx": 555,
+      "distance_label": "~1m",
+      "close_duration_sec": 2.001999999999999,
+      "bbox_ratio": 0.00728491512345679
+    }
+  ],
+  "violation_summary": {
+    "has_distance_violation": true,
+    "violation_count": 1
+  },
+  "submission_targets": [
+    "안전신문고 (행정안전부) - 교통위반 카테고리 - API 자동 전송",
+    "119 소방공익제보 시스템 (소방청) - 소방기본법 기반 과태료 부과"
+  ]
+}
