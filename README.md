@@ -9,6 +9,47 @@
 | **GoldenTime 2.0** | 긴급차량 진로 방해 차량 자동 채증 | 사이렌 감지 (S키) | 15초 연속 감지 + 거리 위반 | 안전신문고, 119 |
 | **SafePlate 4K** | 물피도주(접촉사고 후 도주) 차량 자동 채증 | 충격 감지 (S키) | 충격 + 차량 이탈 | 경찰서, 보험사 |
 
+## ⚠️ 팀원 필독 — 핵심 엔진 & 최소 실행 가이드
+
+### 이것만은 알아야 한다
+
+| 구분 | 파일 | 역할 | 중요도 |
+|------|------|------|--------|
+| **🔴 핵심 엔진** | `plate_engine_pro.py` | YOLO 탐지 + PaddleOCR + CRNN 교차검증 + 투표 시스템 | ★★★ 절대 수정 금지 |
+| **🔴 YOLO 모델** | `best.pt` | 번호판 탐지 전용 YOLO11x (mAP@50=98.4%) | ★★★ 수정 금지 |
+| **🔴 CRNN 모델** | `plate_ocr_crnn.pth` | 한글 교차검증 + 2줄 번호판 복원 (132장 학습) | ★★★ 수정 금지 |
+| **🟡 GUI** | `plate_gui.py` | 실시간 영상 처리 + 화면 표시 | ★★ |
+| **🟡 후처리** | `plate_ocr_postfilter_v2.py` | OCR 결과 정제/교정 | ★★ |
+| **🟢 테스트** | `test_ocr_accuracy.py` | 12장 정확도 검증 (반드시 100% 유지) | ★ |
+
+### 최소 실행 환경 (이것만 설치하면 된다)
+
+```bash
+# 1. Python 3.10+ 설치 후
+pip install ultralytics opencv-python paddleocr torch torchvision numpy Pillow
+
+# 2. 필수 파일 확인 (이 4개 없으면 실행 불가)
+#    best.pt              — YOLO 모델
+#    plate_ocr_crnn.pth   — CRNN 모델
+#    plate_engine_pro.py  — 핵심 엔진
+#    plate_gui.py         — GUI
+
+# 3. 실행
+python plate_gui.py                    # 기본 영상으로 실행
+python plate_gui.py movie/hiway.mp4   # 특정 영상 지정
+
+# 4. 정확도 테스트 (변경 후 반드시 실행!)
+python test_ocr_accuracy.py
+# 결과: 12/12 = 100.0% 나와야 정상
+```
+
+### 절대 하지 말 것 ❌
+1. **`.pt`, `.pth` 모델 파일 삭제/수정** — 시스템 전체 작동 불가
+2. **`plate_engine_pro.py` 함부로 수정** — regression 발생 시 복구 어려움
+3. **테스트 안 돌리고 커밋** — `python test_ocr_accuracy.py` 반드시 12/12 확인
+
+---
+
 ## 핵심 아키텍처
 
 ```
