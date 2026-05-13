@@ -1,4 +1,4 @@
-"""
+﻿"""
 plate_recognition_4k.py - 4K 영상 번호판 인식 핵심 모듈 v2.0
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -53,7 +53,7 @@ def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
     from ultralytics import YOLO
     best = PathConfig.find_best_model()
-    print(f"[YOLO26] 모델 로드: {best}")
+    print(f"[YOLO11] 모델 로드: {best}")
     return YOLO(best)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class NumpyEncoder(json.JSONEncoder):
@@ -253,7 +253,8 @@ def validate_korean_plate(text: str) -> tuple[bool, str, float]:
 # EasyOCR이 한글 자리를 숫자/영문으로 오인식하는 패턴 → 한글 후보 매핑
 _HANGUL_CONFUSE_MAP: dict[str, str] = {
     # 숫자 오인식 (자주 발생)
-    "2": "가", "7": "나", "4": "라", "0": "오",
+    # ★ "2"→"리": PaddleOCR이 리(ㄹ+ㅣ) 자획을 숫자 2로 오독하는 패턴
+    "2": "리", "7": "나", "4": "라", "0": "오",
     "3": "가", "1": "이", "5": "마", "6": "바",
     "8": "바", "9": "자",
     # 영문 오인식
@@ -772,10 +773,10 @@ class PlateRecognizer:
         """
         모델 로드 (5단계 우선순위):
         0. 사용자 지정 모델 (--model 인자)
-        1. 로컬 yolo26.engine (TensorRT FP16)
-        2. 로컬 yolo26.onnx (ONNX Runtime GPU)
+        1. 로컬 YOLO11.engine (TensorRT FP16)
+        2. 로컬 YOLO11.onnx (ONNX Runtime GPU)
         3. HuggingFace 번호판 전용 (nickmuchi/yolov5-base-plates-detection)
-        4. 로컬 yolo26.pt (번호판 전용)
+        4. 로컬 YOLO11.pt (번호판 전용)
         5. yolo11n.pt 차량 탐지 폴백
         """
         from ultralytics import YOLO
@@ -785,7 +786,7 @@ class PlateRecognizer:
             self.model = YOLO(model_path)
             basename = os.path.basename(model_path).lower()
             self._is_plate_model = ("plate" in basename or "license" in basename
-                                    or "yolo26" in basename)
+                                    or "YOLO11" in basename)
             model_type = "번호판 전용" if self._is_plate_model else "사용자 지정"
             print(f"  [모델] {model_type} 모델 로드: {model_path}")
             self.model_path = model_path
@@ -794,7 +795,7 @@ class PlateRecognizer:
 
         script_dir = os.path.dirname(os.path.abspath(__file__))
 
-        # 1순위: 로컬 yolo26.engine (TensorRT FP16 - 최고 속도)
+        # 1순위: 로컬 YOLO11.engine (TensorRT FP16 - 최고 속도)
         engine_path = os.path.join(script_dir, LOCAL_ENGINE_MODEL)
         if os.path.isfile(engine_path):
             try:
@@ -807,7 +808,7 @@ class PlateRecognizer:
             except Exception as e:
                 print(f"  [경고] TensorRT 엔진 로드 실패: {e}")
 
-        # 2순위: 로컬 yolo26.onnx (ONNX Runtime GPU - 2~3배 빠름)
+        # 2순위: 로컬 YOLO11.onnx (ONNX Runtime GPU - 2~3배 빠름)
         onnx_path = os.path.join(script_dir, LOCAL_ONNX_MODEL)
         if os.path.isfile(onnx_path):
             try:
@@ -833,7 +834,7 @@ class PlateRecognizer:
         except Exception as e:
             print(f"  [경고] HuggingFace 모델 로드 실패: {e}")
 
-        # 4순위: 로컬 yolo26.pt (자동 판별: 번호판 전용 or COCO)
+        # 4순위: 로컬 YOLO11.pt (자동 판별: 번호판 전용 or COCO)
         local_plate = os.path.join(script_dir, LOCAL_PLATE_MODEL)
         if os.path.isfile(local_plate):
             self.model = YOLO(local_plate)

@@ -1,4 +1,4 @@
-# config.py — 시스템의 유일한 진실 공급원 (Single Source of Truth)
+﻿# config.py — 시스템의 유일한 진실 공급원 (Single Source of Truth)
 # 모든 경로, 임계값, 서버 설정을 이 파일 한 곳에서 관리합니다.
 # 다른 파일에서는 반드시 from config import ... 로 사용하세요.
 
@@ -40,8 +40,8 @@ class PathConfig:
     YOLO_COCO_FALLBACK = "yolo11n.pt"
 
     # -- TensorRT / ONNX 가속 모델 --
-    YOLO_ENGINE = "yolo26.engine"
-    YOLO_ONNX = "yolo26.onnx"
+    YOLO_ENGINE = "YOLO11.engine"
+    YOLO_ONNX = "YOLO11.onnx"
 
     # -- HuggingFace 번호판 모델 --
     HF_PLATE_REPO = "morsetechlab/yolov11-license-plate-detection"

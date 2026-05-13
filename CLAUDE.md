@@ -1,4 +1,4 @@
-# YOLO26 한국 차량 번호판 인식 프로젝트
+﻿# YOLO11 한국 차량 번호판 인식 프로젝트
 
 ## 프로젝트 개요
 YOLO 객체 탐지 + PaddleOCR(한국어 특화) 단독 기반 한국 차량 번호판 자동 인식 시스템.
@@ -29,7 +29,7 @@ YOLO 탐지 → ROI 크롭 (35%/40% 마진) → 500px 업스케일
 - `best.pt` — YOLO11x 번호판 전용 fine-tuned (mAP@50=98.4%)
 - `yolo11x_plate.pt` — YOLO11x 번호판 전용
 - `plate_ocr_crnn.pth` — CRNN OCR 모델 (42MB)
-- `yolo26n.pt`, `yolo11n.pt` — fallback 모델
+- `YOLO11n.pt`, `yolo11n.pt` — fallback 모델
 
 ## 테스트 데이터
 - `22/` 폴더: 12장 번호판 이미지 (Ground Truth = 파일명)

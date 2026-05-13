@@ -1,4 +1,4 @@
-"""
+﻿"""
 plate_gui.py - 실시간 번호판 인식 GUI v3.0 (2단계 파이프라인)
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
@@ -778,7 +778,7 @@ class PlateGUIApp(tk.Tk):
     def __init__(self, cli_args: argparse.Namespace):
         super().__init__()
         self.cli_args = cli_args
-        self.title("YOLO26 번호판 인식")
+        self.title("YOLO11 번호판 인식")
         self.configure(bg=C_BG)
         self.geometry(f"{VIDEO_DISPLAY_W + 15}x{VIDEO_DISPLAY_H + 80}")
         self.minsize(800, 500)
@@ -1001,7 +1001,7 @@ class PlateGUIApp(tk.Tk):
         self._video_h = self.video_reader.height
         self.video_reader.start()
 
-        self.title(f"YOLO26 번호판 인식 - {os.path.basename(path)} ({self._video_w}x{self._video_h})")
+        self.title(f"YOLO11 번호판 인식 - {os.path.basename(path)} ({self._video_w}x{self._video_h})")
 
         # 엔진 로딩 대기
         self.stats_var.set("엔진 로딩 중... 잠시 기다려주세요")
@@ -1325,7 +1325,7 @@ class PlateGUIApp(tk.Tk):
         cv2.addWeighted(_panel_overlay, 0.7, result, 0.3, 0, result)
         # 타이틀 + 초록 액센트 바
         cv2.rectangle(result, (0, 0), (5, 65), (0, 255, 0), -1)
-        cv2.putText(result, "YOLO26 ANPR", (14, 24),
+        cv2.putText(result, "YOLO11 ANPR", (14, 24),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 255, 0), 2)
         cv2.putText(result, f"FPS: {fps:.0f}  |  {w}x{h}", (14, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)

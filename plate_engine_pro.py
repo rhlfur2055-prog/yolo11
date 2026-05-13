@@ -1,7 +1,7 @@
-
+﻿
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# YOLO26 통합 모델 로더 (Ultralytics 최신 모델)
-# YOLO26 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
+# YOLO11 통합 모델 로더 (Ultralytics 최신 모델)
+# YOLO11 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
 _os.environ["FLAGS_use_mkldnn"] = "0"
@@ -19,7 +19,7 @@ def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
     from ultralytics import YOLO
     best = PathConfig.find_best_model()
-    print(f"[YOLO26] 모델 로드: {best}")
+    print(f"[YOLO11] 모델 로드: {best}")
     return YOLO(best)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # -*- coding: utf-8 -*-
@@ -488,7 +488,11 @@ class PlateValidator:
             # ★ 수정: suffix를 뒤 4자리로 고정 → 앞자리 숫자 탈락 방지
             suffix = clean[-4:]  # 뒤 4자리 숫자
             if suffix.isdigit():
-                for split_pos in [2, 3, 4]:  # 앞 2~4자리 + 한글(1자리 건너뜀) + 뒤 4자리
+                # ★ 입력 길이 기반 최적 split_pos 순서 결정
+                # 8자리(180리9396)→ 3 우선, 7자리(18오9396)→ 2 우선
+                _n = len(clean)
+                _split_order = [3, 2, 4] if _n >= 8 else [2, 3, 4]
+                for split_pos in _split_order:  # 앞 2~4자리 + 한글(1자리 건너뜀) + 뒤 4자리
                     if len(clean) >= split_pos + 5:
                         prefix = clean[:split_pos]
                         # 한글 자리에 있는 숫자를 한글로 매핑 시도
@@ -2132,6 +2136,11 @@ class PlateEnginePro:
                                     if getattr(self, '_last_color_plate', False):
                                         _comm_skip = False
                                         print(f"[COMM-ALLOW] CRNN 실패 but 컬러판 → COMM-FIX 허용", flush=True)
+                            # ★ 이미 유효한 신형 번호판이면 COMM-FIX 불필요 (180라9396 등)
+                            if _comm_m and not _2line_restored and not _comm_skip:
+                                _already_valid, _ = self.validator.validate(best_text)
+                                if _already_valid:
+                                    _comm_skip = True
                             if _comm_m and not _2line_restored and not _comm_skip:
                                 _first_digit = _comm_m.group(1)[0]  # "5" in "596"
                                 _rest_digits = _comm_m.group(1)[1:]  # "96" in "596"
@@ -2855,15 +2864,16 @@ class PlateEnginePro:
             crnn_kr = mc.group(1)
 
         paddle_kr = m.group(2)
-        # ★ 한글 교정
-        _corrected_kr = crnn_kr if (crnn_kr != paddle_kr and crnn_kr in _VALID_PLATE_HANGUL_ALL) else paddle_kr
+        # ★ 한글 교정 — conf 0.90 이상일 때만 CRNN 우선
+        _kr_conf_ok = crnn_conf and crnn_conf >= 0.90
+        _corrected_kr = crnn_kr if (_kr_conf_ok and crnn_kr != paddle_kr and crnn_kr in _VALID_PLATE_HANGUL_ALL) else paddle_kr
         if _corrected_kr != paddle_kr:
             print(f"[CRNN-VERIFY] {paddle_kr}→{_corrected_kr} (crnn={crnn_text}, conf={crnn_conf:.2f})", flush=True)
 
         # ★ 앞자리 prefix 교정: 뒤 4자리 일치 + 앞자리 불일치 시 CRNN prefix 채택
         # 예: PaddleOCR "56다7117" + CRNN "36다7117" → 뒤 "7117" 일치, 앞 56→36 교정
         _corrected_prefix = m.group(1)  # 기본: PaddleOCR prefix
-        if mc and crnn_conf and crnn_conf >= 0.70:
+        if mc and crnn_conf and crnn_conf >= 0.88:
             crnn_prefix_m = re.match(r'^(\d{2,3})[가-힣]\d{4}$', crnn_text)
             if crnn_prefix_m:
                 crnn_prefix = crnn_prefix_m.group(1)
