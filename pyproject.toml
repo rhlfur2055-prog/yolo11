@@ -1,0 +1,56 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "yolo11-plate-recognition"
+version = "0.1.0"
+description = "한국 차량 번호판 인식 파이프라인 (YOLO11x + PaddleOCR + CRNN)"
+readme = "README.md"
+requires-python = ">=3.10,<3.13"
+license = {text = "MIT"}
+authors = [{name = "rhlfur2055-prog"}]
+keywords = ["yolo", "ocr", "license-plate", "korean", "paddleocr", "crnn"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Image Recognition",
+]
+
+[project.urls]
+Repository = "https://github.com/rhlfur2055-prog/yolo11"
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+extend-exclude = ["22/", "22_v5/", "dataset/", "dataset_3k/"]
+
+[tool.ruff.lint]
+select = ["E", "W", "F", "I", "B", "C4", "UP", "SIM"]
+ignore = ["E501"]
+
+[tool.black]
+line-length = 100
+target-version = ["py310", "py311", "py312"]
+extend-exclude = '''
+/(
+  | 22
+  | 22_v5
+  | dataset
+  | dataset_3k
+)/
+'''
+
+[tool.mypy]
+python_version = "3.10"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+exclude = ["22/", "22_v5/", "dataset/", "dataset_3k/", "tests/"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+addopts = "-v --tb=short"
