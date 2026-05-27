@@ -23,6 +23,7 @@ from preprocessor import ImagePreprocessor, _deskew_and_otsu  # noqa: F401
 from validator import PlateValidator  # noqa: F401
 from db import PlateDatabase  # noqa: F401
 from engine_config import PlateEngineConfig  # noqa: F401  (re-export for scripts/bench_accuracy.py)
+from crnn_verifier import CrnnVerifier  # CRNN 교차검증 책임 모듈 (refactor)
 
 def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
@@ -157,11 +158,13 @@ class PlateEnginePro:
                 print(f"[엔진] EasyOCR 폴백 실패: {e}")
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
 
-        # ── CRNN 한글 검증 모델 로드 ──
-        self._crnn_model = None
-        self._crnn_idx2char = {}
-        self._crnn_vocab = set()
-        self._load_crnn()
+        # ── CRNN 한글 검증 모델 로드 (CrnnVerifier 책임 클래스) ──
+        # 기존 self._crnn_* 속성은 thin proxy 로 유지 — 외부 호출처 호환.
+        _crnn_path = Path(__file__).parent / "plate_ocr_crnn.pth"
+        self.crnn_verifier = CrnnVerifier(_crnn_path)
+        self._crnn_model = self.crnn_verifier.model
+        self._crnn_idx2char = self.crnn_verifier.idx2char
+        self._crnn_vocab = self.crnn_verifier.vocab
 
         self.recent_plates = defaultdict(lambda: {"count": 0, "last_seen": 0, "consecutive": 0})
         self.DUPLICATE_THRESHOLD = 3.0
@@ -2131,218 +2134,21 @@ class PlateEnginePro:
 
         return results
 
-    # ── CRNN 한글 검증 ──
+    # ── CRNN 한글 검증 (thin wrappers — 실 구현은 crnn_verifier.CrnnVerifier) ──
     def _load_crnn(self):
-        """plate_ocr_crnn.pth 로드 (없으면 스킵)"""
-        import torch
-        import torch.nn as nn
-        crnn_path = Path(__file__).parent / "plate_ocr_crnn.pth"
-        if not crnn_path.exists():
-            print("[CRNN] plate_ocr_crnn.pth 없음 — 한글 검증 비활성화")
-            return
-        try:
-            ckpt = torch.load(str(crnn_path), map_location="cpu", weights_only=False)
-            self._crnn_idx2char = {int(k): v for k, v in ckpt["idx2char"].items()}
-            self._crnn_vocab = set(ckpt["vocab"])
-            nc = ckpt["num_classes"]
-            hid = ckpt["hidden_size"]
-            nl = ckpt["num_layers"]
+        """[deprecated] CrnnVerifier 가 __init__ 에서 자동 로드.
 
-            class _CRNN(nn.Module):
-                def __init__(s):
-                    super().__init__()
-                    s.cnn = nn.Sequential(
-                        nn.Conv2d(1,64,3,1,1),nn.BatchNorm2d(64),nn.ReLU(True),nn.MaxPool2d(2,2),
-                        nn.Conv2d(64,128,3,1,1),nn.BatchNorm2d(128),nn.ReLU(True),nn.MaxPool2d(2,2),
-                        nn.Conv2d(128,256,3,1,1),nn.BatchNorm2d(256),nn.ReLU(True),
-                        nn.Conv2d(256,256,3,1,1),nn.BatchNorm2d(256),nn.ReLU(True),
-                        nn.MaxPool2d((2,2),(2,1),(0,1)),
-                        nn.Conv2d(256,512,3,1,1),nn.BatchNorm2d(512),nn.ReLU(True),
-                        nn.Conv2d(512,512,3,1,1),nn.BatchNorm2d(512),nn.ReLU(True),
-                        nn.MaxPool2d((2,2),(2,1),(0,1)),
-                        nn.Conv2d(512,512,3,1,1),nn.BatchNorm2d(512),nn.ReLU(True),
-                        nn.MaxPool2d((2,2),(2,1),(0,1)),
-                        nn.Conv2d(512,512,(2,1),1,0),nn.BatchNorm2d(512),nn.ReLU(True),
-                    )
-                    s.rnn = nn.LSTM(512,hid,nl,bidirectional=True,batch_first=True,dropout=0.2)
-                    s.fc = nn.Linear(hid*2, nc)
-                def forward(s, x):
-                    c = s.cnn(x).squeeze(2).permute(0,2,1)
-                    r,_ = s.rnn(c)
-                    return s.fc(r).permute(1,0,2)
-
-            m = _CRNN()
-            m.load_state_dict(ckpt["model_state"])
-            m.eval()
-            self._crnn_model = m
-            print(f"[CRNN] 로드 완료: {nc} classes, acc={ckpt.get('accuracy','?')}")
-        except Exception as e:
-            print(f"[CRNN] 로드 실패: {e}")
+        과거 시그니처 보존용 호환 메서드 — 외부 호출처가 없으면 제거 가능.
+        """
+        return
 
     def _crnn_read_plate(self, roi, return_confidence=False):
-        """CRNN으로 번호판 ROI 읽기 → 텍스트 반환 (선택적 신뢰도 포함)
-
-        Args:
-            roi: 번호판 ROI 이미지 (BGR)
-            return_confidence: True면 (텍스트, 신뢰도) 튜플 반환
-
-        Returns:
-            return_confidence=False: 텍스트 문자열
-            return_confidence=True: (텍스트, 평균_신뢰도) 튜플
-        """
-        import torch
-        if self._crnn_model is None:
-            return ("", 0.0) if return_confidence else ""
-        h, w = roi.shape[:2]
-        ratio = 64 / h
-        nw = min(int(w * ratio), 256)
-        resized = cv2.resize(roi, (nw, 64), interpolation=cv2.INTER_CUBIC)
-        gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY) if len(resized.shape) == 3 else resized
-        if nw < 256:
-            gray = np.concatenate([gray, np.ones((64, 256 - nw), dtype=np.uint8) * 255], axis=1)
-        t = torch.FloatTensor(gray.astype(np.float32) / 255.0).unsqueeze(0).unsqueeze(0)
-        with torch.no_grad():
-            out = self._crnn_model(t)
-        # softmax로 각 타임스텝별 신뢰도 계산
-        probs = torch.nn.functional.softmax(out, dim=2)
-        max_probs, preds = probs.max(2)
-        preds = preds.transpose(0, 1)
-        max_probs = max_probs.transpose(0, 1)
-        chars = []
-        char_confs = []
-        prev = -1
-        for ti in range(preds.size(1)):
-            p = preds[0, ti].item()
-            if p != 0 and p != prev and p in self._crnn_idx2char:
-                chars.append(self._crnn_idx2char[p])
-                char_confs.append(max_probs[0, ti].item())
-            prev = p
-        text = "".join(chars)
-        if return_confidence:
-            # 평균 신뢰도 계산 (글자가 없으면 0.0)
-            avg_conf = sum(char_confs) / len(char_confs) if char_confs else 0.0
-            return text, avg_conf
-        return text
+        """CRNN 으로 번호판 ROI 읽기 (CrnnVerifier 위임)."""
+        return self.crnn_verifier.read_plate(roi, return_confidence=return_confidence)
 
     def _verify_korean_with_crnn(self, paddle_text, roi, crnn_text=None, crnn_conf=None):
-        """PaddleOCR 결과의 한글을 CRNN 결과로 교차검증.
-
-        PaddleOCR: 숫자 정확, 한글 부정확
-        CRNN: 한글 정확 (전용 79자 사전)
-        → PaddleOCR 숫자 + CRNN 한글 = 최적 조합
-
-        ★ 과적합 방어: CRNN 숫자가 PaddleOCR과 크게 다르면 교정 거부
-        """
-        if self._crnn_model is None:
-            return paddle_text
-
-        # PaddleOCR 결과에서 한글 위치 확인
-        m = re.match(r'^(\d{2,3})([가-힣])(\d{4})$', paddle_text)
-        if not m:
-            return paddle_text
-
-        # CRNN으로 같은 ROI 읽기 (신뢰도 포함)
-        if crnn_conf is None:
-            crnn_conf = 1.0  # 기본값 (외부에서 전달된 경우)
-        if crnn_text is None:
-            crnn_text, crnn_conf = self._crnn_read_plate(roi, return_confidence=True)
-        if not crnn_text:
-            return paddle_text
-
-        # ── 과적합 방어 1: CRNN 신뢰도 검증 ──
-        # 신뢰도 0.70 미만이면 CRNN 결과를 신뢰하지 않음
-        # (정상 교정 케이스 최저 0.79, 과적합은 숫자 불일치로 별도 차단)
-        if crnn_conf < 0.70:
-            print(f"[CRNN-SKIP] 신뢰도 부족 {crnn_conf:.2f}<0.70, PaddleOCR 유지: {paddle_text}", flush=True)
-            return paddle_text
-
-        # ── 과적합 방어 2: 숫자 교차검증 ──
-        # CRNN 결과의 숫자가 PaddleOCR 숫자와 일치하는지 확인
-        # (과적합된 CRNN은 완전히 다른 번호판 숫자를 출력함)
-        paddle_digits = m.group(1) + m.group(3)  # 예: "86" + "6118" = "866118"
-        crnn_digits = re.sub(r'[^0-9]', '', crnn_text)  # CRNN 결과에서 숫자만 추출
-
-        if crnn_digits and paddle_digits:
-            # 앞 2자리(번호 앞부분) 또는 뒤 4자리(번호 뒷부분) 중 하나라도 일치해야 교정 허용
-            paddle_prefix = m.group(1)  # 앞 2~3자리
-            paddle_suffix = m.group(3)  # 뒤 4자리
-            crnn_has_prefix = paddle_prefix in crnn_digits[:len(paddle_prefix)+1]
-            crnn_has_suffix = paddle_suffix in crnn_digits[-5:]  # 여유 1자리 포함 검색
-
-            if not crnn_has_prefix and not crnn_has_suffix:
-                print(f"[CRNN-SKIP] 숫자 불일치 paddle={paddle_digits} crnn={crnn_digits}, PaddleOCR 유지: {paddle_text}", flush=True)
-                return paddle_text
-
-        # CRNN 결과에서 한글 추출
-        mc = re.match(r'^\d{2,3}([가-힣])\d{4}$', crnn_text)
-        if not mc:
-            crnn_hangul = [ch for ch in crnn_text if '\uac00' <= ch <= '\ud7a3']
-
-            # ★ 구형/영업용 2줄: CRNN 한글 2+개 (지역명 포함)
-            # "경기76바7789", "충남86아6118", "충86다6118" 등
-            if len(crnn_hangul) >= 2:
-                _p_tail = m.group(2) + m.group(3)  # PaddleOCR 후미 "바7789", "아6118"
-                _c_tail_m = re.search(r'[가-힣]\d{4}$', crnn_text)
-                if _c_tail_m and _c_tail_m.group() == _p_tail:
-                    # (A) 구형 지역: "경기76바7789", "충남86아6118"
-                    _cr_region_m = re.match(r'^([가-힣]{2,3})\d{2}[가-힣]\d{4}$', crnn_text)
-                    if _cr_region_m and _cr_region_m.group(1) in PlateValidator._REGION_PREFIXES:
-                        print(f"[CRNN-2LINE] 구형 복원: {paddle_text} → {crnn_text} "
-                              f"(conf={crnn_conf:.2f})", flush=True)
-                        return crnn_text
-                    # (B) 영업용 1글자 지역: "충86다6118"
-                    if re.fullmatch(r'[가-힣]\d{2}[가-힣]\d{4}', crnn_text):
-                        print(f"[CRNN-COMM] 영업용 복원: {paddle_text} → {crnn_text} "
-                              f"(conf={crnn_conf:.2f})", flush=True)
-                        return crnn_text
-
-                # (C) 영업용 body 매칭: PaddleOCR "586다6118" → CRNN "충86다6118"
-                # prefix 3자리 중 첫 숫자가 한글로 치환된 패턴
-                if len(m.group(1)) == 3:
-                    _crnn_comm_m = re.match(r'^([가-힣])(\d{2}[가-힣]\d{4})$', crnn_text)
-                    if _crnn_comm_m:
-                        _paddle_body = m.group(1)[1:] + m.group(2) + m.group(3)
-                        if _crnn_comm_m.group(2) == _paddle_body and crnn_conf >= 0.75:
-                            print(f"[CRNN-COMM] 영업용 body: {paddle_text} → {crnn_text} "
-                                  f"(conf={crnn_conf:.2f})", flush=True)
-                            return crnn_text
-
-                return paddle_text
-
-            if len(crnn_hangul) != 1:
-                return paddle_text
-            crnn_kr = crnn_hangul[0]
-        else:
-            crnn_kr = mc.group(1)
-
-        paddle_kr = m.group(2)
-        # ★ 한글 교정 — conf 0.90 이상일 때만 CRNN 우선
-        _kr_conf_ok = crnn_conf and crnn_conf >= 0.90
-        _corrected_kr = crnn_kr if (_kr_conf_ok and crnn_kr != paddle_kr and crnn_kr in _VALID_PLATE_HANGUL_ALL) else paddle_kr
-        if _corrected_kr != paddle_kr:
-            print(f"[CRNN-VERIFY] {paddle_kr}→{_corrected_kr} (crnn={crnn_text}, conf={crnn_conf:.2f})", flush=True)
-
-        # ★ 앞자리 prefix 교정: 뒤 4자리 일치 + 앞자리 불일치 시 CRNN prefix 채택
-        # 예: PaddleOCR "56다7117" + CRNN "36다7117" → 뒤 "7117" 일치, 앞 56→36 교정
-        _corrected_prefix = m.group(1)  # 기본: PaddleOCR prefix
-        if mc and crnn_conf and crnn_conf >= 0.88:
-            crnn_prefix_m = re.match(r'^(\d{2,3})[가-힣]\d{4}$', crnn_text)
-            if crnn_prefix_m:
-                crnn_prefix = crnn_prefix_m.group(1)
-                crnn_suffix_m = re.search(r'(\d{4})$', crnn_text)
-                paddle_suffix = m.group(3)
-                # 뒤 4자리 일치 + 앞자리 불일치 → CRNN prefix가 더 정확
-                if (crnn_suffix_m and crnn_suffix_m.group(1) == paddle_suffix
-                        and crnn_prefix != _corrected_prefix
-                        and len(crnn_prefix) == len(_corrected_prefix)):
-                    print(f"[CRNN-PREFIX] 앞자리 교정: {_corrected_prefix}→{crnn_prefix} "
-                          f"(뒤4자리 '{paddle_suffix}' 일치, conf={crnn_conf:.2f})", flush=True)
-                    _corrected_prefix = crnn_prefix
-
-        result = _corrected_prefix + _corrected_kr + m.group(3)
-        if result != paddle_text:
-            return result
-        return paddle_text
+        """PaddleOCR 한글을 CRNN 결과로 교차검증 (CrnnVerifier 위임)."""
+        return self.crnn_verifier.verify(paddle_text, roi, crnn_text, crnn_conf)
 
     # ── CTC 한글 필터: post_op monkey-patch ──
     _ctc_patched = False
