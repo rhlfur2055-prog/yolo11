@@ -22,6 +22,7 @@ from plate_recognition_4k import (
 from preprocessor import ImagePreprocessor, _deskew_and_otsu  # noqa: F401
 from validator import PlateValidator  # noqa: F401
 from db import PlateDatabase  # noqa: F401
+from engine_config import PlateEngineConfig  # noqa: F401  (re-export for scripts/bench_accuracy.py)
 
 def _load_best_model():
     """우선순위에 따라 가장 좋은 모델 자동 로드"""
@@ -108,38 +109,6 @@ try:
 except ImportError:
     fast_alpr = None
     HAS_FAST_ALPR = False
-
-
-class PlateEngineConfig:
-    """엔진 설정 — config.py 중앙 설정을 참조"""
-    # ── 모델 경로 (config.py에서 가져옴) ──
-    YOLO_MODEL = PathConfig.YOLO_PRIMARY
-    YOLO_FALLBACK = PathConfig.YOLO_FALLBACK
-
-    # ── 인식 임계값 (config.py 통일값) ──
-    DETECT_CONF = ThresholdConfig.DETECT_CONF
-    ROI_X1 = 0
-    ROI_X2 = 9999
-    ROI_Y1 = 0
-    ROI_Y2 = 9999
-    OCR_CONF = ThresholdConfig.OCR_CONF
-
-    # ── 한국 번호판 정규식 (config.py에서 가져옴) ──
-    KR_PATTERNS = OCRConfig.KR_PATTERNS
-    PLATE_MIN_LEN = ThresholdConfig.PLATE_MIN_LEN
-    PLATE_MAX_LEN = ThresholdConfig.PLATE_MAX_LEN
-    CONSECUTIVE_FRAMES_REQUIRED = ThresholdConfig.CONFIRM_FRAME_COUNT
-
-    # 자주 혼동되는 문자 보정 (config.py에서 가져옴)
-    OCR_CONFUSION_MAP = OCRConfig.CONFUSION_MAP
-
-    # 멀티프레임 설정 (config.py에서 가져옴)
-    MULTIFRAME_SIZE = ThresholdConfig.MULTIFRAME_SIZE
-    MULTIFRAME_PLATE_WIDTH_THRESHOLD = ThresholdConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD
-
-    DB_PATH = str(PathConfig.DB_PATH)
-
-    PREPROCESS_METHODS = OCRConfig.PREPROCESS_METHODS
 
 
 def normalize(text: str) -> str:
