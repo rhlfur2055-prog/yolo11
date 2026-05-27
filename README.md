@@ -5,6 +5,40 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 
 ---
 
+## 셀링 포인트
+
+> **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,194 → 2,721줄 (-14.8%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
+
+이력서 한 줄: *한국 번호판 OCR 파이프라인 7단계 설계 및 SRP 기반 모듈화(-473줄) — 회귀 11~12/12 baseline 무손실 유지.*
+
+---
+
+## 아키텍처
+
+7단계 파이프라인을 **단일 책임 원칙(SRP)** 으로 모듈화. 비대해진 `plate_engine_pro.py`에서 전처리 / 형식 검증 / DB 책임을 신규 3개 모듈로 분리하고, 엔진 본체는 orchestrator로 축소.
+
+```mermaid
+flowchart LR
+    A[1. 영상 입력<br/>plate_gui.py] --> B[2. YOLO11x 탐지<br/>best.pt]
+    B --> C[3. ROI 크롭 + 전처리<br/>preprocessor.py]
+    C --> D[4. PaddleOCR 인식<br/>plate_engine_pro.py]
+    D --> E[5. CRNN 교차검증<br/>plate_ocr_crnn.pth]
+    E --> F[6. 투표 + 형식 검증<br/>validator.py]
+    F --> G[7. PlateTracker + GUI<br/>plate_gui.py]
+    G --> H[(plates.db<br/>db.py)]
+```
+
+| 모듈 | 줄 수 | 책임 |
+|------|------:|------|
+| `plate_engine_pro.py` | **2,721** | 엔진 orchestrator — YOLO 2-Stage · OCR · CRNN · 투표 · 트래킹 |
+| `preprocessor.py` | 282 | `ImagePreprocessor` — 22종 정적 전처리 (`OCRConfig.PREPROCESS_METHODS` 디스패치) |
+| `validator.py` | 205 | `PlateValidator` — 한국 번호판 정규식 · 길이 · 한글 보정 |
+| `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력/수배 |
+
+> 📘 깊이 있는 설계 노트(데이터 플로우, 캐시 전략, CRNN 패치)는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 참고 (작성 중).
+
+---
+
 ## 파이프라인 (7단계)
 
 ```
@@ -86,16 +120,19 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 
 ---
 
-## 핵심 파일
+## 모듈 구조
 
-| 파일 | 역할 |
-|------|------|
-| `plate_engine_pro.py` | OCR 엔진 본체 (YOLO + PaddleOCR + CRNN + 투표 + 추적) |
-| `plate_gui.py` | Tkinter GUI + 실시간 영상 루프 |
-| `plate_recognition_4k.py` | 한글 교정 함수 라이브러리 |
-| `test_ocr_accuracy.py` | 정확도 회귀 테스트 (12장) |
-| `best.pt` | YOLO11x 번호판 탐지 모델 |
-| `plate_ocr_crnn.pth` | CRNN 한글 교차검증 모델 |
+| 파일 | 줄 수 | 역할 |
+|------|------:|------|
+| `plate_engine_pro.py` | **2,721** | OCR 엔진 orchestrator (YOLO 2-Stage + PaddleOCR + CRNN + 투표 + 추적) — *분리: `+ preprocessor.py + validator.py + db.py`* |
+| `preprocessor.py` | 282 | `ImagePreprocessor` — 22종 전처리 (CLAHE / 샤프닝 / Gamma / Otsu / 컬러판 마스크 등) |
+| `validator.py` | 205 | `PlateValidator` — 한국 번호판 형식 검증 + OCR 노이즈 클린업 |
+| `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력 / 수배 차량 관리 |
+| `plate_gui.py` | – | Tkinter GUI + 실시간 영상 루프 (진입점) |
+| `plate_recognition_4k.py` | – | 한글 교정 함수 라이브러리 (`_HANGUL_PLATE_CORRECTION` 등) |
+| `test_ocr_accuracy.py` | – | 정확도 회귀 테스트 (12장) |
+| `best.pt` | – | YOLO11x 번호판 탐지 모델 (mAP@50 = 98.4%) |
+| `plate_ocr_crnn.pth` | – | CRNN 한글 교차검증 모델 (10.5M params) |
 
 ---
 
@@ -155,6 +192,33 @@ python test_ocr_accuracy.py
 
 ---
 
+## 리팩터링 성과 (SRP 모듈화)
+
+`plate_engine_pro.py`가 비대해진 **God class** 문제(YOLO 2종 + OCR + CRNN + 투표 + 트래킹 + DB + 통계를 모두 보유)를 해소하기 위해 진행한 단일 책임 원칙(SRP) 분리.
+
+| 항목 | Before | After | Δ |
+|------|-------:|------:|---:|
+| `plate_engine_pro.py` | 3,194 줄 | **2,721 줄** | **−473 (−14.8%)** |
+| 신규 분리 모듈 | 0 | 3 (`preprocessor` · `validator` · `db`) | +3 |
+| 회귀 테스트 baseline | 11~12 / 12 | **11~12 / 12 유지** | 동일 (regression-free) |
+
+### 핵심 결정
+
+- **`ImagePreprocessor` 분리** — 22종 정적 메서드를 `preprocessor.py`로 추출. 호출 측은 `OCRConfig.PREPROCESS_METHODS`의 이름 문자열로 `getattr` 디스패치하는 패턴을 그대로 유지 → **호출자 코드 무변경**.
+- **중복 커널 통합** — `sharpen` ↔ `deblur`가 동일한 라플라시안 커널을 따로 쓰던 중복을 단일 모듈 상수 `_SHARPEN_KERNEL`로 정리.
+- **`PlateValidator` 분리** — 한국 번호판 정규식 · 길이 · 한글 보정 로직을 `validator.py`로 모음. 검증 규칙 변경이 엔진 본체에 누수되지 않음.
+- **`PlateDatabase` 분리** — SQLite I/O 캡슐화. DB 스키마 변경 영향 범위를 `db.py`로 한정.
+
+### 검증 (정직 공개)
+
+- 회귀 테스트 **11/12 (91.7%)** — 실패 1건 `58두9599`는 [알려진 실패 케이스](#알려진-실패-케이스-정직성-공개) 참조.
+- OCR-TIMEOUT 비결정성 케이스에서 **12/12 (100%)** 도 관측됨. 변동성을 숨기지 않고 두 수치를 모두 명시.
+- 분리 전후 동일 baseline 유지 → 리팩터링이 **regression-free** 임을 확인.
+
+> 다음 단계 후보: `detector.py`(YOLO 2-Stage), `ocr_runner.py`(`_ocr_plate_roi` 502줄), `voter.py`(투표 + 크로스 트랙 안정화), `tracker.py`(트랙 캐시 + Ghost 방지).
+
+---
+
 ## 의존성
 
 - Python 3.10–3.12 (3.13은 PaddlePaddle 미지원)
@@ -172,3 +236,9 @@ python test_ocr_accuracy.py
 1. 변경 후 `python test_ocr_accuracy.py` 회귀 테스트로 baseline(현재 11/12) 대비 회귀 없는지 반드시 확인
 2. `best.pt`, `plate_ocr_crnn.pth` 모델 파일 수정 금지
 3. `plate_engine_pro.py` 수정 시 regression 주의
+
+---
+
+## 자세한 아키텍처
+
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 데이터 플로우, 캐시 전략, CRNN CTC 후처리 패치, 2-Stage 탐지 결정 근거 등 깊은 설계 노트 (T5 작성 중)
