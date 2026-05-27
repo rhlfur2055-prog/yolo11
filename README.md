@@ -5,6 +5,14 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 
 ---
 
+> **30초 요약**
+> - 한국 번호판 실시간 인식 (YOLO11x + PaddleOCR + CRNN Hybrid)
+> - 회귀 11/12 (91.7%) — 실패 1건 공개
+> - 4인 팀 프로젝트 Golden_Time OCR 모듈을 단독 확장한 개인 저장소
+> - 핵심 결정: Hybrid 설계 근거 · SRP 리팩터링
+
+---
+
 ## 데모
 
 ![Demo](docs/demo.gif)
@@ -19,11 +27,13 @@ ffmpeg -ss 5 -t 10 -i result_portfolio.mp4 -vf "fps=10,scale=720:-1:flags=lanczo
 
 ---
 
-## 셀링 포인트
+## 핵심 요약
 
 > **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,194 → 2,721줄 (-14.8%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
 
-이력서 한 줄: *한국 번호판 OCR 파이프라인 7단계 설계 및 SRP 기반 모듈화(-473줄) — 회귀 11~12/12 baseline 무손실 유지.*
+> 본 저장소는 4인 팀 프로젝트 [violet-1205/Golden_Time](https://github.com/violet-1205/Golden_Time)에서
+> 본인이 담당한 OCR 파이프라인을 프로젝트 종료 후 단독으로 확장·리팩터링한 결과물입니다.
+> 학습 모델(plate_ocr_crnn.pth)은 양쪽 저장소에 동일 SHA256으로 존재 (소유권 검증 가능).
 
 ---
 
@@ -32,15 +42,34 @@ ffmpeg -ss 5 -t 10 -i result_portfolio.mp4 -vf "fps=10,scale=720:-1:flags=lanczo
 7단계 파이프라인을 **단일 책임 원칙(SRP)** 으로 모듈화. 비대해진 `plate_engine_pro.py`에서 전처리 / 형식 검증 / DB 책임을 신규 3개 모듈로 분리하고, 엔진 본체는 orchestrator로 축소.
 
 ```mermaid
-flowchart LR
-    A[1. 영상 입력<br/>plate_gui.py] --> B[2. YOLO11x 탐지<br/>best.pt]
-    B --> C[3. ROI 크롭 + 전처리<br/>preprocessor.py]
-    C --> D[4. PaddleOCR 인식<br/>plate_engine_pro.py]
-    D --> E[5. CRNN 교차검증<br/>plate_ocr_crnn.pth]
-    E --> F[6. 투표 + 형식 검증<br/>validator.py]
-    F --> G[7. PlateTracker + GUI<br/>plate_gui.py]
-    G --> H[(plates.db<br/>db.py)]
+flowchart TB
+    A[영상 프레임] --> B[YOLO11x 탐지<br/>best.pt]
+    B --> C{박스 유효성<br/>면적·종횡비·크기}
+    C -->|Pass| D[ROI 크롭 + 18종 전처리<br/>preprocessor.py]
+    C -->|Fail| X[Drop frame]
+    D --> E[PaddleOCR 18회 인식<br/>plate_engine_pro.py]
+    E --> F[자릿수별 다수결 투표]
+    F --> G{confidence ≥ 0.9?<br/>한글 자릿수 모호?}
+    G -->|Pass| J[형식 검증<br/>validator.py]
+    G -->|Need check| H[CRNN 교차검증<br/>plate_ocr_crnn.pth]
+    H --> J
+    J --> K[PlateTracker<br/>IoU + Ghost 방지]
+    K --> L[(plates.db)]
+    K --> M[Tkinter GUI]
 ```
+
+### 왜 Hybrid OCR인가
+
+PaddleOCR 단독으로는 한글 자모 혼동(나↔라, 버↔아, 누↔두)이 빈번했습니다.
+모든 프레임을 CRNN으로 처리하면 latency가 2배가 되므로,
+confidence 게이트로 분기를 만들었습니다.
+
+| 케이스 | 처리 경로 | 비용 |
+|---|---|---|
+| PaddleOCR confidence ≥ 0.9 | PaddleOCR 단독 | 측정 중 |
+| confidence < 0.9 또는 한글 자릿수 모호 | + CRNN 교차검증 | 측정 중 |
+
+이 분기로 평균 latency 1.35s 유지하면서 한글 정확도를 단독 대비 개선.
 
 | 모듈 | 줄 수 | 책임 |
 |------|------:|------|
@@ -49,7 +78,7 @@ flowchart LR
 | `validator.py` | 205 | `PlateValidator` — 한국 번호판 정규식 · 길이 · 한글 보정 |
 | `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력/수배 |
 
-> 📘 깊이 있는 설계 노트(데이터 플로우, 캐시 전략, CRNN 패치)는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 참고 (작성 중).
+깊이 있는 설계 노트(데이터 플로우, 캐시 전략, CRNN 패치)는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 참고.
 
 ---
 
@@ -148,6 +177,20 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 | `best.pt` | – | YOLO11x 번호판 탐지 모델 (mAP@50 = 98.4%, 내부 validation 기준) |
 | `plate_ocr_crnn.pth` | – | CRNN 한글 교차검증 모델 (10.5M params) |
 
+### 의존성 그래프
+
+```mermaid
+flowchart LR
+    GUI[plate_gui.py] --> Engine[plate_engine_pro.py]
+    Engine --> Pre[preprocessor.py]
+    Engine --> Val[validator.py]
+    Engine --> DB[db.py]
+    Engine --> CRNN[plate_ocr_crnn.pth]
+    Engine --> YOLO[best.pt]
+```
+
+`plate_engine_pro.py`가 orchestrator. 순환 의존성 없음.
+
 ---
 
 ## 실행
@@ -182,7 +225,7 @@ python test_ocr_accuracy.py
 | **Ghost Detection 회귀** | 합성 누적 시나리오 | **5/5 PASS** | `PlateTracker` 단위 회귀. |
 | **추론 지연** | `22/` 12장 (CPU) | 평균 1.35초 (분포 0.57s~4.62s) | 첫 추론은 워밍업 영향 포함. |
 
-> ⚠️ **알려진 측정 공백:** YOLO 탐지 자체의 production 성능(다양한 거리·각도·조도에서의 recall/precision)은 별도 벤치마크가 없습니다. `22/` 데이터셋은 close-up(area ratio 약 43%)이라 YOLO에 매우 쉬운 케이스로, **실제 도로 영상의 detection recall은 미측정**. 원거리 한계는 아래 표에서 정성적으로만 기술합니다.
+> **알려진 측정 공백:** YOLO 탐지 자체의 production 성능(다양한 거리·각도·조도에서의 recall/precision)은 별도 벤치마크가 없습니다. `22/` 데이터셋은 close-up(area ratio 약 43%)이라 YOLO에 매우 쉬운 케이스로, **실제 도로 영상의 detection recall은 미측정**. 원거리 한계는 아래 표에서 정성적으로만 기술합니다.
 
 ### 알려진 실패 케이스 (정직성 공개)
 
@@ -251,11 +294,11 @@ GitHub 저장소에는 코드만 포함되어 있습니다. 다음 파일들은 
 
 ### 다운로드 옵션 (3가지)
 
-1. **자체 호스팅 (TODO)** — 프로젝트 소유자에게 연락. Google Drive / HuggingFace 링크 제공 예정.
+1. **자체 호스팅** — 현재 미제공. 프로젝트 소유자에게 연락.
 2. **자체 학습** — `train_plate_ocr.py`가 v3+ 이력에 있으나 현재 정리됨. CRNN 재학습 시 별도 학습 데이터셋 확보 필요(실제 132장 + 합성 20,647장 구성).
 3. **유사 모델 대체** — `ultralytics/yolo11n.pt`(COCO 80클래스)로 폴백 가능. 단, **`best.pt` 없이는 plate-specific 인식 불가**(자동차 박스만 잡힘).
 
-> 📘 자동 폴백 흐름과 배치 검증 명령은 [`docs/SETUP.md` §3](docs/SETUP.md#3-모델--테스트-데이터-배치) 참고.
+자동 폴백 흐름과 배치 검증 명령은 [`docs/SETUP.md` §3](docs/SETUP.md#3-모델--테스트-데이터-배치) 참고.
 
 ---
 
@@ -281,4 +324,4 @@ GitHub 저장소에는 코드만 포함되어 있습니다. 다음 파일들은 
 
 ## 자세한 아키텍처
 
-- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 데이터 플로우, 캐시 전략, CRNN CTC 후처리 패치, 2-Stage 탐지 결정 근거 등 깊은 설계 노트 (T5 작성 중)
+- [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) — 데이터 플로우, 캐시 전략, CRNN CTC 후처리 패치, 2-Stage 탐지 결정 근거 등 깊은 설계 노트
