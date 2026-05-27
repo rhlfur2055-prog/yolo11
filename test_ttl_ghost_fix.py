@@ -7,7 +7,7 @@ import time
 
 # ── PlateTracker.calculate_iou 가져오기 ──
 sys.path.insert(0, __file__.rsplit("\\", 1)[0])
-from plate_gui import PlateTracker
+from tracker import PlateTracker
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 수정된 병합 로직 (plate_gui.py _refresh_display와 동일)

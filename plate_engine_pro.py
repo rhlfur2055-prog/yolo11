@@ -47,36 +47,10 @@ from pathlib import Path
 from collections import defaultdict, deque
 
 
-_kr_font_cache = {}
-_kr_text_cache = {}
-def draw_korean_text(frame, text, pos, color=(0,255,0), size=24):
-    cache_key = (text, color, size)
-    if cache_key in _kr_text_cache:
-        tmp_np, alpha = _kr_text_cache[cache_key]
-    else:
-        if size not in _kr_font_cache:
-            try:
-                _kr_font_cache[size] = ImageFont.truetype("malgun.ttf", size)
-            except:
-                _kr_font_cache[size] = ImageFont.load_default()
-        font = _kr_font_cache[size]
-        b, g, r = color
-        tmp = Image.new("RGBA", (len(text)*size, size+10), (0,0,0,0))
-        draw = ImageDraw.Draw(tmp)
-        draw.text((0, 0), text, font=font, fill=(r, g, b, 255))
-        tmp_np = np.array(tmp)
-        alpha = tmp_np[:, :, 3:4].astype(np.float32) / 255.0
-        # BGR 채널 순서 변환 (PIL RGB → OpenCV BGR)
-        tmp_np = tmp_np[:, :, :3][:, :, ::-1].astype(np.float32)
-        _kr_text_cache[cache_key] = (tmp_np, alpha)
-    x, y = int(pos[0]), int(pos[1])
-    h, w = tmp_np.shape[:2]
-    fh, fw = frame.shape[:2]
-    y = max(0, min(y, fh - h))
-    x = max(0, min(x, fw - w))
-    roi = frame[y:y+h, x:x+w].astype(np.float32)
-    frame[y:y+h, x:x+w] = (alpha * tmp_np + (1 - alpha) * roi).astype(np.uint8)
-    return frame
+# ── 분리된 모듈 (refactor) ─────────────────────────────────────
+# draw_korean_text + 캐시는 ui_text.py로 이관 (SRP).
+# 본 파일 내 호출처(L2519 부근)는 아래 re-export 덕분에 그대로 동작한다.
+from ui_text import draw_korean_text  # noqa: F401
 
 import cv2
 import numpy as np
