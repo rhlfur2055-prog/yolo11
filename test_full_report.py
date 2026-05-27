@@ -153,14 +153,14 @@ def main():
             matched += 1
             info = all_plates[gt]
             avg_c = sum(info["confs"]) / len(info["confs"])
-            print(f"    {gt:15s} ✅ {info['count']}회 감지 (conf:{avg_c:.0%})")
+            print(f"    {gt:15s} {info['count']}회 감지 (conf:{avg_c:.0%})")
         else:
             digits = re.sub(r"[^0-9]", "", gt)
             partial = [p for p in all_plates if re.sub(r"[^0-9]", "", p) == digits]
             if partial:
-                print(f"    {gt:15s} ⚠️  변이감지: {', '.join(partial)}")
+                print(f"    {gt:15s} 변이감지: {', '.join(partial)}")
             else:
-                print(f"    {gt:15s} ❌ 미감지")
+                print(f"    {gt:15s} 미감지")
 
     print(f"\n  GT 매칭률: {matched}/{len(gt_plates)} ({matched / len(gt_plates) * 100:.0f}%)")
 

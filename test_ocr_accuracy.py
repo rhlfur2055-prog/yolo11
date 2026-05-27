@@ -200,7 +200,7 @@ def render_table(results: Iterable[PerImageResult]) -> None:
     for idx, r in enumerate(results, 1):
         fname = r.file if len(r.file) <= 26 else r.file[:23] + "..."
         ocr_disp = f"{r.ocr} ({r.conf:.0%})" if r.ocr else "(미인식)"
-        mark = "✅ 정확" if r.passed else "❌ 오인식"
+        mark = "정확" if r.passed else "오인식"
         print(f"{idx:>2}  {fname:<28} {r.gt:<14} {ocr_disp:<22} {r.time_ms:>5}ms  {mark}")
     print("-" * TABLE_WIDTH)
 
@@ -212,7 +212,7 @@ def render_failures(failures: list[FailureCase]) -> None:
     print("─── 실패 케이스 상세 ───")
     for f in failures:
         ocr_disp = f.ocr or "(미인식)"
-        print(f"❌ {f.file}")
+        print(f"{f.file}")
         print(f"   GT       : {f.gt}")
         print(f"   OCR      : {ocr_disp}")
         print(f"   추정 단계: {f.hypothesis_stage}")
@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
 
     render_table(report.per_image)
     print()
-    print(f"  총 {report.total}장  |  ✅ {report.passed}  |  ❌ {report.failed}  "
+    print(f"  총 {report.total}장  |  {report.passed}  |  {report.failed}  "
           f"|  평균 {report.avg_time_ms}ms")
     print(f"  정확도: {report.passed}/{report.total} = {report.accuracy * 100:.1f}%")
 

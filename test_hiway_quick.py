@@ -51,7 +51,7 @@ print(f"{'='*60}")
 
 matched = 0
 for plate, info in sorted(all_detected.items(), key=lambda x: x[1]["ff"]):
-    gt = "✅" if plate in KNOWN_PLATES else "  "
+    gt = "" if plate in KNOWN_PLATES else "  "
     if plate in KNOWN_PLATES:
         matched += 1
     print(f"  {gt} {plate:<20} conf={info['mc']:.2f}  cnt={info['cnt']:>3}  frames={info['ff']}-{info['lf']}")

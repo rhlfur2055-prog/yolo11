@@ -1271,7 +1271,7 @@ class PlateEnginePro:
 
         # 전역 히스토리 정리 (30프레임마다)
         self._cleanup_global_plate_history()
-        # 최적화③: 프레임 스킵 (N프레임마다 1번 YOLO, 중간은 캐시 재사용)
+        # 최적화: 프레임 스킵 (N프레임마다 1번 YOLO, 중간은 캐시 재사용)
         self._frame_counter += 1
         if self._frame_counter % self._frame_skip_interval != 1 and self._cached_results is not None:
             # 스킵 프레임에서도 트랙 노화 처리 — Ghost 방지
@@ -1300,7 +1300,7 @@ class PlateEnginePro:
 
         # Stage 1: 차량 탐지 (yolov8n.pt, classes=[2,5,7])
         #   2=car, 5=bus, 7=truck (COCO)
-        #   최적화①: imgsz 640→416 (차량은 큰 객체라 충분)
+        #   최적화: imgsz 640→416 (차량은 큰 객체라 충분)
         vehicle_results = self.model_vehicle(frame, conf=0.3, classes=[2, 5, 7],
                                              imgsz=416, verbose=False)
         vehicle_boxes = []
@@ -1334,7 +1334,7 @@ class PlateEnginePro:
         seen_this_frame = set()
         seen_track_keys = set()  # 고스트 방지: 이번 프레임에 감지된 트랙 키
 
-        # 최적화②: 차량 bbox 면적 ≥ 20% → Stage2 스킵 (가까운 차량 대응)
+        # 최적화: 차량 bbox 면적 ≥ 20% → Stage2 스킵 (가까운 차량 대응)
         if len(vehicle_boxes) >= 1:  # Always use 1-stage direct detection
             # 차량이 프레임 대부분을 차지 → 번호판 직접 탐지 (Stage2 생략)
             vx1, vy1, vx2, vy2, vconf, varea = vehicle_boxes[0]
@@ -2238,7 +2238,7 @@ class PlateEnginePro:
 
     def _trigger_alert(self, plate_number, alert_info):
         print("\n" + "=" * 50)
-        print("🚨 [경고] 수배 차량 감지!")
+        print("[경고] 수배 차량 감지!")
         print(f"   번호판: {plate_number}")
         print(f"   유형: {alert_info[2] if alert_info else '미상'}")
         print(f"   시각: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

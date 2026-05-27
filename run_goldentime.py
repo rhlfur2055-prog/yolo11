@@ -231,7 +231,7 @@ def print_summary(
         print()
         print("  저장된 증거 패키지:")
         for i, exp in enumerate(exporter.export_history, 1):
-            viol = "⚠️ 위반" if exp.get("has_violation") else "✅ 정상"
+            viol = "위반" if exp.get("has_violation") else "정상"
             print(f"    [{i}] {exp['plate']} — {viol} — {exp['folder']}")
 
     if distance.violations:
@@ -239,7 +239,7 @@ def print_summary(
         print("  거리 미확보 위반 차량:")
         for plate, rec in distance.violations.items():
             print(
-                f"    ⚠️ {plate}: 가까움 {rec.close_duration:.1f}초 "
+                f"    {plate}: 가까움 {rec.close_duration:.1f}초 "
                 f"({rec.last_distance_label})"
             )
 
@@ -344,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         modules = build_modules(args)
     except FileNotFoundError as exc:
-        print(f"\n  ❌ 에러: {exc}")
+        print(f"\n  에러: {exc}")
         print("     영상 파일 경로를 확인해주세요.")
         return EXIT_VIDEO_NOT_FOUND
 

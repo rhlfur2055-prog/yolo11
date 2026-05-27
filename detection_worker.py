@@ -199,7 +199,7 @@ class DetectionWorker(threading.Thread):
             self.results_queue.put_nowait(data)
             return
         except queue.Full:
-            print("[WORKER] ⚠️ results_queue FULL! 결과 드롭 가능", flush=True)
+            print("[WORKER] results_queue FULL! 결과 드롭 가능", flush=True)
 
         try:
             self.results_queue.get_nowait()

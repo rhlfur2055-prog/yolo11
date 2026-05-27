@@ -56,7 +56,7 @@ results = []
 
 def tc(name, cond, detail=""):
     ok = bool(cond)
-    status = "✅ PASS" if ok else "❌ FAIL"
+    status = "PASS" if ok else "FAIL"
     results.append(ok)
     print(f"  {status}  {name}" + (f"  — {detail}" if detail else ""))
     return ok
@@ -252,6 +252,6 @@ tc("고스트 완전 제거", ghost_frames_new == 0)
 print("\n" + "=" * 60)
 passed = sum(results)
 total = len(results)
-print(f"  종합: {passed}/{total} {'✅ ALL PASS' if passed == total else '❌ FAIL 있음'}")
+print(f"  종합: {passed}/{total} {'ALL PASS' if passed == total else 'FAIL 있음'}")
 print("=" * 60)
 sys.exit(0 if passed == total else 1)

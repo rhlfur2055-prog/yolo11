@@ -134,7 +134,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         print(f"[서버] 엔진 초기화 완료 ({_state.startup_sec:.1f}초)", flush=True)
     except Exception as exc:  # noqa: BLE001
         _state.error = str(exc)
-        print(f"[서버] ⚠️ 엔진 초기화 실패: {exc}", flush=True)
+        print(f"[서버] 엔진 초기화 실패: {exc}", flush=True)
 
     yield
 
