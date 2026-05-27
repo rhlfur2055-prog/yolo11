@@ -20,12 +20,11 @@ if sys.platform == "win32":
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 
 import cv2
 import numpy as np
-from yolo11_plate.plate_engine_pro import ImagePreprocessor, PlateEngineConfig, PlateValidator
+from plate_engine_pro import ImagePreprocessor, PlateEngineConfig, PlateValidator
 
 # ── OCR 엔진 로드 ──
 paddle_ocr = None

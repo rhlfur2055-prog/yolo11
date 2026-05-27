@@ -21,9 +21,9 @@ ffmpeg -ss 5 -t 10 -i result_portfolio.mp4 -vf "fps=10,scale=720:-1:flags=lanczo
 
 ## 셀링 포인트
 
-> **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · 3대 God class 모놀리스(7,648줄) → 10개 도메인 모듈 SRP 분해(-44%) · 정적 회귀 11~12/12 무손실 유지 · `src/` 패키지 + GitHub Actions CI + 4종 문서 체계.**
+> **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,194 → 2,721줄 (-14.8%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
 
-이력서 한 줄: *한국 번호판 OCR 파이프라인 7단계 설계 및 SRP 기반 모듈화(-3,353줄, 10개 도메인 모듈) — 회귀 baseline 무손실, PEP 562 lazy re-export + 헬퍼 클래스 패턴으로 공개 API 100% 보존.*
+이력서 한 줄: *한국 번호판 OCR 파이프라인 7단계 설계 및 SRP 기반 모듈화(-473줄) — 회귀 11~12/12 baseline 무손실 유지.*
 
 ---
 
@@ -44,10 +44,10 @@ flowchart LR
 
 | 모듈 | 줄 수 | 책임 |
 |------|------:|------|
-| `src/yolo11_plate/plate_engine_pro.py` | **2,721** | 엔진 orchestrator — YOLO 2-Stage · OCR · CRNN · 투표 · 트래킹 |
-| `src/yolo11_plate/preprocessor.py` | 282 | `ImagePreprocessor` — 22종 정적 전처리 (`OCRConfig.PREPROCESS_METHODS` 디스패치) |
-| `src/yolo11_plate/validator.py` | 205 | `PlateValidator` — 한국 번호판 정규식 · 길이 · 한글 보정 |
-| `src/yolo11_plate/db.py` | 115 | `PlateDatabase` — SQLite 인식 이력/수배 |
+| `plate_engine_pro.py` | **2,721** | 엔진 orchestrator — YOLO 2-Stage · OCR · CRNN · 투표 · 트래킹 |
+| `preprocessor.py` | 282 | `ImagePreprocessor` — 22종 정적 전처리 (`OCRConfig.PREPROCESS_METHODS` 디스패치) |
+| `validator.py` | 205 | `PlateValidator` — 한국 번호판 정규식 · 길이 · 한글 보정 |
+| `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력/수배 |
 
 > 📘 깊이 있는 설계 노트(데이터 플로우, 캐시 전략, CRNN 패치)는 [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) 참고 (작성 중).
 
@@ -138,14 +138,13 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 
 | 파일 | 줄 수 | 역할 |
 |------|------:|------|
-| `src/yolo11_plate/plate_engine_pro.py` | **2,721** | OCR 엔진 orchestrator (YOLO 2-Stage + PaddleOCR + CRNN + 투표 + 추적) — *분리: `+ preprocessor.py + validator.py + db.py`* |
-| `src/yolo11_plate/preprocessor.py` | 282 | `ImagePreprocessor` — 22종 전처리 (CLAHE / 샤프닝 / Gamma / Otsu / 컬러판 마스크 등) |
-| `src/yolo11_plate/validator.py` | 205 | `PlateValidator` — 한국 번호판 형식 검증 + OCR 노이즈 클린업 |
-| `src/yolo11_plate/db.py` | 115 | `PlateDatabase` — SQLite 인식 이력 / 수배 차량 관리 |
-| `src/yolo11_plate/plate_gui.py` | – | Tkinter GUI + 실시간 영상 루프 (콘솔 진입점 `plate-gui`) |
-| `src/yolo11_plate/plate_server.py` | – | FastAPI REST 서버 (콘솔 진입점 `plate-server`) |
-| `src/yolo11_plate/plate_recognition_4k.py` | – | 한글 교정 함수 라이브러리 (`_HANGUL_PLATE_CORRECTION` 등) |
-| `tests/test_ocr_accuracy.py` | – | 정확도 회귀 테스트 (12장) |
+| `plate_engine_pro.py` | **2,721** | OCR 엔진 orchestrator (YOLO 2-Stage + PaddleOCR + CRNN + 투표 + 추적) — *분리: `+ preprocessor.py + validator.py + db.py`* |
+| `preprocessor.py` | 282 | `ImagePreprocessor` — 22종 전처리 (CLAHE / 샤프닝 / Gamma / Otsu / 컬러판 마스크 등) |
+| `validator.py` | 205 | `PlateValidator` — 한국 번호판 형식 검증 + OCR 노이즈 클린업 |
+| `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력 / 수배 차량 관리 |
+| `plate_gui.py` | – | Tkinter GUI + 실시간 영상 루프 (진입점) |
+| `plate_recognition_4k.py` | – | 한글 교정 함수 라이브러리 (`_HANGUL_PLATE_CORRECTION` 등) |
+| `test_ocr_accuracy.py` | – | 정확도 회귀 테스트 (12장) |
 | `best.pt` | – | YOLO11x 번호판 탐지 모델 (mAP@50 = 98.4%, 내부 validation 기준) |
 | `plate_ocr_crnn.pth` | – | CRNN 한글 교차검증 모델 (10.5M params) |
 
@@ -154,25 +153,17 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 ## 실행
 
 ```bash
-# 1) 의존성 설치 (3~5분, PaddleOCR가 큼)
+# 패키지 설치
 pip install -r requirements.txt
 
-# 2) (권장) 패키지를 editable 모드로 설치 — `plate-gui` / `plate-server` 콘솔 진입점 활성화
-pip install -e .
+# GUI 실행 (기본 영상)
+python plate_gui.py
 
-# ── 패키지 install 한 경우 (콘솔 진입점) ──
-plate-gui                              # GUI 실행 (기본 영상)
-plate-gui movie/hiway.mp4              # GUI 실행 (특정 영상)
-plate-server --port 5000               # REST API 서버
+# GUI 실행 (특정 영상)
+python plate_gui.py movie/hiway.mp4
 
-# ── 모듈 직접 실행 (`-m` 형식) ──
-python -m yolo11_plate.plate_gui                       # GUI
-python -m yolo11_plate.plate_gui movie/hiway.mp4
-python -m yolo11_plate.plate_server --port 5000        # 서버
-
-# ── 회귀 테스트 ──
-pytest tests/ -v                                       # SRP 스모크 + 12장 정확도
-python tests/test_ocr_accuracy.py                      # 정확도만 단독 실행 (pyproject pythonpath=src 기반)
+# 정확도 회귀 테스트
+python test_ocr_accuracy.py
 ```
 
 기대 결과: `11/12 = 91.7%` (현재 실측 — 실패 #10 `58두9599` 1건 공개, [성능] 섹션 참고)
@@ -282,9 +273,9 @@ GitHub 저장소에는 코드만 포함되어 있습니다. 다음 파일들은 
 
 ## 절대 규칙
 
-1. 변경 후 `pytest tests/` 회귀 테스트로 baseline(현재 11/12) 대비 회귀 없는지 반드시 확인
+1. 변경 후 `python test_ocr_accuracy.py` 회귀 테스트로 baseline(현재 11/12) 대비 회귀 없는지 반드시 확인
 2. `best.pt`, `plate_ocr_crnn.pth` 모델 파일 수정 금지
-3. `src/yolo11_plate/plate_engine_pro.py` 수정 시 regression 주의
+3. `plate_engine_pro.py` 수정 시 regression 주의
 
 ---
 

@@ -2,8 +2,7 @@
 """hiway.mp4 빠른 테스트 — GT 매칭 확인"""
 import cv2, sys, os, time, re
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
-from yolo11_plate.plate_engine_pro import PlateEnginePro
+from plate_engine_pro import PlateEnginePro
 
 KNOWN_PLATES = {
     '경기76바7789', '서울70바9203', '경기91바6286',

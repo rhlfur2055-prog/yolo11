@@ -15,9 +15,8 @@ os.environ["PLATE_CONSECUTIVE_FRAMES"] = "2"
 
 ROOT = Path(__file__).resolve().parent
 os.chdir(ROOT)
-sys.path.insert(0, str(ROOT / "src"))
 
-from yolo11_plate.plate_engine_pro import PlateEnginePro
+from plate_engine_pro import PlateEnginePro
 
 def main():
     video_path = ROOT / "movie" / "hiway.mp4"

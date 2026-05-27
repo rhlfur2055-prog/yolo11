@@ -56,12 +56,6 @@ jobs:
           python -m pip install --upgrade pip
           pip install pytest numpy Pillow opencv-python-headless
 
-      # ── 3-1. 패키지 editable 설치 (src/ 레이아웃 import 활성화) ─
-      #    pyproject `[project.scripts]` + `[tool.setuptools.packages.find] where=["src"]`
-      #    설정으로 `from yolo11_plate.X import Y` import 가 활성화된다.
-      - name: Install package (editable, no extra deps)
-        run: pip install -e . --no-deps
-
       # ── 4. 환경 확인 (디버깅 편의) ─────────────────────────────
       - name: Show environment
         run: |
@@ -71,20 +65,19 @@ jobs:
 
       # ── 5. config import 검증 (모델 비의존) ────────────────────
       - name: Verify config import
-        run: python -c "from yolo11_plate import config; print('config import OK — PathConfig:', config.PathConfig.__name__)"
+        run: python -c "import config; print('config import OK — PathConfig:', config.PathConfig.__name__)"
 
       # ── 6. 핵심 모듈 import 검증 (preprocessor / validator / db) ─
       - name: Verify core modules import
         run: |
-          python -c "from yolo11_plate import preprocessor; print('preprocessor OK')"
-          python -c "from yolo11_plate import validator;    print('validator OK')"
-          python -c "from yolo11_plate import db;           print('db OK')"
+          python -c "import preprocessor; print('preprocessor OK')"
+          python -c "import validator;    print('validator OK')"
+          python -c "import db;           print('db OK')"
 
       # ── 7. Smoke 테스트 실행 (모델 비의존) ─────────────────────
-      #    모델 의존 테스트(test_ocr_accuracy.py)는 best.pt 미존재로 CI 환경에서 실패하므로
-      #    smoke 만 게이팅한다. pytest pythonpath=src 가 pyproject에 설정됨.
+      #    실패해도 워크플로우는 통과시키지 않는다 — smoke 는 진짜 게이트
       - name: Run smoke tests
-        run: pytest tests/test_modules_smoke.py -v --tb=short
+        run: pytest tests/ -v --tb=short
 
   lint:
     name: Lint (ruff, optional)

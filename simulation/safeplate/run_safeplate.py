@@ -36,13 +36,10 @@ import time
 import cv2
 import numpy as np
 
-# 프로젝트 루트 + src/ 를 path에 추가 (simulation/ 하위에서 import 가능하도록)
+# 프로젝트 루트를 path에 추가 (simulation/ 하위에서 import 가능하도록)
 _project_root = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
 if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
-_src_dir = os.path.join(_project_root, "src")
-if _src_dir not in sys.path:
-    sys.path.insert(0, _src_dir)
 
 from simulation.simulation_framework import SimulationFramework, EventBus
 from simulation.safeplate.shock_simulator import ShockSimulator
@@ -231,7 +228,7 @@ def run_headless_mode(args: argparse.Namespace) -> None:
     event_bus = EventBus()
 
     # YOLO 엔진 import
-    from yolo11_plate.plate_engine_pro import PlateEnginePro
+    from plate_engine_pro import PlateEnginePro
     engine = PlateEnginePro()
 
     # YOLO confidence 설정

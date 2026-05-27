@@ -22,14 +22,6 @@ classifiers = [
 [project.urls]
 Repository = "https://github.com/rhlfur2055-prog/yolo11"
 
-[project.scripts]
-plate-gui = "yolo11_plate.plate_gui:main"
-plate-server = "yolo11_plate.plate_server:main"
-
-# ── src/ 레이아웃: setuptools에게 src/ 아래에서 패키지를 찾도록 명시 ──
-[tool.setuptools.packages.find]
-where = ["src"]
-
 [tool.ruff]
 target-version = "py310"
 line-length = 100
@@ -60,6 +52,5 @@ exclude = ["22/", "22_v5/", "dataset/", "dataset_3k/", "tests/"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-pythonpath = ["src"]
 python_files = ["test_*.py"]
 addopts = "-v --tb=short"

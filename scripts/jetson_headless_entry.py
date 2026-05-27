@@ -14,7 +14,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
-sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 
 if "PLATE_CONSECUTIVE_FRAMES" not in os.environ:
@@ -40,7 +39,7 @@ def main():
     Path(args.logs_dir).mkdir(parents=True, exist_ok=True)
 
     import cv2
-    from yolo11_plate.plate_engine_pro import PlateEnginePro
+    from plate_engine_pro import PlateEnginePro
 
     cap = cv2.VideoCapture(source, cv2.CAP_FFMPEG if args.rtsp else cv2.CAP_ANY)
     if not cap.isOpened():

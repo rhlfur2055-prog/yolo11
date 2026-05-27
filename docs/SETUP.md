@@ -34,14 +34,8 @@ python -m venv .venv
 pip install --upgrade pip
 pip install -r requirements.txt
 
-# 3-1) (권장) 패키지를 editable 모드로 설치 — src/ 레이아웃 + 콘솔 진입점
-#      `plate-gui`, `plate-server`, `python -m yolo11_plate.plate_gui` 모두 활성화.
-#      미실행 시에도 pyproject `[tool.pytest.ini_options] pythonpath = ["src"]` 로 pytest는 동작.
-pip install -e .
-
 # 4) 회귀 테스트 (모델·데이터 배치 후 실행)
-pytest tests/ -v
-#   또는 단독 실행:  python tests/test_ocr_accuracy.py
+python test_ocr_accuracy.py
 #   기대 결과: 11/12 (91.7%) — §4 참조
 ```
 
@@ -74,12 +68,12 @@ python -c "from pathlib import Path; \
 
 ### 3.2 자동 폴백 (best.pt 부재 시)
 
-`best.pt`가 없으면 `PathConfig.find_best_model()`이 자동으로 다음 순서를 시도한다 ([src/yolo11_plate/config.py:138](../src/yolo11_plate/config.py#L138)):
+`best.pt`가 없으면 `PathConfig.find_best_model()`이 자동으로 다음 순서를 시도한다 ([config.py:138](../config.py#L138)):
 
 1. `./best.pt`
 2. `runs/detect/plate_korean_3k_v2/weights/best.pt`
 3. `runs/detect/plate_korean_3k/weights/best.pt`
-4. **HuggingFace 자동 다운로드** — `morsetechlab/yolov11-license-plate-detection` ([src/yolo11_plate/config.py:61](../src/yolo11_plate/config.py#L61))
+4. **HuggingFace 자동 다운로드** — `morsetechlab/yolov11-license-plate-detection` ([config.py:61](../config.py#L61))
 
 > CRNN (`plate_ocr_crnn.pth`)에는 자동 폴백이 없다. **반드시 직접 배치**.
 
@@ -88,7 +82,7 @@ python -c "from pathlib import Path; \
 ```bash
 mkdir movie
 # movie/hiway.mp4 등 테스트용 영상을 배치
-python -m yolo11_plate.plate_gui movie/hiway.mp4
+python plate_gui.py movie/hiway.mp4
 ```
 
 ### 3.4 모델 / 데이터 입수 경로 (3가지 옵션)
@@ -153,8 +147,7 @@ pytest tests/test_modules_smoke.py -v
 ### 4.2 정확도 회귀 테스트 (~16초)
 
 ```bash
-pytest tests/test_ocr_accuracy.py -v
-# 또는 직접 실행: python tests/test_ocr_accuracy.py
+python test_ocr_accuracy.py
 ```
 
 **기대 출력:**
@@ -171,8 +164,8 @@ pytest tests/test_ocr_accuracy.py -v
 
 **유용한 옵션:**
 ```bash
-python tests/test_ocr_accuracy.py --verbose          # 단계별 로그
-python tests/test_ocr_accuracy.py --save-failures    # 실패 케이스 JSON 리포트
+python test_ocr_accuracy.py --verbose          # 단계별 로그
+python test_ocr_accuracy.py --json report.json # 실패 케이스 JSON 리포트
 ```
 
 ### 4.3 경량 통합 검증 (~30초, 선택)
@@ -189,25 +182,17 @@ python scripts/verify_integrations.py
 ### 5.1 GUI (실시간 영상)
 
 ```bash
-# 콘솔 진입점 (pip install -e . 후)
-plate-gui                                   # 기본 영상 자동 로드
-plate-gui movie/hiway.mp4                   # 특정 영상
-plate-gui --youtube <URL>                   # YouTube 영상
-plate-gui --no-pro-engine                   # 경량 엔진(PlateEngineFast) 사용
-
-# 모듈 직접 실행
-python -m yolo11_plate.plate_gui movie/hiway.mp4
+python plate_gui.py                         # 기본 영상 자동 로드
+python plate_gui.py movie/hiway.mp4         # 특정 영상
+python plate_gui.py --youtube <URL>         # YouTube 영상
+python plate_gui.py --no-pro-engine         # 경량 엔진(PlateEngineFast) 사용
 ```
 
 ### 5.2 REST API 서버
 
 ```bash
-# 콘솔 진입점
-plate-server --port 5000
-
-# 모듈 직접 실행
-python -m yolo11_plate.plate_server --port 5000
-# 또는 Windows: scripts/run_plate_server.bat / scripts/run_plate_server.ps1
+python plate_server.py --port 5000
+# 또는 Windows: run_plate_server.bat / run_plate_server.ps1
 
 # 헬스 체크
 curl http://localhost:5000/health
@@ -217,7 +202,7 @@ curl http://localhost:5000/health
 
 ```python
 import cv2
-from yolo11_plate.plate_engine_pro import PlateEnginePro
+from plate_engine_pro import PlateEnginePro
 
 engine = PlateEnginePro()
 frame = cv2.imread("22/01나8060.png")
@@ -259,5 +244,5 @@ print(result)   # [{'plate': '01나8060', 'confidence': 0.92, 'bbox': (...)}]
 - 📊 회귀 baseline 상세 / 알려진 실패 케이스 → [`README.md` § 성능](../README.md)
 - 🧪 새 변경사항 검증 순서:
   ```bash
-  pytest tests/ -v
+  pytest tests/test_modules_smoke.py && python test_ocr_accuracy.py
   ```

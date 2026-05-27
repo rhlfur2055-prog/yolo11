@@ -7,50 +7,6 @@ versioning follows [Semantic Versioning 2.0.0](https://semver.org/spec/v2.0.0.ht
 
 ---
 
-## [3.2.0] — 2026-05-27  *(Refactor Sprint — Phase 4: src/ 패키지 레이아웃)*
-
-> **포폴 한 줄 요약**: 평면 루트 (~30 파일) → **src/yolo11_plate 패키지 레이아웃**으로 전환. PEP 표준 + `pip install -e .` 가능 + 콘솔 진입점(`plate-gui` / `plate-server`) + MIT License. 회귀 12/12 유지.
-
-### Changed (Layout)
-- **src/ 패키지 레이아웃 도입** (Python 산업 표준 PEP 621 / setuptools)
-- 14개 도메인 모듈을 `src/yolo11_plate/`로 이동 (`config` · `preprocessor` · `validator` · `db` · `engine_config` · `detection_worker` · `tracker` · `ui_text` · `crnn_verifier` · `plate_recognizer` · `plate_engine_pro` · `plate_recognition_4k` · `plate_gui` · `plate_server`)
-- 4개 `bench_*.py` → `bench/` 패키지
-- 3개 보조 스크립트 (`analyze_video.py` · `build_dashboard.py` · `run_goldentime.py`) → `tools/` 패키지
-- 2개 진입 스크립트 (`run_plate_server.bat`/`.ps1`) → `scripts/`
-- `test_ocr_accuracy.py` → `tests/` (pytest 자동 픽업 + `pythonpath=src` 기반 import)
-- **루트 가시 파일 6개**: `README.md` · `.gitignore` · `LICENSE` · `pyproject.toml` · `requirements.txt` · `CHANGELOG.md`
-
-### Added
-- **`LICENSE`** (MIT) — 외부 노출 표준
-- **`[project.scripts]`** 콘솔 진입점:
-  - `plate-gui = yolo11_plate.plate_gui:main`
-  - `plate-server = yolo11_plate.plate_server:main`
-- **`[tool.setuptools.packages.find] where = ["src"]`** — src 레이아웃 발견
-- **`[tool.pytest.ini_options] pythonpath = ["src"]`** — `pip install -e .` 없이도 pytest 작동
-- **`src/yolo11_plate/__init__.py`** (`__version__ = "0.1.0"`)
-- **bench/__init__.py · tools/__init__.py** — 패키지 마커
-- CI에 `pip install -e . --no-deps` 단계 추가 — editable 설치로 `from yolo11_plate.X` import 검증
-
-### Changed (Imports)
-- 패키지 내부 모든 import → **상대 import** (`from .config` / `from .plate_recognition_4k`)
-- 외부 진입점(scripts/, simulation/, root test 스크립트) → **`from yolo11_plate.X import Y`** + `sys.path` 보강
-- `plate_recognition_4k.py` PEP 562 `__getattr__` lazy re-export → `.plate_recognizer`로 갱신
-- `plate_server.py` uvicorn app reference → `"yolo11_plate.plate_server:app"`
-- `tests/test_modules_smoke.py` — `from yolo11_plate.preprocessor` 등으로 4개 import 갱신
-- README / SETUP.md / CODE_TOUR.md — 모든 실행 명령 `plate-gui` / `python -m yolo11_plate.plate_gui` 형식으로 갱신, 파일 경로 인덱스에 `src/yolo11_plate/` prefix 추가
-
-### Compatibility (호환성)
-- `pip install -e .` 후 `from yolo11_plate.X import Y` 작동
-- 콘솔: `plate-gui` / `plate-server` 명령 직접 실행 가능
-- 모듈 직접 실행: `python -m yolo11_plate.plate_gui`
-- 회귀 테스트 baseline `11~12/12` 유지 — refactor regression-free
-
-### Note
-- `youtube_helper.py` 는 루트에 유지 (외부 의존성 취급, lazy import) — `plate_gui.py:1127` 에서 사용 시 root sys.path 보강 필요할 수 있음
-- 루트 `test_*.py` (test_12 / test_benchmark / test_ghost_detection 등) 는 sys.path 보강만 추가하여 호환 유지 (pytest 자동 픽업 대상 아님)
-
----
-
 ## [3.1.0] — 2026-05-27  *(Refactor Sprint)*
 
 > **포폴용 한 페이지 요약**: 한 세션(6 터미널 병렬)에서 의존성·문서·테스트·SRP 모듈 추출·FastAPI·GUI 분리까지 일관된 클린아키 흐름으로 정비.

@@ -10,11 +10,10 @@ if sys.platform == "win32":
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ".")
-sys.path.insert(0, os.path.join(os.path.dirname(os.path.abspath(__file__)), "src"))
 
 import cv2
 import numpy as np
-from yolo11_plate.plate_engine_pro import PlateEnginePro
+from plate_engine_pro import PlateEnginePro
 
 def extract_gt(filename):
     name = os.path.splitext(filename)[0]
