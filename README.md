@@ -62,7 +62,7 @@ flowchart LR
 | 항목 | 값 |
 |------|----|
 | 모델 | `best.pt` (YOLO11x fine-tuned) |
-| 정확도 | mAP@50 = 98.4% |
+| mAP@50 | 98.4% — **학습 시 internal validation 기준**. 외부 검증 데이터셋 없음. |
 | NMS | Ultralytics 기본값(IoU 0.7) — `plate_engine_pro.py`에 explicit 미설정 |
 | 최소 박스 크기 | 폭 35px / 높이 16px (`config.py:202-203`) |
 | 종횡비 필터 | 2.0 ≤ w/h ≤ 6.0 (`PLATE_MIN/MAX_ASPECT`) |
@@ -131,7 +131,7 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 | `plate_gui.py` | – | Tkinter GUI + 실시간 영상 루프 (진입점) |
 | `plate_recognition_4k.py` | – | 한글 교정 함수 라이브러리 (`_HANGUL_PLATE_CORRECTION` 등) |
 | `test_ocr_accuracy.py` | – | 정확도 회귀 테스트 (12장) |
-| `best.pt` | – | YOLO11x 번호판 탐지 모델 (mAP@50 = 98.4%) |
+| `best.pt` | – | YOLO11x 번호판 탐지 모델 (mAP@50 = 98.4%, 내부 validation 기준) |
 | `plate_ocr_crnn.pth` | – | CRNN 한글 교차검증 모델 (10.5M params) |
 
 ---
@@ -158,13 +158,17 @@ python test_ocr_accuracy.py
 
 ## 성능
 
-| 항목 | 값 |
-|------|----|
-| 정적 이미지 12장 (회귀 테스트) | **11/12 (91.7%)** — `test_ocr_accuracy.py` 실측 |
-| 이미지당 평균 추론 시간 | 약 1.35초 (CPU, 0.57s~4.62s 분포) |
-| 실시간 영상 GT 매칭 | 12/12 (100%) |
-| Ghost Detection | 5/5 PASS |
-| OCR 처리 시간 | 0.6 – 3.2초 / 이미지 (CPU) |
+각 수치는 **무엇을 측정한 것인지** 명확히 구분합니다 — 단일 숫자로 묶지 않습니다.
+
+| 측정 대상 | 데이터셋 | 결과 | 주의 사항 |
+|----------|---------|------|----------|
+| **YOLO 탐지** `mAP@50` | 학습 시 internal validation | **98.4%** | 외부 검증 데이터셋 없음. 학습 로그 기준 수치. |
+| **End-to-end OCR** | `22/` 12장 (close-up plate, `frame_area_ratio ≈ 43%`) | **11/12 (91.7%)** | `test_ocr_accuracy.py` 실측. **YOLO 탐지 능력 자체가 아니라 파이프라인 전체 출력 정확도를 측정**. close-up이라 YOLO에겐 매우 쉬운 케이스. |
+| **실시간 영상 정성 매칭** | `result_portfolio.mp4` 일부 구간 | 12/12 관찰 | Ground truth 라벨이 없어 **정성 평가만** 가능. recall/precision 미측정. |
+| **Ghost Detection 회귀** | 합성 누적 시나리오 | **5/5 PASS** | `PlateTracker` 단위 회귀. |
+| **추론 지연** | `22/` 12장 (CPU) | 평균 1.35초 (분포 0.57s~4.62s) | 첫 추론은 워밍업 영향 포함. |
+
+> ⚠️ **알려진 측정 공백:** YOLO 탐지 자체의 production 성능(다양한 거리·각도·조도에서의 recall/precision)은 별도 벤치마크가 없습니다. `22/` 데이터셋은 close-up(area ratio 약 43%)이라 YOLO에 매우 쉬운 케이스로, **실제 도로 영상의 detection recall은 미측정**. 원거리 한계는 아래 표에서 정성적으로만 기술합니다.
 
 ### 알려진 실패 케이스 (정직성 공개)
 
