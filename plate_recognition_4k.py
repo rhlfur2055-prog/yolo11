@@ -17,13 +17,22 @@ plate_recognition_4k.py - 4K 영상 번호판 인식 핵심 모듈 v2.0
 
 from __future__ import annotations
 
+# ── stdlib ─────────────────────────────────────────────────
+import argparse
+import json
 import os
 import re
 import sys
-import json
 import time
-import argparse
 from enum import Enum, auto
+from typing import Any, Optional
+
+# ── third-party ────────────────────────────────────────────
+import cv2
+import numpy as np
+
+# ── local ──────────────────────────────────────────────────
+from config import DisplayConfig, OCRConfig, PathConfig, ThresholdConfig
 
 # Windows 콘솔 한글 깨짐 방지
 if sys.platform == "win32":
@@ -32,37 +41,20 @@ if sys.platform == "win32":
         sys.stderr.reconfigure(encoding="utf-8", errors="replace")
     except Exception:
         pass
-from typing import Optional
-
-import cv2
-import numpy as np
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # JSON 직렬화 유틸리티 (ndarray 안전 변환)
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-# config.py 중앙 설정 로드
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-import os as _os
-from config import PathConfig, ThresholdConfig, OCRConfig, DisplayConfig
-
-def _load_best_model():
-    """우선순위에 따라 가장 좋은 모델 자동 로드"""
-    from ultralytics import YOLO
-    best = PathConfig.find_best_model()
-    print(f"[YOLO11] 모델 로드: {best}")
-    return YOLO(best)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class NumpyEncoder(json.JSONEncoder):
-    def default(self, obj):
+    """numpy ndarray/scalar 를 안전하게 직렬화하는 JSON 인코더."""
+
+    def default(self, obj: Any) -> Any:
         if isinstance(obj, np.ndarray):
             return obj.tolist()
-        if isinstance(obj, (np.integer,)):
+        if isinstance(obj, np.integer):
             return int(obj)
-        if isinstance(obj, (np.floating,)):
+        if isinstance(obj, np.floating):
             return float(obj)
         return super().default(obj)
 
@@ -391,10 +383,10 @@ _HANGUL_PLATE_CORRECTION: dict[str, str] = {
     "혹": "호",
 }
 
-# ── OCR 오인식 한글 교정 확장 (plate_ocr_pipeline.py 통합, 개선4) ──
-# EasyOCR/PaddleOCR가 빈번하게 오인식하는 패턴 → 실제 번호판 한글로 매핑
-_HANGUL_OCR_EXTENDED: dict[str, str] = {
-    # EasyOCR 오인식 (받침 포함 문자 → 용도 한글)
+# ── OCR 오인식 한글 교정 확장 (EasyOCR/PaddleOCR 빈번 오인식) ──
+# 받침 포함 문자 → 용도 한글. dict 병합으로 흡수 (런타임 merge 루프 제거).
+# ※ 기존 키와 중복되는 항목(곧/볼/룰/줄)은 동일 값이라 생략 — 동작 보존.
+_HANGUL_PLATE_CORRECTION.update({
     '륙': '바', '릎': '바', '휴': '바', '푹': '바', '선': '바',
     '춤': '바', '식': '바', '겸': '바', '겨': '바', '겪': '바',
     '릅': '바', '륜': '바', '륨': '바', '륩': '바',
@@ -406,33 +398,29 @@ _HANGUL_OCR_EXTENDED: dict[str, str] = {
     '석': '서', '섭': '서', '섞': '서',
     '억': '어', '엌': '어',
     '젝': '저', '젖': '저', '젊': '저',
-    '곡': '고', '곤': '고', '곧': '고',
+    '곡': '고', '곤': '고',
     '녹': '노', '논': '노', '놉': '노',
     '독': '도', '돈': '도', '돋': '도',
     '록': '로', '론': '로', '롯': '로',
     '목': '모', '몬': '모', '몫': '모',
-    '복': '보', '본': '보', '볼': '보',
+    '복': '보', '본': '보',
     '속': '소', '손': '소', '솔': '소',
     '옥': '오', '온': '오', '올': '오',
     '족': '조', '존': '조', '졸': '조',
     '국': '구', '군': '구', '굿': '구',
     '눈': '누', '눌': '누', '눔': '누',
     '둔': '두', '둘': '두', '둠': '두',
-    '룬': '루', '룰': '루', '룸': '루',
+    '룬': '루', '룸': '루',
     '문': '무', '물': '무', '뭄': '무',
     '분': '부', '불': '부', '붐': '부',
     '순': '수', '술': '수', '숨': '수',
     '운': '우', '울': '우', '움': '우',
-    '준': '주', '줄': '주', '줌': '주',
+    '준': '주', '줌': '주',
     '헌': '허', '헐': '허', '험': '허',
     '한': '하', '할': '하', '함': '하',
     '혼': '호', '홀': '호', '홈': '호',
     '백': '배', '밸': '배', '뱅': '배',
-}
-# _HANGUL_PLATE_CORRECTION 에 없는 항목만 병합
-for _k, _v in _HANGUL_OCR_EXTENDED.items():
-    if _k not in _HANGUL_PLATE_CORRECTION:
-        _HANGUL_PLATE_CORRECTION[_k] = _v
+})
 
 
 def _jamo_decompose(ch: str) -> tuple[int, int, int]:
@@ -526,14 +514,15 @@ def _correct_region(text: str) -> str:
 
 
 def _find_region_in_text(text: str) -> str | None:
-    """텍스트에서 지역명(2자) 후보 찾기"""
+    """텍스트 내 인접한 한글 2자가 지역명으로 교정 가능한지 탐색."""
     hangul_only = re.findall(r'[가-힣]', text)
-    if len(hangul_only) >= 2:
-        for i in range(len(hangul_only) - 1):
-            pair = hangul_only[i] + hangul_only[i + 1]
-            corrected = _correct_region(pair)
-            if corrected in _REGION_SET:
-                return corrected
+    if len(hangul_only) < 2:
+        return None
+    for i in range(len(hangul_only) - 1):
+        pair = hangul_only[i] + hangul_only[i + 1]
+        corrected = _correct_region(pair)
+        if corrected in _REGION_SET:
+            return corrected
     return None
 
 
@@ -595,21 +584,20 @@ def validate_plate_format(text: str) -> tuple[str, float]:
 
     # 구형 번호판 검증
     m = _RE_OLD_PLATE.match(text)
-    if m:
-        region, num, hangul, suffix = m.group(1), m.group(2), m.group(3), m.group(4)
-        # 지역명 검증
-        if all(c in _VALID_PLATE_HANGUL_REGION for c in region):
-            if hangul in _VALID_PLATE_HANGUL_ALL:
-                return text, 1.0
-            corrected = _HANGUL_PLATE_CORRECTION.get(hangul)
-            if corrected:
-                return region + num + corrected + suffix, 0.90
-            corrected = _find_nearest_valid_hangul(hangul)
-            if corrected:
-                return region + num + corrected + suffix, 0.80
-        return text, 0.50
-
-    return text, 0.0  # 형식 불일치
+    if not m:
+        return text, 0.0  # 형식 불일치
+    region, num, hangul, suffix = m.group(1), m.group(2), m.group(3), m.group(4)
+    if not all(c in _VALID_PLATE_HANGUL_REGION for c in region):
+        return text, 0.50  # 지역명 무효
+    if hangul in _VALID_PLATE_HANGUL_ALL:
+        return text, 1.0
+    corrected = _HANGUL_PLATE_CORRECTION.get(hangul)
+    if corrected:
+        return region + num + corrected + suffix, 0.90
+    corrected = _find_nearest_valid_hangul(hangul)
+    if corrected:
+        return region + num + corrected + suffix, 0.80
+    return text, 0.50  # 한글 자리 교정 실패
 
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
