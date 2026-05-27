@@ -1,29 +1,31 @@
-﻿# YOLO11 번호판 인식 파이프라인
-ultralytics>=8.3.0
-opencv-python>=4.8.0
+# YOLO11 한국 번호판 인식 — 최소 재현 의존성
+# Python 3.10+ 권장
+# GPU: torch / paddlepaddle 은 환경에 따라 별도 휠 설치 권장
+#   - torch:  https://pytorch.org/get-started/locally/
+#   - paddle: pip install paddlepaddle-gpu  (CUDA 환경)
+
+# ── Core: YOLO 탐지 + 영상 I/O ──
+ultralytics>=8.3,<9.0
+opencv-python>=4.8
 numpy
 Pillow
-torch>=2.0.0
-torchvision>=0.15.0
-sahi>=0.11.0
-huggingface_hub
 
-# OCR 엔진 (PaddleOCR 단독 — 한국어 특화, GPU 권장: paddlepaddle-gpu)
-paddlepaddle
-paddleocr
-# paddleocr==2.7.3  # 2026 기준 stable (한국 lang 강화 시 옵션)
-pytesseract
+# ── Deep learning runtime (CRNN + YOLO + Paddle) ──
+torch>=2.0,<3.0
+torchvision>=0.15
 
-# YouTube 영상 테스트용
-yt-dlp
-requests
+# ── OCR: PaddleOCR (한국어 특화) ──
+paddlepaddle>=3.0
+paddleocr>=3.0,<4.0
+pytesseract                 # plate_recognition_4k 보조 OCR 백엔드
 
-# [통합1] FastALPR ONNX 고속 엔진 (선택)
-# pip install fast-alpr[onnx-gpu]
+# ── Detection helpers ──
+sahi>=0.11                  # plate_recognition_4k 슬라이스 추론
+huggingface_hub             # CRNN 체크포인트 다운로드
 
-# [통합4] REST API 서버
+# ── REST API 서버 (plate_server.py) ──
 fastapi
 uvicorn[standard]
 
-# 발표 PDF 생성
-reportlab>=4.0.0
+# ── YouTube 다운로드 헬퍼 (youtube_helper.py) ──
+yt-dlp

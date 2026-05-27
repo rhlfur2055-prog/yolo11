@@ -1,4 +1,70 @@
-# Output & temp
+# ──────────────────────────────────────────────────────────────
+# YOLO11 번호판 인식 — .gitignore
+# 기준: GitHub Python 템플릿 + 프로젝트 산출물
+# ──────────────────────────────────────────────────────────────
+
+# ── Python ──
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# ── 가상환경 / 환경변수 ──
+.venv/
+venv/
+env/
+ENV/
+.env
+
+# ── IDE / 에디터 ──
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ── 캐시 ──
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# ── OS ──
+Thumbs.db
+.DS_Store
+nul
+
+# ── 모델 / 바이너리 (Git LFS 또는 별도 배포) ──
+*.pt
+*.pth
+*.onnx
+*.onnx.bak
+*.engine
+*.exe
+aihubshell
+
+# ── 미디어 (테스트 영상/오디오) ──
+*.mp4
+*.avi
+*.mkv
+*.wav
+*.mp3
+
+# ── 데이터셋 (대용량/개인정보) ──
+dataset/*
+!dataset/yolo_format/
+dataset/yolo_format/*
+!dataset/yolo_format/data.yaml
+aihub_data/
+aihub_raw/
+aihub_results/
+103.*/
+22/
+movie/
+runs/
+
+# ── 산출물 / 임시 디렉터리 ──
 output/
 temp/
 data/
@@ -7,93 +73,37 @@ plate_results*/
 debug_crops/
 preview_frames/
 temp_youtube/
-aihub_data/
-
-# Media files
-*.mp4
-*.wav
-*.mp3
-*.avi
-*.mkv
-
-# Model weights & binaries
-*.pt
-*.onnx
-*.onnx.bak
-*.engine
-*.exe
-aihubshell
-
-# API keys & credentials
-.env
-
-# Large data directories (AI허브 데이터 개인정보 포함 - 절대 업로드 금지)
-dataset/*
-!dataset/yolo_format/
-dataset/yolo_format/*
-!dataset/yolo_format/data.yaml
-aihub_raw/
-103.*/
-.claude/
-.paddleocr/
 server_results/
 uploads/
-aihub_results/
-nul
+test_results/
+_thumb/
 
-# Log & debug files
+# ── 산출 파일 ──
 *.log
+*.bak
+*.zip
+*.db
+*.sqlite
+*_dashboard_data.json
+test_result_*.txt
 gui_log.txt
 gui_stdout.txt
-test_out.txt
-test_err.txt
-frame_test_log.txt
-test_log.txt
 
-# Debug/screenshot temp files
+# ── 디버그/스크린샷 임시 ──
 debug_*.png
 debug_*.jpg
 _screenshot*.png
 _test_*.png
 _test_*.jpg
-_ocr_test.txt
-_verify.txt
-gui_screenshot_*.png
 screenshot_*.png
+gui_screenshot_*.png
 test_realtime_*.png
 
-# Backup & archive
-*.bak
-*.zip
+# ── 외부 서비스 캐시 ──
+.claude/
+.paddleocr/
+.paddlex/
 
-# Python
-__pycache__/
-*.pyc
-*.pyo
-*.egg-info/
-dist/
-build/
-.eggs/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-Thumbs.db
-.DS_Store
-*.db
-
-# Docker / DB
+# ── Docker / DB 초기화 ──
 pgdata/
 init-db/
-
-# ── 자동 추가 (cleanup_and_yolo26_upgrade.py) ──
-*.sqlite
-_thumb/
-movie/
-22/
-runs/
-test_results/
