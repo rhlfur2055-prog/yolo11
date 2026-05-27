@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 
-# ── 공용 커널/유틸 ─────────────────────────────────────────────
+# 공용 커널/유틸
 # sharpen ↔ deblur가 동일한 라플라시안 커널을 쓰던 중복을 단일 상수로 통합.
 _SHARPEN_KERNEL: np.ndarray = np.array(
     [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32
@@ -64,7 +64,7 @@ class ImagePreprocessor:
     디스패치하는 기존 패턴을 유지하기 위해 클래스 형태를 보존한다.
     """
 
-    # ── ①~⑦ 기본 전처리 ────────────────────────────────────────
+    # ~기본 전처리
     @staticmethod
     def gray_threshold(img: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -149,18 +149,18 @@ class ImagePreprocessor:
                 )
         return img
 
-    # ── ⑧~⑮ 추가 전처리 ────────────────────────────────────────
+    # ~추가 전처리
 
     @staticmethod
     def median_blur(img: np.ndarray) -> np.ndarray:
-        """⑨ 중앙값 필터 (점잡음 제거)"""
+        """중앙값 필터 (점잡음 제거)"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         result = cv2.medianBlur(gray, 3)
         return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
 
     @staticmethod
     def otsu_inv(img: np.ndarray) -> np.ndarray:
-        """⑩ Otsu 반전 (흰 배경 번호판)"""
+        """Otsu 반전 (흰 배경 번호판)"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         _, otsu = cv2.threshold(
             gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU
@@ -170,26 +170,26 @@ class ImagePreprocessor:
 
     @staticmethod
     def upscale_2x(img: np.ndarray) -> np.ndarray:
-        """⑪ 2배 업스케일 (작은 번호판)"""
+        """2배 업스케일 (작은 번호판)"""
         return cv2.resize(
             img, None, fx=2, fy=2, interpolation=cv2.INTER_CUBIC
         )
 
     @staticmethod
     def brightness_boost(img: np.ndarray) -> np.ndarray:
-        """⑫ 밝기 보정 (alpha=1.5, beta=+30)"""
+        """밝기 보정 (alpha=1.5, beta=+30)"""
         return cv2.convertScaleAbs(img, alpha=1.5, beta=30)
 
     @staticmethod
     def hist_equalize(img: np.ndarray) -> np.ndarray:
-        """⑬ 히스토그램 평활화"""
+        """히스토그램 평활화"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         eq = cv2.equalizeHist(gray)
         return cv2.cvtColor(eq, cv2.COLOR_GRAY2BGR)
 
     @staticmethod
     def adaptive_mean(img: np.ndarray) -> np.ndarray:
-        """⑭ Adaptive Mean (blockSize=15)"""
+        """Adaptive Mean (blockSize=15)"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         binary = cv2.adaptiveThreshold(
             gray, 255, cv2.ADAPTIVE_THRESH_MEAN_C,
@@ -199,7 +199,7 @@ class ImagePreprocessor:
 
     @staticmethod
     def deskew_otsu(img: np.ndarray) -> np.ndarray:
-        """⑮ 기울기 보정 후 Otsu"""
+        """기울기 보정 후 Otsu"""
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
         result = _deskew_and_otsu(gray)
         return cv2.cvtColor(result, cv2.COLOR_GRAY2BGR)
@@ -245,7 +245,7 @@ class ImagePreprocessor:
         enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
         return cv2.bitwise_not(enhanced)
 
-    # ── ⑳~㉒ 야간/역광 전처리 ─────────────────────────────────
+    # ⑳~㉒ 야간/역광 전처리
 
     @staticmethod
     def night_clahe(img: np.ndarray) -> np.ndarray:

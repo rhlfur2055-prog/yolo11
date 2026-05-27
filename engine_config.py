@@ -28,37 +28,37 @@ class PlateEngineConfig:
     엔진 내부에서만 의미를 가지는 ROI 기본 박스이다.
     """
 
-    # ── 모델 경로 (PathConfig 위임) ──
+    # 모델 경로 (PathConfig 위임)
     YOLO_MODEL: str = PathConfig.YOLO_PRIMARY
     YOLO_FALLBACK: str = PathConfig.YOLO_FALLBACK
 
-    # ── 탐지 / OCR 임계값 (ThresholdConfig 위임) ──
+    # 탐지 / OCR 임계값 (ThresholdConfig 위임)
     DETECT_CONF: float = ThresholdConfig.DETECT_CONF
     OCR_CONF: float = ThresholdConfig.OCR_CONF
 
-    # ── ROI (기본은 사실상 전체 프레임) ──
+    # ROI (기본은 사실상 전체 프레임)
     ROI_X1: int = 0
     ROI_X2: int = 9999
     ROI_Y1: int = 0
     ROI_Y2: int = 9999
 
-    # ── 한국 번호판 패턴 / 길이 제약 ──
+    # 한국 번호판 패턴 / 길이 제약
     KR_PATTERNS: tuple[str, ...] = OCRConfig.KR_PATTERNS
     PLATE_MIN_LEN: int = ThresholdConfig.PLATE_MIN_LEN
     PLATE_MAX_LEN: int = ThresholdConfig.PLATE_MAX_LEN
     CONSECUTIVE_FRAMES_REQUIRED: int = ThresholdConfig.CONFIRM_FRAME_COUNT
 
-    # ── 자주 혼동되는 OCR 문자 교정 매핑 (MappingProxyType) ──
+    # 자주 혼동되는 OCR 문자 교정 매핑 (MappingProxyType)
     OCR_CONFUSION_MAP: Mapping[str, str] = field(
         default_factory=lambda: OCRConfig.CONFUSION_MAP
     )
 
-    # ── 멀티프레임 누적 OCR 설정 ──
+    # 멀티프레임 누적 OCR 설정
     MULTIFRAME_SIZE: int = ThresholdConfig.MULTIFRAME_SIZE
     MULTIFRAME_PLATE_WIDTH_THRESHOLD: int = ThresholdConfig.MULTIFRAME_PLATE_WIDTH_THRESHOLD
 
-    # ── 기록용 SQLite DB 경로 (Path → str 변환) ──
+    # 기록용 SQLite DB 경로 (Path → str 변환)
     DB_PATH: str = str(PathConfig.DB_PATH)
 
-    # ── 활성 전처리 메서드 목록 ──
+    # 활성 전처리 메서드 목록
     PREPROCESS_METHODS: tuple[str, ...] = OCRConfig.PREPROCESS_METHODS

@@ -27,7 +27,7 @@ from typing import Iterable
 import cv2
 import numpy as np
 
-# ── 상수 ──
+# 상수
 BASE_DIR: Path = Path(__file__).resolve().parent
 IMG_DIR: Path = BASE_DIR / "22"
 DEFAULT_OUTPUT_DIR: Path = BASE_DIR / "test_results"
@@ -61,7 +61,7 @@ logger = logging.getLogger("test_ocr_accuracy")
 sys.path.insert(0, str(BASE_DIR))
 
 
-# ── 데이터 모델 ──
+# 데이터 모델
 @dataclass
 class PerImageResult:
     file: str
@@ -92,7 +92,7 @@ class TestReport:
     failure_cases: list[FailureCase] = field(default_factory=list)
 
 
-# ── 헬퍼 ──
+# 헬퍼
 def extract_ground_truth_from_filename(filename: str) -> str:
     """파일명에서 번호판 GT 추출.
 
@@ -192,7 +192,7 @@ def build_test_cases() -> list[tuple[str, str]]:
     return [(fname, extract_ground_truth_from_filename(fname)) for fname in TEST_FILENAMES]
 
 
-# ── 출력 ──
+# 출력
 def render_table(results: Iterable[PerImageResult]) -> None:
     print("-" * TABLE_WIDTH)
     print(f"{'#':>2}  {'파일명':<28} {'정답':<14} {'OCR결과':<22} {'시간':>7}  판정")
@@ -200,7 +200,7 @@ def render_table(results: Iterable[PerImageResult]) -> None:
     for idx, r in enumerate(results, 1):
         fname = r.file if len(r.file) <= 26 else r.file[:23] + "..."
         ocr_disp = f"{r.ocr} ({r.conf:.0%})" if r.ocr else "(미인식)"
-        mark = "✅ 정확" if r.passed else "❌ 오인식"
+        mark = "정확" if r.passed else "오인식"
         print(f"{idx:>2}  {fname:<28} {r.gt:<14} {ocr_disp:<22} {r.time_ms:>5}ms  {mark}")
     print("-" * TABLE_WIDTH)
 
@@ -212,7 +212,7 @@ def render_failures(failures: list[FailureCase]) -> None:
     print("─── 실패 케이스 상세 ───")
     for f in failures:
         ocr_disp = f.ocr or "(미인식)"
-        print(f"❌ {f.file}")
+        print(f"{f.file}")
         print(f"   GT       : {f.gt}")
         print(f"   OCR      : {ocr_disp}")
         print(f"   추정 단계: {f.hypothesis_stage}")
@@ -226,7 +226,7 @@ def save_report(report: TestReport, output_dir: Path) -> Path:
     return path
 
 
-# ── 파이프라인 ──
+# 파이프라인
 def load_engine(verbose: bool):
     """PlateEnginePro 인스턴스 + consecutive_required=1 보정."""
     print("[init] PlateEnginePro 로딩...")
@@ -285,7 +285,7 @@ def evaluate(engine, cases: list[tuple[str, str]], verbose: bool) -> TestReport:
     return report
 
 
-# ── CLI ──
+# CLI
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OCR 정확도 회귀 테스트 (PlateEnginePro 12장 베이스라인)"
@@ -313,7 +313,7 @@ def main(argv: list[str] | None = None) -> int:
 
     render_table(report.per_image)
     print()
-    print(f"  총 {report.total}장  |  ✅ {report.passed}  |  ❌ {report.failed}  "
+    print(f"  총 {report.total}장  |  {report.passed}  |  {report.failed}  "
           f"|  평균 {report.avg_time_ms}ms")
     print(f"  정확도: {report.passed}/{report.total} = {report.accuracy * 100:.1f}%")
 

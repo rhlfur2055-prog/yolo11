@@ -24,7 +24,7 @@
 
 from __future__ import annotations
 
-# ── stdlib ─────────────────────────────────────────────────
+# stdlib
 import argparse
 import logging
 import os
@@ -33,7 +33,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Any
 
-# ── local (simulation 패키지는 read-only 의존) ──────────────
+# local (simulation 패키지는 read-only 의존)
 from simulation.simulation_framework import SimulationFramework
 from simulation.goldentime.siren_trigger import SirenTrigger
 from simulation.goldentime.plate_evidence import PlateEvidence
@@ -41,9 +41,7 @@ from simulation.goldentime.distance_checker import DistanceChecker
 from simulation.goldentime.evidence_export import EvidenceExport
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 매직 넘버 상수화
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 WINDOW_NAME: str = "GoldenTime 2.0 Simulation"
 DEFAULT_OUTPUT_DIR: str = "./evidence_output"
@@ -83,9 +81,7 @@ EXIT_VIDEO_NOT_FOUND: int = 1
 logger = logging.getLogger("goldentime")
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 모듈 묶음 (5개 단계 인스턴스를 한 그룹으로)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 @dataclass(frozen=True)
 class GoldenTimeModules:
@@ -98,9 +94,7 @@ class GoldenTimeModules:
     exporter: EvidenceExport
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CLI 파싱
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     """커맨드라인 인자 파싱."""
@@ -165,9 +159,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 출력 유틸 (사용자 대상 CLI — print 유지, 로그/디버그는 logger 사용)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def print_banner() -> None:
     """시작 배너 출력."""
@@ -239,7 +231,7 @@ def print_summary(
         print()
         print("  저장된 증거 패키지:")
         for i, exp in enumerate(exporter.export_history, 1):
-            viol = "⚠️ 위반" if exp.get("has_violation") else "✅ 정상"
+            viol = "위반" if exp.get("has_violation") else "정상"
             print(f"    [{i}] {exp['plate']} — {viol} — {exp['folder']}")
 
     if distance.violations:
@@ -247,7 +239,7 @@ def print_summary(
         print("  거리 미확보 위반 차량:")
         for plate, rec in distance.violations.items():
             print(
-                f"    ⚠️ {plate}: 가까움 {rec.close_duration:.1f}초 "
+                f"    {plate}: 가까움 {rec.close_duration:.1f}초 "
                 f"({rec.last_distance_label})"
             )
 
@@ -257,9 +249,7 @@ def print_summary(
     print()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 모듈 빌드 + 콜백 와이어링
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def build_modules(args: argparse.Namespace) -> GoldenTimeModules:
     """5개 단계 모듈을 인자값으로 인스턴스화.
@@ -336,9 +326,7 @@ def register_callbacks(modules: GoldenTimeModules) -> None:
     sim.event_bus.subscribe("EVIDENCE_EXPORTED", _on_evidence_exported)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 엔트리포인트
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _configure_logging(verbose: bool) -> None:
     """logger 포맷/레벨을 verbose 플래그에 맞춰 설정."""
@@ -356,7 +344,7 @@ def main(argv: list[str] | None = None) -> int:
     try:
         modules = build_modules(args)
     except FileNotFoundError as exc:
-        print(f"\n  ❌ 에러: {exc}")
+        print(f"\n  에러: {exc}")
         print("     영상 파일 경로를 확인해주세요.")
         return EXIT_VIDEO_NOT_FOUND
 
@@ -365,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     print_controls()
 
     start_time = datetime.now()
-    print(f"  ▶ 시뮬레이션 시작: {start_time.strftime('%H:%M:%S')}")
+    print(f"  시뮬레이션 시작: {start_time.strftime('%H:%M:%S')}")
     print()
 
     modules.sim.run()

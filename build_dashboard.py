@@ -28,9 +28,9 @@ from pathlib import Path
 from typing import Final
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # 모듈 상수
-# ─────────────────────────────────────────────────────────────
+# ─
 DEFAULT_BASE_DIR: Final[Path] = Path("C:/tool/yolo26-main/evidence_output")
 DEFAULT_OUTPUT_FILE: Final[Path] = Path(
     "C:/tool/yolo26-main/evidence_dashboard.html"
@@ -61,9 +61,9 @@ THEME_TITLE_GOLDENTIME: Final[str] = "GoldenTime 2.0"
 THEME_SUBTITLE_GOLDENTIME: Final[str] = "긴급차량 통행방해 증거 대시보드"
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # 데이터 구조
-# ─────────────────────────────────────────────────────────────
+# ─
 @dataclass(frozen=True)
 class DashboardStats:
     """대시보드 상단 통계 바에 표시되는 집계값."""
@@ -83,9 +83,9 @@ class DashboardTheme:
     subtitle: str
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # 스캐닝 — 디스크 → 패키지 dict 리스트
-# ─────────────────────────────────────────────────────────────
+# ─
 def _encode_image_to_data_uri(img_path: Path) -> tuple[str, float]:
     """단일 이미지를 base64 data-URI로 인코딩 → (data_uri, size_kb)."""
     ext = img_path.suffix.lower().lstrip(".")
@@ -177,9 +177,9 @@ def scan_packages(
     return packages
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # 분류 / 통계 / 테마
-# ─────────────────────────────────────────────────────────────
+# ─
 def _detect_package_type(pkg: dict) -> str:
     """패키지 유형 판별 → 'safeplate' 또는 'goldentime'."""
     name = pkg.get("name", "")
@@ -245,9 +245,9 @@ def _parse_time(gen_at: str) -> str:
         return gen_at
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # 공용 HTML 헬퍼
-# ─────────────────────────────────────────────────────────────
+# ─
 def _build_gallery(pkg: dict) -> str:
     """스크린샷 갤러리 HTML 생성."""
     parts: list[str] = []
@@ -307,9 +307,9 @@ def _build_source_data_section(idx: int, json_data: dict, report: str) -> str:
         </div>'''
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # 카드 빌더 — GoldenTime / SafePlate
-# ─────────────────────────────────────────────────────────────
+# ─
 def _build_violation_rows(dv_list: list[dict]) -> str:
     """GoldenTime 거리 위반 행."""
     if not dv_list:
@@ -481,9 +481,9 @@ def _build_card_safeplate(idx: int, pkg: dict) -> str:
 '''
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # CSS / JS — 모듈 상수
-# ─────────────────────────────────────────────────────────────
+# ─
 DASHBOARD_CSS: Final[str] = """
 * { margin: 0; padding: 0; box-sizing: border-box; }
 body {
@@ -693,9 +693,9 @@ function switchTab(btn, contentId) {
 """
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # HTML 셸 빌더
-# ─────────────────────────────────────────────────────────────
+# ─
 def _build_stats_bar(stats: DashboardStats) -> str:
     return f'''
     <div class="stats-bar">
@@ -775,9 +775,9 @@ def build_html(packages: list[dict]) -> str:
 </html>'''
 
 
-# ─────────────────────────────────────────────────────────────
+# ─
 # CLI
-# ─────────────────────────────────────────────────────────────
+# ─
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="YOLO26 증거 대시보드(HTML) 생성기 — "

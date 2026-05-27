@@ -19,7 +19,7 @@ import gc
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
 
-# ── 메모리 측정 유틸 ──
+# 메모리 측정 유틸
 try:
     import psutil
     HAS_PSUTIL = True
@@ -30,7 +30,7 @@ import cv2
 
 from plate_engine_pro import PlateEnginePro
 
-# ── 설정 ──
+# 설정
 IMG_DIR = os.path.join(BASE_DIR, "22")
 VIDEO_PATH = os.path.join(BASE_DIR, "movie", "hiway.mp4")
 
@@ -82,9 +82,7 @@ def load_test_images():
     return images
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 벤치마크 1: OCR 1회 처리 시간
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def bench_ocr_latency(engine, images):
     """
     각 테스트 이미지에 대해 process_frame 1회 호출 시간 측정.
@@ -136,9 +134,7 @@ def bench_ocr_latency(engine, images):
     }
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 벤치마크 2: FPS (연속 프레임 처리 속도)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def bench_fps(engine, images):
     """
     연속 프레임 처리 FPS 측정.
@@ -241,9 +237,7 @@ def bench_fps(engine, images):
     }
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 벤치마크 3: 메모리 사용량
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def bench_memory(engine, images):
     """
     메모리 사용량 측정.
@@ -315,15 +309,13 @@ def bench_memory(engine, images):
     }
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 메인
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def main():
     print("=" * 60)
     print("  YOLO26 성능 벤치마크")
     print("=" * 60)
 
-    # ── 환경 정보 ──
+    # 환경 정보
     print(f"\n  Python: {sys.version.split()[0]}")
     print(f"  OpenCV: {cv2.__version__}")
     if HAS_PSUTIL:
@@ -339,14 +331,14 @@ def main():
     except ImportError:
         print(f"  PyTorch: 미설치")
 
-    # ── 엔진 초기화 ──
+    # 엔진 초기화
     print(f"\n[초기화] PlateEnginePro 로딩...")
     t0 = time.perf_counter()
     engine = PlateEnginePro()
     init_time = time.perf_counter() - t0
     print(f"[초기화] 완료 ({init_time:.1f}초)")
 
-    # ── 테스트 이미지 로드 ──
+    # 테스트 이미지 로드
     print(f"\n[이미지] 테스트 이미지 로드 중...")
     images = load_test_images()
     print(f"[이미지] {len(images)}장 로드 완료")
@@ -355,7 +347,7 @@ def main():
         print("\n[오류] 테스트 이미지 없음 — 22/ 폴더를 확인하세요")
         return 1
 
-    # ── 벤치마크 실행 ──
+    # 벤치마크 실행
     results = {}
 
     # 1. OCR 레이턴시
@@ -370,9 +362,7 @@ def main():
     passed_mem, mem_data = bench_memory(engine, images)
     results["memory"] = {"passed": passed_mem, "data": mem_data}
 
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     # 최종 결과 요약
-    # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
     print(f"\n{'='*60}")
     print(f"  벤치마크 최종 결과")
     print(f"{'='*60}")

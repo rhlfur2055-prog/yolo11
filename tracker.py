@@ -14,13 +14,11 @@ from __future__ import annotations
 from typing import Final
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 매직 넘버 → Final 상수 (PEP 591 스타일)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # 트랙에 OCR 결과가 있을 때, 마지막 OCR 이후 이 프레임 수 이상 지나면
 # 다른 차량이 같은 위치에 들어온 것으로 판단하고 OCR 결과를 지운다.
-# ★ OCR 처리 1-5초 → 30fps에서 30-150프레임 간격 발생하므로 여유 있게 설정
+# OCR 처리 1-5초 → 30fps에서 30-150프레임 간격 발생하므로 여유 있게 설정
 STALE_FRAME_GAP: Final[int] = 15  # 0.5초 (30fps × 0.5) — 즉시 잔상 제거
 
 # bbox 면적 비율이 이 범위를 벗어나면 다른 차량으로 판단
@@ -38,7 +36,7 @@ CONSECUTIVE_REQUIRED: Final[int] = 1
 BBOX_SMOOTH_ALPHA: Final[float] = 0.8
 
 # OCR 확인된 트랙의 표시 유지 프레임 수
-# ★ OCR 4-8초 지연 → 그 사이 결과 유지 필요 (30fps 기준 120-240프레임)
+# OCR 4-8초 지연 → 그 사이 결과 유지 필요 (30fps 기준 120-240프레임)
 DISPLAY_HOLD_FRAMES: Final[int] = 30  # 1초 유지 (30fps × 1) — 잔상 최소화
 
 # 프레임 갭 허용치 (이 이내 미감지는 차량 교체로 보지 않음)
@@ -64,7 +62,7 @@ class PlateTracker:
       4. TTL 초과 track → 삭제 (화면에서 사라진 차량)
     """
 
-    # ── 클래스 상수(공개 API 호환 보존) ─────────────────────
+    # 클래스 상수(공개 API 호환 보존)
     # 외부 코드/테스트가 `PlateTracker.STALE_FRAME_GAP` 등 클래스 속성에
     # 접근할 수 있으므로 모듈 상수와 동일 값을 클래스에서도 노출한다.
     STALE_FRAME_GAP = STALE_FRAME_GAP
@@ -139,10 +137,10 @@ class PlateTracker:
             bbox = det.get("bbox", [])
 
             if best_iou >= self.iou_threshold and best_tid >= 0 and best_tid not in matched_track_ids:
-                # ── IoU 매칭됨: 같은 위치의 차량 ──
+                # IoU 매칭됨: 같은 위치의 차량
                 track = self.tracks[best_tid]
 
-                # ★ 프레임 갭 체크: GAP_TOLERANCE 프레임 이상 미감지 후 재매칭 → 다른 차량 가능성
+                # 프레임 갭 체크: GAP_TOLERANCE 프레임 이상 미감지 후 재매칭 → 다른 차량 가능성
                 #   OCR 처리 지연(500ms+)으로 detection 간격이 벌어질 수 있으므로 여유 부여
                 last_matched = track.get("last_matched_frame", track["frame_idx"])
                 gap = frame_idx - last_matched
@@ -153,7 +151,7 @@ class PlateTracker:
                     track["det_data"] = {}
                     track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
-                # ★ bbox 면적 비율 체크: 크기가 급변하면 다른 차량
+                # bbox 면적 비율 체크: 크기가 급변하면 다른 차량
                 old_bbox = track["bbox"]
                 old_area = max(1, (old_bbox[2] - old_bbox[0]) * (old_bbox[3] - old_bbox[1]))
                 new_area = max(1, (bbox[2] - bbox[0]) * (bbox[3] - bbox[1]))
@@ -165,7 +163,7 @@ class PlateTracker:
                     track["det_data"] = {}
                     track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
-                # ★ bbox 중심 이동 거리 체크: 중심이 크게 점프하면 다른 차량
+                # bbox 중심 이동 거리 체크: 중심이 크게 점프하면 다른 차량
                 old_cx = (old_bbox[0] + old_bbox[2]) / 2
                 old_cy = (old_bbox[1] + old_bbox[3]) / 2
                 new_cx = (bbox[0] + bbox[2]) / 2
@@ -183,7 +181,7 @@ class PlateTracker:
                 det_conf = det.get("ocr_confidence", det.get("confidence", 0))
                 det_valid = det.get("is_valid_plate", False)
 
-                # ★ 마지막 OCR 이후 프레임 간격이 크면 이전 OCR 결과 폐기
+                # 마지막 OCR 이후 프레임 간격이 크면 이전 OCR 결과 폐기
                 last_ocr_frame = track.get("last_ocr_frame", track["frame_idx"])
                 ocr_gap = frame_idx - last_ocr_frame
                 if ocr_gap > self.STALE_FRAME_GAP and track.get("plate_text"):
@@ -193,7 +191,7 @@ class PlateTracker:
                     track["det_data"] = {}
                     track["last_ocr_frame"] = 0  # display hold 즉시 해제
 
-                # ★ bbox EMA 평활화: 좌표 떨림 방지
+                # bbox EMA 평활화: 좌표 떨림 방지
                 alpha = self.BBOX_SMOOTH_ALPHA
                 old_b = track["bbox"]
                 track["bbox"] = [
@@ -210,7 +208,7 @@ class PlateTracker:
                     # 새 OCR 결과가 있으면: 신뢰도 비교 후 교체
                     track["last_ocr_frame"] = frame_idx
 
-                    # ★ Ghost 완전 제거: 뒷4자리 비교로 다른 차량 즉시 감지
+                    # Ghost 완전 제거: 뒷4자리 비교로 다른 차량 즉시 감지
                     #   캐시 뒷4자리 vs 엔진 뒷4자리 → 일치 2자리 미만이면 캐시 삭제
                     _cached_text = track.get("plate_text", "")
                     if _cached_text and len(_cached_text) >= 4 and len(det_text) >= 4:
@@ -227,7 +225,7 @@ class PlateTracker:
                     if det_text == track.get("plate_text", ""):
                         track["ocr_count"] = track.get("ocr_count", 0) + 1
                     else:
-                        # ★ 유사 텍스트면 OCR 노이즈로 간주 (리셋 방지)
+                        # 유사 텍스트면 OCR 노이즈로 간주 (리셋 방지)
                         _old_text = track.get("plate_text", "")
                         if _old_text and self._text_similar_quick(_old_text, det_text):
                             track["ocr_count"] = track.get("ocr_count", 0) + 1
@@ -259,7 +257,7 @@ class PlateTracker:
                 matched_track_ids.add(best_tid)
                 matched_det_indices.add(d_idx)
             elif d_idx not in matched_det_indices:
-                # ── 새 차량: 깨끗한 상태로 track 생성 ──
+                # 새 차량: 깨끗한 상태로 track 생성
                 new_id = self._next_id
                 self._next_id += 1
                 det_text = det.get("text", "")

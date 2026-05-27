@@ -27,7 +27,7 @@ from plate_engine_pro import PlateEnginePro
 
 IMG_DIR = os.path.join(BASE_DIR, "22")
 
-# ── 테스트 차량 정의 ──
+# 테스트 차량 정의
 # (파일명, 정답 번호판)
 VEHICLES = [
     ("서울바9203.png",          "서울70바9203"),
@@ -326,7 +326,7 @@ def main():
     results["four_vehicle"] = passed5
     print(f"  (소요: {time.time()-t5:.1f}초)")
 
-    # ── 최종 결과 ──
+    # 최종 결과
     print(f"\n{'='*60}")
     print(f"  Ghost Detection 최종 결과")
     print(f"{'='*60}")

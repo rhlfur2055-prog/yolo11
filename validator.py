@@ -35,7 +35,7 @@ class PlateValidator:
       5) validate_plate_format 폴백 (자모 유사도)
     """
 
-    # ── 클래스 상수 (외부 참조 — 이름 유지 필수) ─────────────
+    # 클래스 상수 (외부 참조 — 이름 유지 필수)
     _KR_CONFUSION: dict = _HANGUL_PLATE_CORRECTION
     _COMMERCIAL_CHARS: set = set("비바사아자배하")
     _GOV_PREFIXES_2CHAR: List[str] = [
@@ -60,7 +60,7 @@ class PlateValidator:
         self.min_len: int = ThresholdConfig.PLATE_MIN_LEN
         self.max_len: int = ThresholdConfig.PLATE_MAX_LEN
 
-    # ── 내부 유틸 ─────────────────────────────────────────────
+    # 내부 유틸
     def _normalize_for_validation(self, text: str) -> str:
         """공백/특수문자 제거, OCR 글자 잘림 보정용 정규화."""
         s = re.sub(r"[\s\-\.\,\;\:\'\"]", "", text)
@@ -91,7 +91,7 @@ class PlateValidator:
                     return True, norm
         return False, text
 
-    # ── 공개 API ───────────────────────────────────────────────
+    # 공개 API
     def is_valid_length(self, text: str) -> bool:
         clean = self._normalize_for_validation(text)
         return self.min_len <= len(clean) <= self.max_len
@@ -106,12 +106,12 @@ class PlateValidator:
                     return True, result
             return False, clean
 
-        # ★ 구형 지역번호판 우선 교정: 앞 1~2자리 숫자가 지역명 오인식
+        # 구형 지역번호판 우선 교정: 앞 1~2자리 숫자가 지역명 오인식
         # 예) 176바7789 → 경기76바7789 (앞 '1' = 지역명 OCR 잔여)
         m_reg = re.match(r'^[0-9]{1,2}([0-9]{2}([가-힣])[0-9]{4})$', clean)
         if m_reg and m_reg.group(2) in PlateValidator._COMMERCIAL_CHARS:
             suffix = m_reg.group(1)
-            # ★ "00" 연식 코드는 실제 번호판에 없음 → 허위감지 차단
+            # "00" 연식 코드는 실제 번호판에 없음 → 허위감지 차단
             if suffix[:2] != "00":
                 for region in PlateValidator._REGION_PREFIXES:
                     candidate = region + suffix
@@ -123,13 +123,13 @@ class PlateValidator:
         # 정방향 패턴 매칭
         for pattern in self.patterns:
             if pattern.match(clean):
-                # ★ 한글 유효성 추가 검증: 번호판에 쓰이지 않는 한글이면 교정
+                # 한글 유효성 추가 검증: 번호판에 쓰이지 않는 한글이면 교정
                 fmt_corrected, fmt_score = validate_plate_format(clean)
                 if fmt_score > 0 and fmt_corrected != clean:
                     return True, fmt_corrected
                 return True, clean
 
-        # ★ 순수 숫자 7~9자리 → 한글 누락 복원
+        # 순수 숫자 7~9자리 → 한글 누락 복원
         digits_only = re.match(r'^[0-9]{7,9}$', clean)
         if digits_only:
             corrected = correct_ocr_hangul(clean)
@@ -165,7 +165,7 @@ class PlateValidator:
         if ok:
             return True, result
 
-        # ★ 최종 폴백: validate_plate_format (한글 교정 테이블 + 자모 유사도)
+        # 최종 폴백: validate_plate_format (한글 교정 테이블 + 자모 유사도)
         fmt_corrected, fmt_score = validate_plate_format(clean)
         if fmt_score > 0:
             for pattern in self.patterns:
