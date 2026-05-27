@@ -353,7 +353,7 @@ def main(argv: list[str] | None = None) -> int:
     print_controls()
 
     start_time = datetime.now()
-    print(f"  ▶ 시뮬레이션 시작: {start_time.strftime('%H:%M:%S')}")
+    print(f"  시뮬레이션 시작: {start_time.strftime('%H:%M:%S')}")
     print()
 
     modules.sim.run()

@@ -81,7 +81,7 @@ def _pro_results_to_gui_format(
 class DetectionWorker(threading.Thread):
     """PlateRecognizer 또는 PlateEnginePro로 번호판 인식.
 
-    ★ 2단계 파이프라인 중 Phase 2(OCR) 담당.
+    2단계 파이프라인 중 Phase 2(OCR) 담당.
       Phase 1(YOLO bbox)은 별도 Fast YOLO 스레드에서 표시 프레임 기반으로 실행.
 
     Attributes:

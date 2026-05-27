@@ -32,7 +32,7 @@ def run_merge(phase1_dets, phase2_dets):
         if best_p1_bbox is not None:
             combined["bbox"] = best_p1_bbox  # Phase1 좌표로 보정
         elif phase1_dets:
-            # ★ Phase1 활성인데 IoU 매칭 실패 → 고스트 방지
+            # Phase1 활성인데 IoU 매칭 실패 → 고스트 방지
             continue
         merged.append(combined)
 

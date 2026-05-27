@@ -5,7 +5,7 @@ plate_gui.py - 실시간 번호판 인식 GUI v3.0 (2단계 파이프라인)
 Tkinter + OpenCV 하이브리드 데스크톱 애플리케이션.
 실행 즉시 영상을 자동 재생하면서 번호판을 실시간 탐지.
 
-★ v3.0 핵심: 1모델 2단계 파이프라인
+v3.0 핵심: 1모델 2단계 파이프라인
   Phase 1: YOLO 탐지 즉시 → 빨간 박스 + "탐지중..." (~50ms)
   Phase 2: OCR 완료 후   → 초록 박스 + "서울바9203 (72%)"
 
@@ -93,7 +93,7 @@ def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
         return False
 
     # bbox 크기별 신뢰도 차등 적용
-    # ★ PlateEnginePro의 앙상블 투표 신뢰도는 0.5~0.85 범위가 정상
+    # PlateEnginePro의 앙상블 투표 신뢰도는 0.5~0.85 범위가 정상
     #   (다중 OCR 엔진 합산 → 단일 OCR보다 낮은 개별 점수)
     #   오탐지 필터는 YOLO confidence 기반이므로 임계값을 엔진 스케일에 맞춤
     if w >= 100:
@@ -278,7 +278,7 @@ class PlateGUIApp(tk.Tk):
         self._detection_ts: float = 0.0  # 마지막 감지 결과 수신 시각
         self._DETECTION_DISPLAY_TTL: float = 0.5  # Phase 2 유지 시간 (잔상 방지: 0.5초, 실제 YOLO 빈 결과 시 즉시 클리어)
 
-        # ★ Fast YOLO 스레드: 현재 표시 프레임에 대해 실시간 YOLO 탐지
+        # Fast YOLO 스레드: 현재 표시 프레임에 대해 실시간 YOLO 탐지
         self._current_display_frame = None  # 현재 표시 중인 프레임
         self._phase1_bboxes: list[dict] = []  # Fast YOLO Phase 1 결과
         self._phase1_lock = threading.Lock()
@@ -438,7 +438,7 @@ class PlateGUIApp(tk.Tk):
         self._latest_detections = []
         self._detection_history = []
         self._plate_tracker.reset()
-        # ★ 엔진 내부 트래커도 리셋 (이전 영상 트랙 잔존 방지)
+        # 엔진 내부 트래커도 리셋 (이전 영상 트랙 잔존 방지)
         if self.detection_worker and hasattr(self.detection_worker, 'pro_engine') and self.detection_worker.pro_engine:
             self.detection_worker.pro_engine.reset_state()
         # 패널 초기화
@@ -491,7 +491,7 @@ class PlateGUIApp(tk.Tk):
             self.stats_var.set("엔진 로딩 타임아웃 - 재생 시작")
         else:
             self.stats_var.set("엔진 로딩 완료! 재생 시작")
-            # ★ 영상 모드: consecutive_required=1 (즉시 표시)
+            # 영상 모드: consecutive_required=1 (즉시 표시)
             #   Ghost Detection은 PlateTracker가 담당 → 중복 보호 불필요
             #   =2이면 프레임 스킵(3프레임)과 충돌 → 첫 감지 후 3-9초 대기 필요 → Det:0 원인
             if self.detection_worker.pro_engine:
@@ -501,7 +501,7 @@ class PlateGUIApp(tk.Tk):
         self.playing_event.set()
         self.stats_var.set(f"Auto-playing {self._video_w}x{self._video_h} @ {self.video_reader.fps:.0f}fps")
 
-        # ★ Fast YOLO 스레드 시작 (현재 표시 프레임에서 실시간 bbox 탐지)
+        # Fast YOLO 스레드 시작 (현재 표시 프레임에서 실시간 bbox 탐지)
         self._fast_yolo_active = True
         _fast_t = threading.Thread(target=self._fast_yolo_loop, daemon=True)
         _fast_t.start()
@@ -510,7 +510,7 @@ class PlateGUIApp(tk.Tk):
 
     def _fast_yolo_loop(self):
         """현재 표시 프레임: YOLO detect_only → 즉시 bbox 표시 (~3-8fps).
-        ★ OCR은 Worker 전용 (PaddleOCR 공유 블로킹 방지).
+        OCR은 Worker 전용 (PaddleOCR 공유 블로킹 방지).
         Fast loop = YOLO bbox만 → Worker = 전체 OCR + 텍스트."""
         while self._fast_yolo_active:
             frame = self._current_display_frame
@@ -524,7 +524,7 @@ class PlateGUIApp(tk.Tk):
                 if engine is None or not hasattr(engine, 'detect_only'):
                     time.sleep(0.1)
                     continue
-                # ★ YOLO만 실행 (OCR 없음) → PaddleOCR 블로킹 없이 즉시 bbox
+                # YOLO만 실행 (OCR 없음) → PaddleOCR 블로킹 없이 즉시 bbox
                 t0 = time.time()
                 results = engine.detect_only(frame)
                 _fast_ms = (time.time() - t0) * 1000
@@ -570,11 +570,11 @@ class PlateGUIApp(tk.Tk):
                         if validate_bbox(bbox, frame_shape, conf):
                             validated.append(det)
 
-                    # ★ GUI PlateTracker 제거 — process_frame_realtime 엔진 내부
+                    # GUI PlateTracker 제거 — process_frame_realtime 엔진 내부
                     #   트래커가 이미 Ghost Detection 처리 완료
                     #   이중 트래커는 고스트 텍스트 원인이었음
 
-                    # ★ Phase 2 교체 로직 (잔상 방지):
+                    # Phase 2 교체 로직 (잔상 방지):
                     #   - 감지 결과 있으면 → 즉시 교체
                     #   - 빈 결과 + 실제 YOLO 처리(>100ms) → 즉시 클리어 (차량 떠남)
                     #   - 빈 결과 + 캐시(<100ms) → 유지 (YOLO가 아직 재검증 안 함)
@@ -582,7 +582,7 @@ class PlateGUIApp(tk.Tk):
                     if validated:
                         self._latest_detections = validated
                         self._detection_ts = time.time()
-                    # ★ 빈 결과로 즉시 클리어 하지 않음 — TTL(1.5초)이 만료 담당
+                    # 빈 결과로 즉시 클리어 하지 않음 — TTL(1.5초)이 만료 담당
                     # 이전: _proc_ms >= 100이면 클리어 → OCR 결과가 다음 빈 프레임에 사라짐
                     # 지금: 새 결과 올 때만 교체, 없으면 TTL까지 유지
                     # 디버그: GUI 수신 결과 추적
@@ -606,7 +606,7 @@ class PlateGUIApp(tk.Tk):
                         text = det.get("text", "")
                         conf = det.get("ocr_confidence", det.get("confidence", 0))
                         is_valid = det.get("is_valid_plate", False)
-                        # ★ 로그 표시 조건: 화면 표시(Phase 2)와 동일 — is_valid + text
+                        # 로그 표시 조건: 화면 표시(Phase 2)와 동일 — is_valid + text
                         if is_valid and text and len(text) >= 2:
                             self._add_to_history(det, ts)
             except (queue.Empty, AttributeError):
@@ -623,11 +623,11 @@ class PlateGUIApp(tk.Tk):
         if frame_data is not None:
             frame_idx, frame, ts = frame_data
 
-            # ★ Fast YOLO 스레드용 현재 프레임 저장
+            # Fast YOLO 스레드용 현재 프레임 저장
             self._current_display_frame = frame
 
             with self._detection_lock:
-                # ★ 감지 결과 TTL: 3초 (거리 기반 매칭이 교차 오염 방지)
+                # 감지 결과 TTL: 3초 (거리 기반 매칭이 교차 오염 방지)
                 # Phase1 없으면 즉시 클리어, Phase1 있으면 3초까지 유지
                 _det_age = time.time() - self._detection_ts
                 if _det_age > 3.0:
@@ -640,25 +640,25 @@ class PlateGUIApp(tk.Tk):
 
             merged = []
 
-            # ★ 새 차량 진입 감지: Phase1이 0→1+ 전환 시 이전 OCR 클리어
+            # 새 차량 진입 감지: Phase1이 0→1+ 전환 시 이전 OCR 클리어
             _has_p1 = len(phase1_dets) > 0
             if not _has_p1:
                 self._phase1_empty_since = getattr(self, '_phase1_empty_since', 0) or time.time()
             else:
                 _empty_dur = time.time() - getattr(self, '_phase1_empty_since', 0) if getattr(self, '_phase1_empty_since', 0) > 0 else 0
                 if _empty_dur > 0.3:
-                    # ★ Phase1이 0.3초 이상 비었다가 복귀 → 새 차량 → 이전 OCR 클리어
+                    # Phase1이 0.3초 이상 비었다가 복귀 → 새 차량 → 이전 OCR 클리어
                     with self._detection_lock:
                         self._latest_detections = []
                         self._detection_ts = 0
                     phase2_dets = []
                 self._phase1_empty_since = 0
 
-            # ★ Phase1 없으면 Phase2 표시 안 함 (잔상 완전 차단)
+            # Phase1 없으면 Phase2 표시 안 함 (잔상 완전 차단)
             if not phase1_dets:
                 phase2_dets = []
 
-            # ★ Phase1-Phase2 매칭: 가장 가까운 Phase1에 무조건 매칭
+            # Phase1-Phase2 매칭: 가장 가까운 Phase1에 무조건 매칭
             # 거리 제한 제거 — TTL(3초) + 새차량감지(0.3초갭)로 잔상 방지
             _fw = frame.shape[1] if frame is not None else 1920
             _fh = frame.shape[0] if frame is not None else 1080
@@ -682,7 +682,7 @@ class PlateGUIApp(tk.Tk):
 
             matched_p1_indices = set()
 
-            # ★ 번호판다운 Phase1 bbox만 추출 (종횡비 1.5 이상)
+            # 번호판다운 Phase1 bbox만 추출 (종횡비 1.5 이상)
             _plate_like_p1 = [(i, cx, cy, p1) for i, cx, cy, p1 in _valid_p1
                               if (p1["bbox"][2] - p1["bbox"][0]) /
                                  max(p1["bbox"][3] - p1["bbox"][1], 1) >= 1.5]
@@ -709,7 +709,7 @@ class PlateGUIApp(tk.Tk):
                         best_p1 = p1
 
                 combined = dict(p2)
-                # ★ 거리 제한 없이 가장 가까운 Phase1에 무조건 매칭
+                # 거리 제한 없이 가장 가까운 Phase1에 무조건 매칭
                 # 잔상 방지는 TTL(3초) + 새차량감지(Phase1 0.3초 갭→클리어)로 처리
                 if best_p1 is not None:
                     combined["bbox"] = best_p1["bbox"]
@@ -717,7 +717,7 @@ class PlateGUIApp(tk.Tk):
                     merged.append(combined)
                 elif (len(_plate_like_p1) >= 1
                       and _det_age < 3.0):
-                    # ★ 폴백: valid_p1에 매칭 안 됐지만 plate_like Phase1 존재
+                    # 폴백: valid_p1에 매칭 안 됐지만 plate_like Phase1 존재
                     for _fb_idx, _, _, _fb_p1 in _plate_like_p1:
                         if _fb_idx not in matched_p1_indices:
                             combined["bbox"] = _fb_p1["bbox"]
@@ -726,7 +726,7 @@ class PlateGUIApp(tk.Tk):
                             break
 
             # 2) Phase 1 중 Phase 2와 매칭 안 된 것 → "탐지중..." 표시
-            # ★ 오감지 필터: 저신뢰, 비율 이상, 프레임 가장자리 bbox 제외
+            # 오감지 필터: 저신뢰, 비율 이상, 프레임 가장자리 bbox 제외
             for i, p1 in enumerate(phase1_dets):
                 if i not in matched_p1_indices:
                     if p1.get("confidence", 0) < 0.50:
@@ -739,13 +739,13 @@ class PlateGUIApp(tk.Tk):
                     # 번호판 종횡비 필터 (가로 > 세로 × 1.5)
                     if _pw / _ph < 1.5:
                         continue
-                    # ★ 프레임 하단 20% 가장자리 bbox 제외 (도로/바닥/워터마크 오탐지)
+                    # 프레임 하단 20% 가장자리 bbox 제외 (도로/바닥/워터마크 오탐지)
                     if p1b[3] > _fh * 0.80:
                         continue
-                    # ★ 프레임 우측 5% 가장자리 초과 bbox 제외
+                    # 프레임 우측 5% 가장자리 초과 bbox 제외
                     if p1b[0] > _fw * 0.95:
                         continue
-                    # ★ 최소 크기 필터 (너무 작은 bbox는 번호판이 아님)
+                    # 최소 크기 필터 (너무 작은 bbox는 번호판이 아님)
                     if _pw < 50 or _ph < 15:
                         continue
                     merged.append(p1)
@@ -793,7 +793,7 @@ class PlateGUIApp(tk.Tk):
         - 번호판 bbox: 두꺼운 초록 테두리 + 상단 배너 라벨
         - 우측: 감지 이력 사이드 패널 (최근 5건)
         """
-        result = frame  # ★ copy() 제거 — FPS 극대화
+        result = frame  # copy() 제거 — FPS 극대화
         h, w = result.shape[:2]
 
         # 좌상단 시스템 정보 패널
@@ -861,7 +861,7 @@ class PlateGUIApp(tk.Tk):
             x1, y1, x2, y2 = [int(v) for v in bbox]
 
             if is_valid and text and ocr_conf >= 0.70:
-                # ★ 확실한 인식: 초록 bbox + 상단 배너 라벨
+                # 확실한 인식: 초록 bbox + 상단 배너 라벨
                 det_conf = det.get("pattern_score", ocr_conf)
                 d_val = min(99, int(det_conf * 100))
                 r_val = min(99, int(ocr_conf * 100))
@@ -880,24 +880,24 @@ class PlateGUIApp(tk.Tk):
                 cv2.line(result, (x2, y2), (x2 - _corner_len, y2), (0, 255, 0), _ct)
                 cv2.line(result, (x2, y2), (x2, y2 - _corner_len), (0, 255, 0), _ct)
 
-                # ★ 라벨을 bbox 위쪽에 배너로 렌더링 (번호만 표시)
+                # 라벨을 bbox 위쪽에 배너로 렌더링 (번호만 표시)
                 label = text
                 bbox_h = y2 - y1
                 font_sz = max(20, int(bbox_h * 0.7))
                 _label_y = max(font_sz + 8, y1 - 4)
-                # ★ 라벨 너비 추정: 한글 1글자 ≈ font_sz * 0.65
+                # 라벨 너비 추정: 한글 1글자 ≈ font_sz * 0.65
                 _label_w_est = int(len(label) * font_sz * 0.65)
                 _label_x = max(0, min(x1, w - _label_w_est))
-                # ★ 라벨이 프레임 밖으로 넘어가면 표시 안 함
+                # 라벨이 프레임 밖으로 넘어가면 표시 안 함
                 if x1 > w - 20 or x2 < 20:
                     continue
-                # ★ 라벨이 화면 상단/좌측 밖으로 나가지 않도록
+                # 라벨이 화면 상단/좌측 밖으로 나가지 않도록
                 _label_top = max(0, _label_y - font_sz - 2)
                 result = draw_korean_text(result, label, (_label_x, _label_top),
                                           font_size=font_sz, color=(0, 255, 0), bg=True)
 
             elif is_valid and text and ocr_conf >= 0.50:
-                # ★ 중간 신뢰: 노란 bbox + 번호만 (경계 클램핑)
+                # 중간 신뢰: 노란 bbox + 번호만 (경계 클램핑)
                 if x1 > w - 20 or x2 < 20:
                     continue
                 cv2.rectangle(result, (x1, y1), (x2, y2), (0, 200, 255), 2)
@@ -911,7 +911,7 @@ class PlateGUIApp(tk.Tk):
                                           font_size=font_sz, color=(0, 200, 255), bg=True)
 
             elif det.get("phase") == 1 and det.get("confidence", 0) >= 0.5:
-                # ★ Phase 1 탐지중: 얇은 초록 점선 스타일 bbox
+                # Phase 1 탐지중: 얇은 초록 점선 스타일 bbox
                 if x1 > w - 20 or x2 < 20:
                     continue
                 cv2.rectangle(result, (x1, y1), (x2, y2), (0, 255, 0), 1)
@@ -922,7 +922,7 @@ class PlateGUIApp(tk.Tk):
                 _label_top = max(0, _label_y - font_sz - 2)
                 result = draw_korean_text(result, "탐지중...", (_label_x, _label_top),
                                           font_size=font_sz, color=(0, 255, 0), bg=True)
-            # ★ 미인식/저신뢰: bbox 표시 안 함 (엠블럼 오감지 방지)
+            # 미인식/저신뢰: bbox 표시 안 함 (엠블럼 오감지 방지)
 
         return result
 
@@ -933,7 +933,7 @@ class PlateGUIApp(tk.Tk):
         if not text:
             return
         conf = det.get("ocr_confidence", det.get("confidence", 0))
-        # ★ 잔상/오인식 필터: 부분 인식(5자 이하) 및 저신뢰(70% 미만) 차단
+        # 잔상/오인식 필터: 부분 인식(5자 이하) 및 저신뢰(70% 미만) 차단
         # "대6282", "바6286" 같은 부분 인식이 Detection Log에 누적되는 것 방지
         import re as _re
         _hangul_count = len(_re.findall(r'[가-힣]', text))
@@ -948,7 +948,7 @@ class PlateGUIApp(tk.Tk):
         for existing in self._detection_history:
             if self._text_similar(existing.get("text", ""), text):
                 if conf > existing.get("ocr_confidence", 0):
-                    # ★ is_valid_plate=True 보존 (False로 덮어쓰기 방지)
+                    # is_valid_plate=True 보존 (False로 덮어쓰기 방지)
                     was_valid = existing.get("is_valid_plate", False)
                     existing.update(det_norm)
                     if was_valid:
@@ -1025,7 +1025,7 @@ class PlateGUIApp(tk.Tk):
         # 전체 텍스트 비교
         if self._levenshtein(t1, t2) <= 2:
             return True
-        # ★ 숫자 부분만 비교 (한글 오인식 허용): 숫자가 거의 같으면 같은 차량
+        # 숫자 부분만 비교 (한글 오인식 허용): 숫자가 거의 같으면 같은 차량
         import re
         d1 = re.sub(r'[^0-9]', '', t1)
         d2 = re.sub(r'[^0-9]', '', t2)
@@ -1049,7 +1049,7 @@ class PlateGUIApp(tk.Tk):
         mins, secs = divmod(int(ts), 60)
         t_mins, t_secs = divmod(int(total_sec), 60)
 
-        # ★ Fast = fast YOLO loop (detect_only), Pro = Worker (process_frame 전체)
+        # Fast = fast YOLO loop (detect_only), Pro = Worker (process_frame 전체)
         _fast_display = self._fast_ms if self._fast_ms > 0 else self._process_ms_fast
         speed_info = f"Pro:{self._process_ms_pro:.0f}ms / Fast:{_fast_display:.0f}ms"
 
