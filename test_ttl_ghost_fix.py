@@ -6,8 +6,11 @@ import sys
 import time
 
 # ── PlateTracker.calculate_iou 가져오기 ──
-sys.path.insert(0, __file__.rsplit("\\", 1)[0])
-from tracker import PlateTracker
+import os
+_HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, _HERE)
+sys.path.insert(0, os.path.join(_HERE, "src"))
+from yolo11_plate.tracker import PlateTracker
 
 # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 수정된 병합 로직 (plate_gui.py _refresh_display와 동일)

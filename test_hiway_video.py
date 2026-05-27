@@ -30,9 +30,10 @@ if sys.platform == "win32":
 
 ROOT = Path(__file__).resolve().parent
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 
-from plate_engine_pro import PlateEnginePro
+from yolo11_plate.plate_engine_pro import PlateEnginePro
 
 
 def normalize_plate(text: str) -> str:

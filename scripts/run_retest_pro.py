@@ -22,10 +22,11 @@ if sys.platform == "win32":
 # 프로젝트 루트
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 
 import cv2
-from plate_engine_pro import PlateEnginePro
+from yolo11_plate.plate_engine_pro import PlateEnginePro
 
 
 def get_video_size_mb(path: str) -> float:

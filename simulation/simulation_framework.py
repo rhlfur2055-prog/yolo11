@@ -14,16 +14,23 @@ Mock 데이터: 없음 — 실제 PlateEnginePro 연결
 import sys
 import time
 from collections import defaultdict
+from pathlib import Path
 from typing import Callable, Any
 
 import cv2
 import numpy as np
 from PIL import ImageFont, ImageDraw, Image
 
+# src/ 패키지 import path 보강 (pip install -e . 미실행 환경 대비)
+_PROJECT_ROOT = Path(__file__).resolve().parents[1]
+_SRC = _PROJECT_ROOT / "src"
+if _SRC.is_dir() and str(_SRC) not in sys.path:
+    sys.path.insert(0, str(_SRC))
+
 # ──────────────────────────────────────────────
 # 기존 엔진 import (수정 없이 그대로 사용)
 # ──────────────────────────────────────────────
-from plate_engine_pro import PlateEnginePro
+from yolo11_plate.plate_engine_pro import PlateEnginePro
 
 
 # ═══════════════════════════════════════════════
@@ -509,7 +516,7 @@ if __name__ == "__main__":
         from simulation.goldentime.plate_evidence import PlateEvidence
         from simulation.goldentime.distance_checker import DistanceChecker, DISTANCE_CONFIG
         from simulation.goldentime.evidence_export import EvidenceExport
-        from config import RoadCameraConfig
+        from yolo11_plate.config import RoadCameraConfig
 
         siren = SirenTrigger(sim.event_bus)
         evidence = PlateEvidence(sim.event_bus, fps=sim.fps)

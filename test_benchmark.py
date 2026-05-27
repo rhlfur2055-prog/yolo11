@@ -18,6 +18,7 @@ import gc
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 
 # ── 메모리 측정 유틸 ──
 try:
@@ -28,7 +29,7 @@ except ImportError:
 
 import cv2
 
-from plate_engine_pro import PlateEnginePro
+from yolo11_plate.plate_engine_pro import PlateEnginePro
 
 # ── 설정 ──
 IMG_DIR = os.path.join(BASE_DIR, "22")

@@ -22,15 +22,18 @@ import cv2
 import numpy as np
 import pytest
 
-# 프로젝트 루트를 import path 에 추가 (tests/ 에서 한 단계 위)
+# src/ 패키지 레이아웃: 패키지 install (`pip install -e .`) 또는
+# pyproject.toml `[tool.pytest.ini_options] pythonpath = ["src"]` 로 import 가능.
+# CI/로컬에서 `pip install -e .` 미실행 시를 대비해 sys.path 보강.
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
+SRC_DIR = PROJECT_ROOT / "src"
+if SRC_DIR.is_dir() and str(SRC_DIR) not in sys.path:
+    sys.path.insert(0, str(SRC_DIR))
 
-from preprocessor import ImagePreprocessor, _deskew_and_otsu  # noqa: E402
-from validator import PlateValidator  # noqa: E402
-from db import PlateDatabase  # noqa: E402
-from config import PathConfig  # noqa: E402
+from yolo11_plate.preprocessor import ImagePreprocessor, _deskew_and_otsu  # noqa: E402
+from yolo11_plate.validator import PlateValidator  # noqa: E402
+from yolo11_plate.db import PlateDatabase  # noqa: E402
+from yolo11_plate.config import PathConfig  # noqa: E402
 
 
 # ────────────────────────────────────────────────────────────────

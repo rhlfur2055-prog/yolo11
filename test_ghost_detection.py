@@ -22,8 +22,9 @@ import re
 
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 sys.path.insert(0, BASE_DIR)
+sys.path.insert(0, os.path.join(BASE_DIR, "src"))
 
-from plate_engine_pro import PlateEnginePro
+from yolo11_plate.plate_engine_pro import PlateEnginePro
 
 IMG_DIR = os.path.join(BASE_DIR, "22")
 

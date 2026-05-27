@@ -16,6 +16,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
+sys.path.insert(0, str(ROOT / "src"))
 os.chdir(ROOT)
 
 # 이미지 슬라이드형 영상(1장=1프레임)이면 연속 1프레임만 있어도 표시
@@ -54,7 +55,7 @@ def main():
         return
 
     import cv2
-    from plate_engine_pro import PlateEnginePro
+    from yolo11_plate.plate_engine_pro import PlateEnginePro
 
     cap = cv2.VideoCapture(video)
     if not cap.isOpened():
