@@ -1,7 +1,7 @@
 # YOLO11 — 한국 차량 번호판 인식 파이프라인
 
 YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 번호판 실시간 인식 시스템.
-정적 이미지 12/12 정확도, 실시간 영상 Ghost Detection 방지.
+정적 이미지 회귀 테스트 **11/12 (91.7%)** — 실패 케이스 1건을 README에 공개합니다. 실시간 영상 Ghost Detection 방지.
 
 ---
 
@@ -29,8 +29,10 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 |------|----|
 | 모델 | `best.pt` (YOLO11x fine-tuned) |
 | 정확도 | mAP@50 = 98.4% |
-| NMS IoU 임계 | 0.65 |
-| 작은 박스 처리 | 70px 미만은 신뢰도 감산 |
+| NMS | Ultralytics 기본값(IoU 0.7) — `plate_engine_pro.py`에 explicit 미설정 |
+| 최소 박스 크기 | 폭 35px / 높이 16px (`config.py:202-203`) |
+| 종횡비 필터 | 2.0 ≤ w/h ≤ 6.0 (`PLATE_MIN/MAX_ASPECT`) |
+| 면적 비율 상한 | 프레임의 8% (`PLATE_MAX_AREA_RATIO`) |
 
 ### 3단계 — ROI 크롭 + 18종 전처리
 탐지 박스를 잘라낸 뒤 OCR이 잘 읽도록 18가지 방식으로 변형.
@@ -58,7 +60,7 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 |------|----|
 | 모델 | `plate_ocr_crnn.pth` (10.5M params) |
 | 구조 | CNN(6블록) + BiLSTM(2층) + CTC |
-| 학습 | 실제 132장 + 합성 20,647장 = 21,967 샘플 / 200 epoch / RTX 4060 |
+| 학습 | 실제 132장 × 10증강(1,320) + 합성 20,647장 = **21,967 샘플** / 200 epoch / RTX 4060 |
 | 검증 | 131/132 (99%) |
 | 부가 기능 | 2줄 번호판(구형) 지역명 복원 |
 
@@ -90,7 +92,6 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 |------|------|
 | `plate_engine_pro.py` | OCR 엔진 본체 (YOLO + PaddleOCR + CRNN + 투표 + 추적) |
 | `plate_gui.py` | Tkinter GUI + 실시간 영상 루프 |
-| `plate_ocr_postfilter_v2.py` | OCR 결과 정제/교정 |
 | `plate_recognition_4k.py` | 한글 교정 함수 라이브러리 |
 | `test_ocr_accuracy.py` | 정확도 회귀 테스트 (12장) |
 | `best.pt` | YOLO11x 번호판 탐지 모델 |
@@ -114,7 +115,7 @@ python plate_gui.py movie/hiway.mp4
 python test_ocr_accuracy.py
 ```
 
-기대 결과: `12/12 = 100.0%`
+기대 결과: `11/12 = 91.7%` (현재 실측 — 실패 #10 `58두9599` 1건 공개, [성능] 섹션 참고)
 
 ---
 
@@ -122,10 +123,17 @@ python test_ocr_accuracy.py
 
 | 항목 | 값 |
 |------|----|
-| 정적 이미지 12장 | 12/12 (100%) |
+| 정적 이미지 12장 (회귀 테스트) | **11/12 (91.7%)** — `test_ocr_accuracy.py` 실측 |
+| 이미지당 평균 추론 시간 | 약 1.35초 (CPU, 0.57s~4.62s 분포) |
 | 실시간 영상 GT 매칭 | 12/12 (100%) |
 | Ghost Detection | 5/5 PASS |
 | OCR 처리 시간 | 0.6 – 3.2초 / 이미지 (CPU) |
+
+### 알려진 실패 케이스 (정직성 공개)
+
+| # | 파일 | 정답 | OCR 결과 | 원인 |
+|---|------|------|---------|------|
+| 10 | `58두9599.png` | `58두9599` | `(미인식)` | PaddleOCR이 한글 `두` 한 글자 누락 → `589599`(숫자 6자리) 반환. 현재 CRNN 폴백은 4자리 숫자 패턴만 트리거하여 6자리 케이스에서 보정 실패. **개선 진행 중** (CRNN 디지트 폴백 패턴 확장 예정). |
 
 ## 지원 번호판
 
@@ -152,7 +160,7 @@ python test_ocr_accuracy.py
 - Python 3.10–3.12 (3.13은 PaddlePaddle 미지원)
 - `ultralytics` (YOLO11)
 - `opencv-python`
-- `paddleocr` (한국어 단독)
+- `paddlepaddle` + `paddleocr` (한국어 단독, **`paddleocr` 단독으론 실행 불가** — `paddlepaddle` 백엔드 필수)
 - `torch`, `torchvision` (CRNN)
 - `numpy`, `Pillow`
 - `tkinter` (Python 기본 내장)
@@ -161,6 +169,6 @@ python test_ocr_accuracy.py
 
 ## 절대 규칙
 
-1. 변경 후 `python test_ocr_accuracy.py` 12/12 확인 필수
+1. 변경 후 `python test_ocr_accuracy.py` 회귀 테스트로 baseline(현재 11/12) 대비 회귀 없는지 반드시 확인
 2. `best.pt`, `plate_ocr_crnn.pth` 모델 파일 수정 금지
 3. `plate_engine_pro.py` 수정 시 regression 주의
