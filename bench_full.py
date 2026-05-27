@@ -1,159 +1,207 @@
 # -*- coding: utf-8 -*-
-"""hiway.mp4 300-frame: FPS + profiling + 인식 번호판 목록"""
-import sys, os, io, time, re
+"""bench_full — hiway.mp4 N-frame: FPS + OCR 경로 분포 + 인식 번호판 목록.
+
+bench_fps 보다 한 단계 깊은 가시성:
+  - OCR fast-path / fallback / early-return 비율
+  - fallback 평균 지연시간 + wall-clock 점유율
+  - 인식된 번호판 unique 목록 + 최고 confidence + 등장 프레임 범위
+"""
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import sys
+import time
 from collections import defaultdict
+from typing import Any, Dict, List
 
-if sys.platform == "win32":
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+from bench_common import (
+    HANGUL_PATTERN,
+    RESULT_BAR,
+    OcrStats,
+    build_arg_parser,
+    configure_utf8_stdout,
+    fix_cwd_and_path,
+    format_summary_line,
+    open_video,
+    patch_run_ocr,
+    percent_of_wall,
+    silence_engine_logs,
+)
 
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ".")
+# ── 파일별 상수 ──
+PROGRESS_INTERVAL: int = 100
+PLATE_COLUMN_WIDTH: int = 20
 
-import cv2
-import numpy as np
-import plate_engine_pro as pep
 
-# ── Counters ──
-S = {"ocr": 0, "fast": 0, "fallback": 0, "early": 0, "fb_ms": []}
+# ── Plate aggregation ────────────────────────────────────────────────────
+def _empty_plate_record() -> Dict[str, Any]:
+    return {"count": 0, "max_conf": 0.0, "frames": []}
 
-_orig_run_ocr = pep.PlateEnginePro._run_ocr
 
-def _instrumented(self, engine_name, engine, image):
-    S["ocr"] += 1
-    try:
-        if engine_name == "paddleocr":
-            rec_text, rec_score = "", 0.0
-            try:
-                rec_model = engine.paddlex_pipeline.text_rec_model
-                rec_results = list(rec_model.predict([image]))
-                if rec_results:
-                    res = rec_results[0]
-                    rec_text = res.get('rec_text', '')
-                    rec_score = float(res.get('rec_score', 0))
-                    if rec_text and rec_score >= 0.7 and re.search(r'[가-힣]', rec_text):
-                        S["fast"] += 1
-                        return rec_text, rec_score
-            except Exception:
-                pass
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_arg_parser(
+        "hiway.mp4 N-frame FPS + OCR 경로 분포 + 인식 번호판 목록"
+    )
+    return parser.parse_args(argv)
 
-            if not rec_text or rec_score < 0.3 or len(rec_text.strip()) < 3:
-                S["early"] += 1
-                if rec_text and rec_score > 0:
-                    return rec_text, rec_score
-                return "", 0.0
 
-            S["fallback"] += 1
-            t0 = time.perf_counter()
-            try:
-                for res in engine.predict(image):
-                    texts = res.get('rec_texts', [])
-                    scores = res.get('rec_scores', [])
-                    if texts:
-                        text = "".join(texts)
-                        conf = sum(scores) / len(scores) if scores else 0.0
-                        S["fb_ms"].append((time.perf_counter() - t0) * 1000)
-                        if text:
-                            return text, conf
-            except Exception:
-                pass
-            S["fb_ms"].append((time.perf_counter() - t0) * 1000)
-            if rec_text:
-                return rec_text, rec_score
-    except Exception:
-        pass
-    return "", 0.0
-
-pep.PlateEnginePro._run_ocr = _instrumented
-
-# ── Run ──
-VIDEO = r"C:/Users/jomg2/OneDrive/바탕 화면/movie/hiway.mp4"
-MAX_FRAMES = 300
-
-def main():
+def run_benchmark(
+    video_path: str,
+    max_frames: int,
+    camera_id: str,
+    stats: OcrStats,
+) -> Dict[str, Any]:
+    """엔진을 실행하고 (frames, elapsed, plates_seen) 을 반환."""
     from plate_engine_pro import PlateEnginePro
-    cap = cv2.VideoCapture(VIDEO)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open {VIDEO}")
-        return
 
     engine = PlateEnginePro()
-
-    # suppress noisy debug prints
-    import builtins
-    _print = builtins.print
-    def quiet(*a, **kw):
-        msg = str(a[0]) if a else ""
-        if msg.startswith(("[OCR-", "[2STAGE", "[PLATE-", "[FALLBACK")):
-            return
-        _print(*a, **kw)
-    builtins.print = quiet
-
-    # Track all recognized plates
-    plates_seen = defaultdict(lambda: {"count": 0, "max_conf": 0.0, "frames": []})
-
-    _print(f"=== Benchmark: {MAX_FRAMES} frames ===", flush=True)
+    plates_seen: Dict[str, Dict[str, Any]] = defaultdict(_empty_plate_record)
     count = 0
-    t0 = time.perf_counter()
 
-    while count < MAX_FRAMES:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        results = engine.process_frame(frame, "CAM01")
-        count += 1
-        for r in results:
-            p = r["plate"]
-            c = r["confidence"]
-            plates_seen[p]["count"] += 1
-            plates_seen[p]["max_conf"] = max(plates_seen[p]["max_conf"], c)
-            plates_seen[p]["frames"].append(count)
+    with silence_engine_logs() as raw_print, open_video(video_path) as cap:
+        raw_print(f"=== Benchmark: {max_frames} frames ===", flush=True)
+        started = time.perf_counter()
+        while count < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            results = engine.process_frame(frame, camera_id)
+            count += 1
+            for detection in results:
+                plate = detection["plate"]
+                conf = detection["confidence"]
+                record = plates_seen[plate]
+                record["count"] += 1
+                record["max_conf"] = max(record["max_conf"], conf)
+                record["frames"].append(count)
+            if count % PROGRESS_INTERVAL == 0:
+                raw_print(f"  [{count}/{max_frames}] ...", flush=True)
+        elapsed = time.perf_counter() - started
 
-        if count % 100 == 0:
-            _print(f"  [{count}/{MAX_FRAMES}] ...", flush=True)
+    return {
+        "frames": count,
+        "elapsed_s": elapsed,
+        "plates_seen": dict(plates_seen),
+    }
 
-    elapsed = time.perf_counter() - t0
-    cap.release()
-    builtins.print = _print
 
-    fps = count / elapsed
-    total = S["ocr"]
-    fast = S["fast"]
-    fb = S["fallback"]
-    early = S["early"]
-    fb_ms = S["fb_ms"]
+def build_report(run_result: Dict[str, Any], stats: OcrStats) -> Dict[str, Any]:
+    """수치로 떨어지는 결과 딕셔너리 — print/JSON 양쪽에서 재사용."""
+    frames: int = run_result["frames"]
+    elapsed: float = run_result["elapsed_s"]
+    plates_seen: Dict[str, Dict[str, Any]] = run_result["plates_seen"]
+    fps = frames / elapsed if elapsed > 0 else 0.0
 
-    print(f"\n{'='*60}")
-    print(f" Results ({count} frames / {elapsed:.1f}s / {fps:.1f} FPS)")
-    print(f"{'='*60}")
+    total = stats.ocr_calls
+    fb_ms = stats.fallback_ms
+    fb_avg_ms = (sum(fb_ms) / len(fb_ms)) if fb_ms else 0.0
+    fb_total_ms = sum(fb_ms)
+
+    plates_report: List[Dict[str, Any]] = []
+    for plate in sorted(plates_seen, key=lambda p: plates_seen[p]["frames"][0]):
+        info = plates_seen[plate]
+        plates_report.append({
+            "plate": plate,
+            "count": info["count"],
+            "max_conf": info["max_conf"],
+            "has_hangul": bool(HANGUL_PATTERN.search(plate)),
+            "first_frame": info["frames"][0],
+            "last_frame": info["frames"][-1],
+        })
+
+    return {
+        "frames": frames,
+        "elapsed_s": elapsed,
+        "fps": fps,
+        "ocr": {
+            "total": total,
+            "fast_path": stats.fast_path,
+            "fallback": stats.fallback,
+            "early_return": stats.early_return,
+        },
+        "fallback_ms": {
+            "calls": len(fb_ms),
+            "avg": fb_avg_ms,
+            "total": fb_total_ms,
+            "wall_percent": percent_of_wall(fb_total_ms, elapsed),
+        },
+        "plates": plates_report,
+    }
+
+
+def print_report(report: Dict[str, Any]) -> None:
+    frames = report["frames"]
+    elapsed = report["elapsed_s"]
+    ocr = report["ocr"]
+    total = ocr["total"]
+    fb = report["fallback_ms"]
+
+    print(f"\n{RESULT_BAR}")
+    print(f" Results ({format_summary_line(frames, elapsed)})")
+    print(RESULT_BAR)
 
     print(f"\n [1] OCR Path Distribution ({total} calls)")
     if total:
-        print(f"     Fast path (rec-only):  {fast:4d}  ({fast/total*100:5.1f}%)")
-        print(f"     Fallback (predict):    {fb:4d}  ({fb/total*100:5.1f}%)")
-        print(f"     Early return:          {early:4d}  ({early/total*100:5.1f}%)")
+        fast = ocr["fast_path"]
+        fbk = ocr["fallback"]
+        early = ocr["early_return"]
+        print(f"     Fast path (rec-only):  {fast:4d}  ({fast / total * 100:5.1f}%)")
+        print(f"     Fallback (predict):    {fbk:4d}  ({fbk / total * 100:5.1f}%)")
+        print(f"     Early return:          {early:4d}  ({early / total * 100:5.1f}%)")
 
-    print(f"\n [2] Fallback timing:")
-    if fb_ms:
-        print(f"     Avg: {sum(fb_ms)/len(fb_ms):.0f}ms × {len(fb_ms)} calls")
-        print(f"     Total: {sum(fb_ms):.0f}ms ({sum(fb_ms)/elapsed/10:.1f}% of wall)")
+    print("\n [2] Fallback timing:")
+    if fb["calls"]:
+        print(f"     Avg: {fb['avg']:.0f}ms × {fb['calls']} calls")
+        print(f"     Total: {fb['total']:.0f}ms ({fb['wall_percent']:.1f}% of wall)")
     else:
-        print(f"     (0 calls)")
+        print("     (0 calls)")
 
-    print(f"\n [3] Recognized Plates ({len(plates_seen)} unique)")
-    print(f"     {'번호판':<20s} {'횟수':>4s} {'최고conf':>8s} {'한글':>4s}  프레임 범위")
-    print(f"     {'-'*60}")
-    for plate in sorted(plates_seen, key=lambda p: plates_seen[p]["frames"][0]):
-        info = plates_seen[plate]
-        has_kr = "O" if re.search(r'[가-힣]', plate) else "X"
-        frames = info["frames"]
-        frange = f"{frames[0]}-{frames[-1]}" if len(frames) > 1 else str(frames[0])
-        print(f"     {plate:<20s} {info['count']:>4d} {info['max_conf']:>8.3f} {has_kr:>4s}  {frange}")
+    plates = report["plates"]
+    print(f"\n [3] Recognized Plates ({len(plates)} unique)")
+    print(
+        f"     {'번호판':<{PLATE_COLUMN_WIDTH}s} {'횟수':>4s} "
+        f"{'최고conf':>8s} {'한글':>4s}  프레임 범위"
+    )
+    print(f"     {'-' * len(RESULT_BAR)}")
+    for row in plates:
+        has_kr = "O" if row["has_hangul"] else "X"
+        frange = (
+            f"{row['first_frame']}-{row['last_frame']}"
+            if row["first_frame"] != row["last_frame"]
+            else str(row["first_frame"])
+        )
+        print(
+            f"     {row['plate']:<{PLATE_COLUMN_WIDTH}s} "
+            f"{row['count']:>4d} {row['max_conf']:>8.3f} "
+            f"{has_kr:>4s}  {frange}"
+        )
 
-    print(f"{'='*60}")
+    print(RESULT_BAR)
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdout()
+    fix_cwd_and_path()
+    args = parse_args(argv)
+
+    stats = OcrStats()
+    patch_run_ocr(stats)
+
+    try:
+        run_result = run_benchmark(args.video, args.max_frames, args.camera_id, stats)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    report = build_report(run_result, stats)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(report)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

@@ -1,184 +1,193 @@
 # -*- coding: utf-8 -*-
-"""hiway.mp4 300-frame profiling benchmark — instrument without modifying source"""
-import sys, os, io, time, re
+"""bench_profile — hiway.mp4 N-frame: OCR + YOLO 시간 분해 프로파일링.
 
-if sys.platform == "win32":
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+bench_full 보다 한 단계 더 깊은 가시성:
+  - YOLO vehicle(416) / plate(640) 모델별 평균 추론시간
+  - per-frame 시간 분해 (YOLO / Fallback / OCR+기타)
 
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ".")
+소스 코드는 건드리지 않고 monkey-patch 로만 계측한다.
+"""
+from __future__ import annotations
 
-import cv2
-import numpy as np
-import plate_engine_pro as pep
+import argparse
+import json
+import sys
+import time
+from typing import Any, Dict
 
-# ── Counters ──
-S = {
-    "ocr_calls": 0,
-    "fast_path": 0,      # rec-only로 즉시 반환
-    "fallback": 0,        # engine.predict 진입
-    "early_return": 0,    # 빈 결과/저신뢰 조기 반환
-    "fallback_ms": [],
-    "yolo_vehicle_ms": [],
-    "yolo_plate_ms": [],
-}
+from bench_common import (
+    RESULT_BAR,
+    OcrStats,
+    YoloStats,
+    build_arg_parser,
+    configure_utf8_stdout,
+    fix_cwd_and_path,
+    format_summary_line,
+    open_video,
+    patch_run_ocr,
+    patch_yolo_call,
+    percent_of_wall,
+    silence_engine_logs,
+)
 
-# ── Patch _run_ocr: 원본 로직 그대로 + 계측만 추가 ──
-def _instrumented_run_ocr(self, engine_name, engine, image):
-    S["ocr_calls"] += 1
-    try:
-        if engine_name == "paddleocr":
-            # ── Fast path: rec-only ──
-            rec_text, rec_score = "", 0.0
-            try:
-                rec_model = engine.paddlex_pipeline.text_rec_model
-                rec_results = list(rec_model.predict([image]))
-                if rec_results:
-                    res = rec_results[0]
-                    rec_text = res.get('rec_text', '')
-                    rec_score = float(res.get('rec_score', 0))
-                    if rec_text and rec_score >= 0.7 and re.search(r'[가-힣]', rec_text):
-                        S["fast_path"] += 1
-                        return rec_text, rec_score
-            except Exception:
-                pass
+PROGRESS_INTERVAL: int = 100
 
-            if not rec_text or rec_score < 0.3 or len(rec_text.strip()) < 3:
-                S["early_return"] += 1
-                if rec_text and rec_score > 0:
-                    return rec_text, rec_score
-                return "", 0.0
 
-            # ── Fallback: engine.predict ──
-            S["fallback"] += 1
-            t0 = time.perf_counter()
-            try:
-                for res in engine.predict(image):
-                    texts = res.get('rec_texts', [])
-                    scores = res.get('rec_scores', [])
-                    if texts:
-                        text = "".join(texts)
-                        conf = sum(scores) / len(scores) if scores else 0.0
-                        S["fallback_ms"].append((time.perf_counter() - t0) * 1000)
-                        if text:
-                            return text, conf
-            except Exception:
-                pass
-            S["fallback_ms"].append((time.perf_counter() - t0) * 1000)
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_arg_parser(
+        "hiway.mp4 N-frame OCR + YOLO 시간 분해 프로파일링"
+    )
+    return parser.parse_args(argv)
 
-            if rec_text:
-                return rec_text, rec_score
-    except Exception:
-        pass
-    return "", 0.0
 
-pep.PlateEnginePro._run_ocr = _instrumented_run_ocr
-
-# ── Patch YOLO __call__ ──
-from ultralytics import YOLO as _YOLO
-_orig_call = _YOLO.__call__
-
-def _timed_call(self, *args, **kwargs):
-    t0 = time.perf_counter()
-    result = _orig_call(self, *args, **kwargs)
-    ms = (time.perf_counter() - t0) * 1000
-    imgsz = kwargs.get("imgsz", 640)
-    if imgsz == 416:
-        S["yolo_vehicle_ms"].append(ms)
-    else:
-        S["yolo_plate_ms"].append(ms)
-    return result
-
-_YOLO.__call__ = _timed_call
-
-# ── Run ──
-VIDEO = r"C:/Users/jomg2/OneDrive/바탕 화면/movie/hiway.mp4"
-MAX_FRAMES = 300
-
-def main():
+def run_benchmark(
+    video_path: str, max_frames: int, camera_id: str
+) -> Dict[str, Any]:
+    """엔진 가동 후 (frames, elapsed_s) 반환. 계측은 stats 객체에 누적."""
     from plate_engine_pro import PlateEnginePro
-    cap = cv2.VideoCapture(VIDEO)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open {VIDEO}")
-        return
 
     engine = PlateEnginePro()
-
-    # suppress debug prints
-    import builtins
-    _print = builtins.print
-    def quiet_print(*a, **kw):
-        msg = str(a[0]) if a else ""
-        if msg.startswith(("[OCR-", "[2STAGE", "[PLATE-", "[FALLBACK")):
-            return
-        _print(*a, **kw)
-    builtins.print = quiet_print
-
-    _print(f"=== Profiling: {MAX_FRAMES} frames ===", flush=True)
-
     count = 0
-    t0 = time.perf_counter()
-    while count < MAX_FRAMES:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        engine.process_frame(frame, "CAM01")
-        count += 1
-        if count % 100 == 0:
-            _print(f"  [{count}/{MAX_FRAMES}] ...", flush=True)
 
-    elapsed = time.perf_counter() - t0
-    cap.release()
-    builtins.print = _print
+    with silence_engine_logs() as raw_print, open_video(video_path) as cap:
+        raw_print(f"=== Profiling: {max_frames} frames ===", flush=True)
+        started = time.perf_counter()
+        while count < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            engine.process_frame(frame, camera_id)
+            count += 1
+            if count % PROGRESS_INTERVAL == 0:
+                raw_print(f"  [{count}/{max_frames}] ...", flush=True)
+        elapsed = time.perf_counter() - started
 
-    fps = count / elapsed
-    total = S["ocr_calls"]
-    fast = S["fast_path"]
-    fb = S["fallback"]
-    early = S["early_return"]
-    fb_ms = S["fallback_ms"]
-    yv = S["yolo_vehicle_ms"]
-    yp = S["yolo_plate_ms"]
+    return {"frames": count, "elapsed_s": elapsed}
 
-    print(f"\n{'='*60}")
-    print(f" Profiling Results  ({count} frames / {elapsed:.1f}s / {fps:.1f} FPS)")
-    print(f"{'='*60}")
 
-    print(f"\n 1. _run_ocr 호출 합계:    {total}")
-    if total:
-        print(f"    Fast path (rec-only):  {fast:4d}  ({fast/total*100:5.1f}%)")
-        print(f"    Fallback (predict):    {fb:4d}  ({fb/total*100:5.1f}%)")
-        print(f"    Early return (empty):  {early:4d}  ({early/total*100:5.1f}%)")
+def build_report(
+    run_result: Dict[str, Any], ocr: OcrStats, yolo: YoloStats
+) -> Dict[str, Any]:
+    frames: int = run_result["frames"]
+    elapsed: float = run_result["elapsed_s"]
+    fps = frames / elapsed if elapsed > 0 else 0.0
 
-    print(f"\n 2. Fallback 소요시간:")
-    if fb_ms:
-        print(f"    평균: {sum(fb_ms)/len(fb_ms):.0f}ms")
-        print(f"    총합: {sum(fb_ms):.0f}ms  ({sum(fb_ms)/elapsed/10:.1f}% of wall time)")
+    fb_ms_total = sum(ocr.fallback_ms)
+    yolo_vehicle_total = sum(yolo.vehicle_ms)
+    yolo_plate_total = sum(yolo.plate_ms)
+    yolo_total = yolo_vehicle_total + yolo_plate_total
+    other_total_ms = max(0.0, elapsed * 1000 - yolo_total - fb_ms_total)
+
+    return {
+        "frames": frames,
+        "elapsed_s": elapsed,
+        "fps": fps,
+        "ocr": {
+            "calls": ocr.ocr_calls,
+            "fast_path": ocr.fast_path,
+            "fallback": ocr.fallback,
+            "early_return": ocr.early_return,
+        },
+        "fallback_ms": {
+            "calls": len(ocr.fallback_ms),
+            "avg": (sum(ocr.fallback_ms) / len(ocr.fallback_ms))
+                    if ocr.fallback_ms else 0.0,
+            "total": fb_ms_total,
+            "wall_percent": percent_of_wall(fb_ms_total, elapsed),
+        },
+        "yolo": {
+            "vehicle_calls": len(yolo.vehicle_ms),
+            "vehicle_avg_ms": (yolo_vehicle_total / len(yolo.vehicle_ms))
+                              if yolo.vehicle_ms else 0.0,
+            "plate_calls": len(yolo.plate_ms),
+            "plate_avg_ms": (yolo_plate_total / len(yolo.plate_ms))
+                            if yolo.plate_ms else 0.0,
+            "total_ms": yolo_total,
+            "per_frame_ms": (yolo_total / frames) if frames else 0.0,
+            "wall_percent": percent_of_wall(yolo_total, elapsed),
+        },
+        "decomposition_ms_per_frame": {
+            "yolo": (yolo_total / frames) if frames else 0.0,
+            "fallback": (fb_ms_total / frames) if frames else 0.0,
+            "other": (other_total_ms / frames) if frames else 0.0,
+        },
+    }
+
+
+def print_report(report: Dict[str, Any]) -> None:
+    frames = report["frames"]
+    elapsed = report["elapsed_s"]
+    ocr = report["ocr"]
+    fb = report["fallback_ms"]
+    yolo = report["yolo"]
+    decomp = report["decomposition_ms_per_frame"]
+    total_calls = ocr["calls"]
+
+    print(f"\n{RESULT_BAR}")
+    print(f" Profiling Results  ({format_summary_line(frames, elapsed)})")
+    print(RESULT_BAR)
+
+    print(f"\n 1. _run_ocr 호출 합계:    {total_calls}")
+    if total_calls:
+        fast = ocr["fast_path"]
+        fbk = ocr["fallback"]
+        early = ocr["early_return"]
+        print(f"    Fast path (rec-only):  {fast:4d}  ({fast / total_calls * 100:5.1f}%)")
+        print(f"    Fallback (predict):    {fbk:4d}  ({fbk / total_calls * 100:5.1f}%)")
+        print(f"    Early return (empty):  {early:4d}  ({early / total_calls * 100:5.1f}%)")
+
+    print("\n 2. Fallback 소요시간:")
+    if fb["calls"]:
+        print(f"    평균: {fb['avg']:.0f}ms")
+        print(f"    총합: {fb['total']:.0f}ms  ({fb['wall_percent']:.1f}% of wall time)")
     else:
-        print(f"    (0 calls)")
+        print("    (0 calls)")
 
-    print(f"\n 3. YOLO 소요시간:")
-    if yv:
-        print(f"    yolov8n (vehicle, 416):  {sum(yv)/len(yv):.1f}ms avg × {len(yv)} calls")
-    if yp:
-        print(f"    best.pt (plate, 640):    {sum(yp)/len(yp):.1f}ms avg × {len(yp)} calls")
-    if yv and yp:
-        combo = sum(yv) + sum(yp)
-        print(f"    YOLO 합계/프레임:        {combo/count:.1f}ms avg")
-        print(f"    YOLO 총합:              {combo:.0f}ms  ({combo/elapsed/10:.1f}% of wall time)")
+    print("\n 3. YOLO 소요시간:")
+    if yolo["vehicle_calls"]:
+        print(
+            f"    yolov8n (vehicle, 416):  "
+            f"{yolo['vehicle_avg_ms']:.1f}ms avg × {yolo['vehicle_calls']} calls"
+        )
+    if yolo["plate_calls"]:
+        print(
+            f"    best.pt (plate, 640):    "
+            f"{yolo['plate_avg_ms']:.1f}ms avg × {yolo['plate_calls']} calls"
+        )
+    if yolo["vehicle_calls"] and yolo["plate_calls"]:
+        print(f"    YOLO 합계/프레임:        {yolo['per_frame_ms']:.1f}ms avg")
+        print(f"    YOLO 총합:              {yolo['total_ms']:.0f}ms  ({yolo['wall_percent']:.1f}% of wall time)")
 
-    print(f"\n 4. 시간 분해 (per frame):")
-    yolo_t = sum(yv) + sum(yp)
-    fb_t = sum(fb_ms)
-    other_t = elapsed * 1000 - yolo_t - fb_t
-    print(f"    YOLO:       {yolo_t/count:6.1f}ms  ({yolo_t/elapsed/10:5.1f}%)")
-    print(f"    Fallback:   {fb_t/count:6.1f}ms  ({fb_t/elapsed/10:5.1f}%)")
-    print(f"    OCR+기타:   {other_t/count:6.1f}ms  ({other_t/elapsed/10:5.1f}%)")
-    print(f"{'='*60}")
+    print("\n 4. 시간 분해 (per frame):")
+    print(f"    YOLO:       {decomp['yolo']:6.1f}ms  ({percent_of_wall(decomp['yolo'] * frames, elapsed):5.1f}%)")
+    print(f"    Fallback:   {decomp['fallback']:6.1f}ms  ({percent_of_wall(decomp['fallback'] * frames, elapsed):5.1f}%)")
+    print(f"    OCR+기타:   {decomp['other']:6.1f}ms  ({percent_of_wall(decomp['other'] * frames, elapsed):5.1f}%)")
+    print(RESULT_BAR)
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdout()
+    fix_cwd_and_path()
+    args = parse_args(argv)
+
+    ocr_stats = OcrStats()
+    yolo_stats = YoloStats()
+    patch_run_ocr(ocr_stats)
+    patch_yolo_call(yolo_stats)
+
+    try:
+        run_result = run_benchmark(args.video, args.max_frames, args.camera_id)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    report = build_report(run_result, ocr_stats, yolo_stats)
+    if args.json:
+        print(json.dumps(report, ensure_ascii=False, indent=2))
+    else:
+        print_report(report)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

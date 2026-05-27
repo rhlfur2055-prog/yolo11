@@ -1,56 +1,98 @@
 # -*- coding: utf-8 -*-
-"""hiway.mp4 300-frame FPS benchmark (headless)"""
-import sys, os, time, io
+"""bench_fps — hiway.mp4 N-frame FPS 벤치마크 (headless).
 
-if sys.platform == "win32":
-    try:
-        sys.stdout = io.TextIOWrapper(sys.stdout.buffer, encoding="utf-8", errors="replace")
-        sys.stderr = io.TextIOWrapper(sys.stderr.buffer, encoding="utf-8", errors="replace")
-    except Exception:
-        pass
+플레이트 엔진 풀 파이프라인을 N프레임 돌려 평균 FPS / ms/frame 만 리포트.
+가장 가벼운 회귀 가드용.
+"""
+from __future__ import annotations
 
-os.chdir(os.path.dirname(os.path.abspath(__file__)))
-sys.path.insert(0, ".")
+import argparse
+import json
+import sys
+import time
+from typing import Any, Dict
 
-import cv2
-from plate_engine_pro import PlateEnginePro
+from bench_common import (
+    PROGRESS_INTERVAL,
+    RESULT_BAR,
+    build_arg_parser,
+    configure_utf8_stdout,
+    fix_cwd_and_path,
+    open_video,
+)
 
-VIDEO = r"C:/Users/jomg2/OneDrive/바탕 화면/movie/hiway.mp4"
-MAX_FRAMES = 300
 
-def main():
-    cap = cv2.VideoCapture(VIDEO)
-    if not cap.isOpened():
-        print(f"[ERROR] Cannot open {VIDEO}")
-        return
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
+    parser = build_arg_parser("hiway.mp4 N-frame FPS 벤치마크 (headless)")
+    return parser.parse_args(argv)
+
+
+def run_benchmark(
+    video_path: str, max_frames: int, camera_id: str
+) -> Dict[str, Any]:
+    """비디오 max_frames 만큼 process_frame 호출, FPS 계산."""
+    # 헤비 의존성은 patch/세팅 끝난 뒤에 import
+    from plate_engine_pro import PlateEnginePro
 
     engine = PlateEnginePro()
-    print(f"=== FPS Benchmark: {MAX_FRAMES} frames ===", flush=True)
+    print(f"=== FPS Benchmark: {max_frames} frames ===", flush=True)
 
     frame_count = 0
-    t0 = time.perf_counter()
+    started = time.perf_counter()
 
-    while frame_count < MAX_FRAMES:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        # Run the full pipeline (headless, no display)
-        engine.process_frame(frame, "CAM01")
-        frame_count += 1
-        if frame_count % 50 == 0:
-            elapsed = time.perf_counter() - t0
-            fps = frame_count / elapsed
-            print(f"  [{frame_count}/{MAX_FRAMES}] {fps:.1f} FPS ({elapsed:.1f}s)", flush=True)
+    with open_video(video_path) as cap:
+        while frame_count < max_frames:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            engine.process_frame(frame, camera_id)
+            frame_count += 1
+            if frame_count % PROGRESS_INTERVAL == 0:
+                elapsed = time.perf_counter() - started
+                fps = frame_count / elapsed
+                print(
+                    f"  [{frame_count}/{max_frames}] "
+                    f"{fps:.1f} FPS ({elapsed:.1f}s)",
+                    flush=True,
+                )
 
-    elapsed = time.perf_counter() - t0
-    cap.release()
+    elapsed = time.perf_counter() - started
+    return {
+        "frames": frame_count,
+        "elapsed_s": elapsed,
+        "fps": frame_count / elapsed if elapsed > 0 else 0.0,
+        "ms_per_frame": (elapsed / frame_count * 1000) if frame_count else 0.0,
+    }
 
-    fps = frame_count / elapsed
-    print(f"\n=== Result ===")
-    print(f"  Frames: {frame_count}")
-    print(f"  Time:   {elapsed:.1f}s")
-    print(f"  FPS:    {fps:.1f}")
-    print(f"  ms/frame: {elapsed/frame_count*1000:.0f}")
+
+def print_result(result: Dict[str, Any]) -> None:
+    print(f"\n{RESULT_BAR}")
+    print(" Result")
+    print(RESULT_BAR)
+    print(f"  Frames:   {result['frames']}")
+    print(f"  Time:     {result['elapsed_s']:.1f}s")
+    print(f"  FPS:      {result['fps']:.1f}")
+    print(f"  ms/frame: {result['ms_per_frame']:.0f}")
+    print(RESULT_BAR)
+
+
+def main(argv: list[str] | None = None) -> int:
+    configure_utf8_stdout()
+    fix_cwd_and_path()
+    args = parse_args(argv)
+
+    try:
+        result = run_benchmark(args.video, args.max_frames, args.camera_id)
+    except RuntimeError as exc:
+        print(f"[ERROR] {exc}")
+        return 1
+
+    if args.json:
+        print(json.dumps(result, ensure_ascii=False, indent=2))
+    else:
+        print_result(result)
+    return 0
+
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
