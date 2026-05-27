@@ -30,12 +30,12 @@ from bench_common import (
     silence_engine_logs,
 )
 
-# ── 파일별 상수 ──
+# 파일별 상수
 PROGRESS_INTERVAL: int = 100
 PLATE_COLUMN_WIDTH: int = 20
 
 
-# ── Plate aggregation ────────────────────────────────────────────────────
+# Plate aggregation
 def _empty_plate_record() -> Dict[str, Any]:
     return {"count": 0, "max_conf": 0.0, "frames": []}
 

@@ -29,17 +29,13 @@ from typing import Any, Final, Optional
 
 import numpy as np
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 상수
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 QUEUE_POLL_TIMEOUT_SEC: Final[float] = 0.5  # detection_queue.get() 대기
 DEFAULT_CAMERA_ID: Final[str] = "CAM01"     # 엔진 호출 시 카메라 식별자
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 결과 포맷 변환
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def _pro_results_to_gui_format(
     pro_results: list[dict[str, Any]],
@@ -71,7 +67,7 @@ def _pro_results_to_gui_format(
             "is_valid_plate": bool(plate_text),
             "plate_image": plate_img,
             "pattern_score": r.get("confidence", 0),
-            # ── 강화 필드 (PlateEnginePro → GUI 전달) ──
+            # 강화 필드 (PlateEnginePro → GUI 전달)
             "confidence_level": r.get("confidence_level", ""),
             "plate_type": r.get("plate_type", ""),
             "vehicle_type": r.get("vehicle_type", ""),
@@ -80,9 +76,7 @@ def _pro_results_to_gui_format(
     return gui_results
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DetectionWorker
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class DetectionWorker(threading.Thread):
     """PlateRecognizer 또는 PlateEnginePro로 번호판 인식.

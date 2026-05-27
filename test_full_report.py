@@ -101,7 +101,7 @@ def main():
     cap.release()
     elapsed_total = time.time() - t_start
 
-    # ── 결과 출력 ──
+    # 결과 출력
     print()
     print("-" * 70)
     print(f"  처리: {processed}프레임 / 총 {frame_idx}프레임 ({SAMPLE}프레임 간격)")

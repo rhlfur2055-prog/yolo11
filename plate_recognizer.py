@@ -22,7 +22,7 @@ re-export하므로 기존 `from plate_recognition_4k import PlateRecognizer` 사
 
 from __future__ import annotations
 
-# ── stdlib ─────────────────────────────────────────────────
+# stdlib
 import argparse
 import json
 import os
@@ -31,11 +31,11 @@ import sys
 import time
 from typing import Any, Optional
 
-# ── third-party ────────────────────────────────────────────
+# third-party
 import cv2
 import numpy as np
 
-# ── local: config + 헬퍼 라이브러리(plate_recognition_4k) ────────
+# local: config + 헬퍼 라이브러리(plate_recognition_4k)
 from config import DisplayConfig, OCRConfig, PathConfig, ThresholdConfig
 from plate_recognition_4k import (
     # 상태 머신 & 직렬화
@@ -84,9 +84,7 @@ if sys.platform == "win32":
 HF_MODEL_VARIANTS: dict[str, str] = {k: HF_PLATE_FILE for k in ("n", "s", "m", "l", "x")}
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PlateRecognizer 클래스 (이하 plate_recognition_4k.py L654-L2675 원본 이관)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class PlateRecognizer:
     """
@@ -158,7 +156,7 @@ class PlateRecognizer:
         self._load_models(model_path)
         self._init_ocr()
 
-    # ── ROI 설정/검사 ─────────────────────────────────────
+    # ROI 설정/검사
     def set_roi_polygon(self, pts_norm: list[tuple[float, float]] | None) -> None:
         """
         ROI 다각형을 [0,1] 정규화 좌표로 설정. None이면 ROI 비활성화.
@@ -192,7 +190,7 @@ class PlateRecognizer:
         cy = (y1 + y2) / 2.0 / max(1, frame_h)
         return self._point_in_polygon(cx, cy, self.roi_polygon_norm)
 
-    # ── 모델 초기화 ──────────────────────────────────────
+    # 모델 초기화
 
     def _load_models(self, model_path: Optional[str] = None) -> None:
         """
@@ -376,7 +374,7 @@ class PlateRecognizer:
         except Exception as e:
             print(f"  [OCR] Tesseract 초기화 실패: {e}")
 
-    # ── 해상도 전략 ─────────────────────────────────────
+    # 해상도 전략
 
     def _determine_strategy(self, w: int, h: int) -> tuple[int, bool]:
         """프레임 해상도 기반 추론 전략 결정"""
@@ -392,7 +390,7 @@ class PlateRecognizer:
             else:
                 return 1920, False
 
-    # ── 탐지 엔진 ────────────────────────────────────────
+    # 탐지 엔진
 
     def _detect_with_sahi(self, frame: np.ndarray) -> list[dict]:
         """SAHI 슬라이스 추론 (4K 프레임)"""
@@ -554,7 +552,7 @@ class PlateRecognizer:
         else:
             return self._detect_direct(frame)
 
-    # ── 크롭 & 전처리 ───────────────────────────────────
+    # 크롭 & 전처리
 
     def _crop_region(
         self,
@@ -952,7 +950,7 @@ class PlateRecognizer:
         except Exception:
             return "", 0.0
 
-    # ── OCR ──────────────────────────────────────────────
+    # OCR
 
     def _ocr_plate(self, img: np.ndarray, use_allowlist: bool = False) -> tuple[str, float]:
         """
@@ -1082,7 +1080,7 @@ class PlateRecognizer:
         """영문+숫자만 남기고 나머지 제거."""
         return re.sub(r"[^A-Z0-9]", "", text.upper())
 
-    # ── 국가별 번호판 패턴 ──
+    # 국가별 번호판 패턴
     _RE_CN_PLATE = re.compile(
         r"^[\u4e00-\u9fff][A-Z][A-Z0-9]{5,6}$"  # 京A12345, 沪B9C888
     )
@@ -1270,7 +1268,7 @@ class PlateRecognizer:
         else:
             ocr_img = plate_img
 
-        # ── Tier1: PaddleOCR 원본만 먼저 (conf≥0.8이면 clahe/sharpen 스킵) ──
+        # Tier1: PaddleOCR 원본만 먼저 (conf≥0.8이면 clahe/sharpen 스킵)
         _tier1_high_conf = False
         entries = self._run_paddle_ocr(ocr_img)
         if entries:
@@ -1292,7 +1290,7 @@ class PlateRecognizer:
             # 강화 전처리 이미지 (개선3: 다중 전처리) — Tier1 통과 못한 경우만
             enhanced_img = self._preprocess_plate_enhanced(plate_img)
 
-            # ── 2. PaddleOCR 강화 전처리 ──
+            # 2. PaddleOCR 강화 전처리
             entries = self._run_paddle_ocr(enhanced_img)
             if entries:
                 text, conf = self._reassemble_plate(entries)
@@ -1300,7 +1298,7 @@ class PlateRecognizer:
                 if result[0] and len(result[0]) >= 4:
                     candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
 
-            # ── 3. EasyOCR 원본 (보조) ──
+            # 3. EasyOCR 원본 (보조)
             entries = self._run_easy_ocr(ocr_img)
             if entries:
                 text, conf = self._reassemble_plate(entries)
@@ -1308,7 +1306,7 @@ class PlateRecognizer:
                 if result[0] and len(result[0]) >= 4:
                     candidates.append((result[0], result[1], result[2], result[3]))
 
-            # ── 4. EasyOCR 강화 전처리 ──
+            # 4. EasyOCR 강화 전처리
             entries = self._run_easy_ocr(enhanced_img)
             if entries:
                 text, conf = self._reassemble_plate(entries)
@@ -1316,7 +1314,7 @@ class PlateRecognizer:
                 if result[0] and len(result[0]) >= 4:
                     candidates.append((result[0], result[1] * 0.95, result[2], result[3] * 0.98))
 
-        # ── 5. 소프트 전처리 PaddleOCR 재시도 (모두 실패 시) ──
+        # 5. 소프트 전처리 PaddleOCR 재시도 (모두 실패 시)
         if not candidates and self.paddle_reader is not None:
             try:
                 soft = self._preprocess_plate_soft(plate_img)
@@ -1471,7 +1469,7 @@ class PlateRecognizer:
         # 모두 다른 경우: 최고 score 채택
         return max(candidates, key=lambda c: c[3])
 
-    # ── 선명도 측정 ──────────────────────────────────────
+    # 선명도 측정
 
     @staticmethod
     def _levenshtein(s1: str, s2: str) -> int:
@@ -1609,7 +1607,7 @@ class PlateRecognizer:
         except ImportError:
             return False
 
-    # ── bbox 기반 OCR 스킵 캐시 ─────────────────────────
+    # bbox 기반 OCR 스킵 캐시
 
     @staticmethod
     def _bbox_iou(a: list[float], b: list[float]) -> float:
@@ -1647,7 +1645,7 @@ class PlateRecognizer:
         if len(self._bbox_cache) > self._bbox_cache_max:
             self._bbox_cache = self._bbox_cache[-self._bbox_cache_max:]
 
-    # ── Detection Log OCR (화면 내 텍스트 번호판) ──────────
+    # Detection Log OCR (화면 내 텍스트 번호판)
 
     _LOG_PLATE_RE = re.compile(r'\d{2,3}[가-힣]\d{3,4}')
 
@@ -1725,7 +1723,7 @@ class PlateRecognizer:
 
         return results
 
-    # ── 프레임 처리 (핵심) ────────────────────────────────
+    # 프레임 처리 (핵심)
 
     def process_frame(self, frame: np.ndarray, frame_idx: int) -> list[dict]:
         """
@@ -1907,7 +1905,7 @@ class PlateRecognizer:
 
         return filtered
 
-    # ── 상태 머신 ─────────────────────────────────────────
+    # 상태 머신
 
     def _reset_state_machine(self) -> None:
         self.state = CaptureState.SCANNING
@@ -1916,7 +1914,7 @@ class PlateRecognizer:
         self._imgsz = None
         self._use_sahi_for_video = False
 
-    # ── 비디오 전체 처리 ──────────────────────────────────
+    # 비디오 전체 처리
 
     def process_video(
         self,
@@ -2063,7 +2061,7 @@ class PlateRecognizer:
 
         return best_results
 
-    # ── 결과 저장 ────────────────────────────────────────
+    # 결과 저장
 
     def _save_results(self, results: list[dict], output_dir: str) -> None:
         """탐지 결과를 이미지 + JSON으로 저장"""
@@ -2110,9 +2108,7 @@ class PlateRecognizer:
                 f"방식={s['detection_method']})"
             )
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # CLI
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def main() -> None:
     parser = argparse.ArgumentParser(

@@ -1,8 +1,6 @@
 ﻿
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # YOLO11 통합 모델 로더 (Ultralytics 최신 모델)
 # YOLO11 특징: NMS-free 엔드투엔드 / YOLO11 대비 +5% 정확도
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 import os as _os
 _os.environ["FLAGS_use_mkldnn"] = "0"
 
@@ -15,7 +13,7 @@ from plate_recognition_4k import (
     _DIGIT_CORRECTION,
 )
 
-# ── 분리된 모듈 (refactor) ─────────────────────────────────────
+# 분리된 모듈 (refactor)
 # 단일 책임 원칙(SRP) 적용 — God class를 도메인별로 분할.
 # plate_gui.py는 PlateEnginePro/PlateEngineFast/process_frame_unified만 import하므로
 # 아래 재-export는 기존 동작과 호환된다.
@@ -31,7 +29,6 @@ def _load_best_model():
     best = PathConfig.find_best_model()
     print(f"[YOLO11] 모델 로드: {best}")
     return YOLO(best)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # -*- coding: utf-8 -*-
 # ============================================
 # plate_engine_pro.py
@@ -48,7 +45,7 @@ from pathlib import Path
 from collections import defaultdict, deque
 
 
-# ── 분리된 모듈 (refactor) ─────────────────────────────────────
+# 분리된 모듈 (refactor)
 # draw_korean_text + 캐시는 ui_text.py로 이관 (SRP).
 # 본 파일 내 호출처(L2519 부근)는 아래 re-export 덕분에 그대로 동작한다.
 from ui_text import draw_korean_text  # noqa: F401
@@ -58,7 +55,7 @@ import numpy as np
 from PIL import Image, ImageDraw, ImageFont
 from ultralytics import YOLO
 
-# ── OCR 엔진 임포트 ──
+# OCR 엔진 임포트
 try:
     import easyocr
     HAS_EASYOCR = True
@@ -101,12 +98,10 @@ def normalize(text: str) -> str:
     return ''.join(result)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # ImagePreprocessor → preprocessor.py
 # PlateValidator    → validator.py
 # PlateDatabase     → db.py
 # (refactor: SRP 분리 — 위 "분리된 모듈 (refactor)" import 블록 참조)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 
 class PlateEnginePro:
@@ -130,11 +125,11 @@ class PlateEnginePro:
         self.model = YOLO(str(model_path))
         print(f"[엔진] 번호판 YOLO 모델 로드: {model_path}")
 
-        # ── 2-Stage: 차량 탐지 모델 (yolov8n.pt) ──
+        # 2-Stage: 차량 탐지 모델 (yolov8n.pt)
         self.model_vehicle = YOLO('yolov8n.pt')
         print("[엔진] 차량 YOLO 모델 로드: yolov8n.pt")
 
-        # ── Phase1 Fast loop 전용 번호판 모델 (별도 인스턴스 → 스레드 안전) ──
+        # Phase1 Fast loop 전용 번호판 모델 (별도 인스턴스 → 스레드 안전)
         self.model_fast = YOLO(str(model_path))
         print(f"[엔진] Phase1 Fast 번호판 모델 로드: {model_path}")
 
@@ -158,7 +153,7 @@ class PlateEnginePro:
                 print(f"[엔진] EasyOCR 폴백 실패: {e}")
         print(f"[엔진] OCR 엔진: {list(self.ocr_engines.keys())}")
 
-        # ── CRNN 한글 검증 모델 로드 (CrnnVerifier 책임 클래스) ──
+        # CRNN 한글 검증 모델 로드 (CrnnVerifier 책임 클래스)
         # 기존 self._crnn_* 속성은 thin proxy 로 유지 — 외부 호출처 호환.
         _crnn_path = Path(__file__).parent / "plate_ocr_crnn.pth"
         self.crnn_verifier = CrnnVerifier(_crnn_path)
@@ -175,11 +170,11 @@ class PlateEnginePro:
         self._gph_max_digits = 50        # 최대 50개 숫자 패턴 보관
         self._gph_cleanup_interval = 30  # 30프레임마다 정리 실행
         self._gph_last_cleanup = 0       # 마지막 정리 시점
-        # ── 속도 최적화: 프레임 스킵 캐시 ──
+        # 속도 최적화: 프레임 스킵 캐시
         self._frame_skip_interval = 3   # N프레임마다 1번 YOLO 실행 (5→3: 컬러 번호판 연속 감지 개선)
         self._frame_counter = 0
         self._cached_results = None     # 이전 프레임 결과 재사용 (None=첫 프레임은 반드시 처리)
-        # ── OCR 스킵 최적화 (FPS 개선) ──
+        # OCR 스킵 최적화 (FPS 개선)
         # 트랙별: {track_key: {"text": str, "conf": float, "same_count": int,
         #          "frame_since_ocr": int, "last_area": float, "bbox": list}}
         self._ocr_track_cache = {}
@@ -607,7 +602,7 @@ class PlateEnginePro:
         except Exception:
             pass
 
-        # ── 구형 두 줄 번호판 감지 ──
+        # 구형 두 줄 번호판 감지
         # ★ 컬러판(노란/초록)은 대부분 2줄 → threshold 완화 (0.45→0.30)
         extra_crops = []
         roi_nosharp = None
@@ -867,7 +862,7 @@ class PlateEnginePro:
                             for _ in range(weight):
                                 all_candidates.append((final, avg_c))
 
-        # ── 2줄 번호판 보완: 샤프닝 없는 업스케일로 engine.predict 시도 ──
+        # 2줄 번호판 보완: 샤프닝 없는 업스케일로 engine.predict 시도
         if roi_nosharp is not None and not all_candidates:
             for eng_name, eng in self.ocr_engines.items():
                 try:
@@ -1274,9 +1269,9 @@ class PlateEnginePro:
         """
         self.stats["frames_processed"] += 1
 
-        # ── 전역 히스토리 정리 (30프레임마다) ──
+        # 전역 히스토리 정리 (30프레임마다)
         self._cleanup_global_plate_history()
-        # ── 최적화③: 프레임 스킵 (N프레임마다 1번 YOLO, 중간은 캐시 재사용) ──
+        # 최적화③: 프레임 스킵 (N프레임마다 1번 YOLO, 중간은 캐시 재사용)
         self._frame_counter += 1
         if self._frame_counter % self._frame_skip_interval != 1 and self._cached_results is not None:
             # ★ 스킵 프레임에서도 트랙 노화 처리 — Ghost 방지
@@ -1303,11 +1298,9 @@ class PlateEnginePro:
         sy = ch_full / ch_det
         frame_area = cw_det * ch_det
 
-        # ═══════════════════════════════════════════════
         # Stage 1: 차량 탐지 (yolov8n.pt, classes=[2,5,7])
         #   2=car, 5=bus, 7=truck (COCO)
         #   최적화①: imgsz 640→416 (차량은 큰 객체라 충분)
-        # ═══════════════════════════════════════════════
         vehicle_results = self.model_vehicle(frame, conf=0.3, classes=[2, 5, 7],
                                              imgsz=416, verbose=False)
         vehicle_boxes = []
@@ -1320,7 +1313,7 @@ class PlateEnginePro:
         # 면적 큰 순 정렬 (가까운 차량 우선)
         vehicle_boxes.sort(key=lambda v: v[5], reverse=True)
 
-        # ── ROI 필터: 차량 bbox 중심점이 ROI 안에 있는 것만 Stage2로 전달 ──
+        # ROI 필터: 차량 bbox 중심점이 ROI 안에 있는 것만 Stage2로 전달
         if ThresholdConfig.ROI_ENABLED and vehicle_boxes:
             roi_x1 = int(ThresholdConfig.ROI_X1 * cw_det / 1920)
             roi_y1 = int(ThresholdConfig.ROI_Y1 * ch_det / 1080)
@@ -1341,7 +1334,7 @@ class PlateEnginePro:
         seen_this_frame = set()
         seen_track_keys = set()  # ★ 고스트 방지: 이번 프레임에 감지된 트랙 키
 
-        # ── 최적화②: 차량 bbox 면적 ≥ 20% → Stage2 스킵 (가까운 차량 대응) ──
+        # 최적화②: 차량 bbox 면적 ≥ 20% → Stage2 스킵 (가까운 차량 대응)
         if len(vehicle_boxes) >= 1:  # Always use 1-stage direct detection
             # 차량이 프레임 대부분을 차지 → 번호판 직접 탐지 (Stage2 생략)
             vx1, vy1, vx2, vy2, vconf, varea = vehicle_boxes[0]
@@ -1472,7 +1465,7 @@ class PlateEnginePro:
                     self._update_ocr_cache(track_key, plate_bbox, best_text, best_conf, did_ocr=False)
                 else:
                     best_text, best_conf = self._ocr_plate_roi(roi, use_multiframe)
-                    # ── CRNN 한글 검증 + 2줄 번호판 복원 (1회 호출) ──
+                    # CRNN 한글 검증 + 2줄 번호판 복원 (1회 호출)
                     if best_text and re.search(r'[가-힣]', best_text):
                         cmx = int(pw * 0.35)
                         cmy_top = int(ph * 0.50)  # 2줄 상단 포함
@@ -1823,9 +1816,7 @@ class PlateEnginePro:
                         })
 
         elif vehicle_boxes:
-            # ═══════════════════════════════════════════════
             # Stage 2: 각 차량 크롭 → 번호판 탐지 → OCR
-            # ═══════════════════════════════════════════════
             for vx1, vy1, vx2, vy2, vconf, varea in vehicle_boxes:
                 # 차량 bbox를 원본 프레임 좌표로 변환
                 vox1, voy1 = int(vx1 * sx), int(vy1 * sy)
@@ -1974,9 +1965,7 @@ class PlateEnginePro:
                                 "alert_info": alert_info,
                             })
         else:
-            # ═══════════════════════════════════════════════
             # 폴백: 차량 0대 → 기존 1-Stage (번호판 직접 탐지)
-            # ═══════════════════════════════════════════════
             detections = self.model(frame, conf=self.config.DETECT_CONF, verbose=False)
 
             for det in detections[0].boxes:
@@ -2082,7 +2071,7 @@ class PlateEnginePro:
                             "alert_info": alert_info,
                         })
 
-        # ── OCR conf 필터 + 중복 제거 (conf ≥ 0.30으로 완화 — 저해상도/2LINE 결과 보호) ──
+        # OCR conf 필터 + 중복 제거 (conf ≥ 0.30으로 완화 — 저해상도/2LINE 결과 보호)
         _before_filter = len(results)
         results = [r for r in results if r.get("confidence", 0) >= 0.30]
         results = self._deduplicate_results(results)
@@ -2134,7 +2123,7 @@ class PlateEnginePro:
 
         return results
 
-    # ── CRNN 한글 검증 (thin wrappers — 실 구현은 crnn_verifier.CrnnVerifier) ──
+    # CRNN 한글 검증 (thin wrappers — 실 구현은 crnn_verifier.CrnnVerifier)
     def _load_crnn(self):
         """[deprecated] CrnnVerifier 가 __init__ 에서 자동 로드.
 
@@ -2150,7 +2139,7 @@ class PlateEnginePro:
         """PaddleOCR 한글을 CRNN 결과로 교차검증 (CrnnVerifier 위임)."""
         return self.crnn_verifier.verify(paddle_text, roi, crnn_text, crnn_conf)
 
-    # ── CTC 한글 필터: post_op monkey-patch ──
+    # CTC 한글 필터: post_op monkey-patch
     _ctc_patched = False
 
     @classmethod
@@ -2206,11 +2195,11 @@ class PlateEnginePro:
         import re as _re
         try:
             if engine_name == "paddleocr":
-                # ── CTC 마스크 패치 (최초 1회) ──
+                # CTC 마스크 패치 (최초 1회)
                 rec_model = engine.paddlex_pipeline.text_rec_model
                 self._patch_ctc_postop(rec_model.post_op)
 
-                # ── rec-only (기존과 동일, 내부에서 마스킹됨) ──
+                # rec-only (기존과 동일, 내부에서 마스킹됨)
                 rec_text, rec_score = "", 0.0
                 try:
                     rec_results = list(rec_model.predict([image]))
@@ -2228,7 +2217,7 @@ class PlateEnginePro:
                         return rec_text, rec_score
                     return "", 0.0
 
-                # ── Fallback: full det+rec ──
+                # Fallback: full det+rec
                 try:
                     for res in engine.predict(image):
                         texts = res.get('rec_texts', [])

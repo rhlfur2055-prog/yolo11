@@ -17,7 +17,7 @@ plate_recognition_4k.py - 4K 영상 번호판 인식 핵심 모듈 v2.0
 
 from __future__ import annotations
 
-# ── stdlib ─────────────────────────────────────────────────
+# stdlib
 import argparse
 import json
 import os
@@ -27,11 +27,11 @@ import time
 from enum import Enum, auto
 from typing import Any, Optional
 
-# ── third-party ────────────────────────────────────────────
+# third-party
 import cv2
 import numpy as np
 
-# ── local ──────────────────────────────────────────────────
+# local
 from config import DisplayConfig, OCRConfig, PathConfig, ThresholdConfig
 
 # Windows 콘솔 한글 깨짐 방지
@@ -43,9 +43,7 @@ if sys.platform == "win32":
         pass
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # JSON 직렬화 유틸리티 (ndarray 안전 변환)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class NumpyEncoder(json.JSONEncoder):
     """numpy ndarray/scalar 를 안전하게 직렬화하는 JSON 인코더."""
 
@@ -59,9 +57,7 @@ class NumpyEncoder(json.JSONEncoder):
         return super().default(obj)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 기본 설정값
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # -- 모델 설정 (config.py에서 가져옴) --
 HF_PLATE_REPO: str = PathConfig.HF_PLATE_REPO
@@ -118,9 +114,7 @@ KOREAN_PLATE_PATTERNS = OCRConfig.KR_COMPILED_PATTERNS
 INTERNATIONAL_PLATE_PATTERNS = OCRConfig.INTL_COMPILED_PATTERNS
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 상태 머신
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class CaptureState(Enum):
     """
@@ -135,9 +129,7 @@ class CaptureState(Enum):
     CAPTURING = auto()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 모델 다운로드 유틸리티
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def download_plate_model(
     size: str = DEFAULT_PLATE_MODEL_SIZE,
@@ -188,9 +180,7 @@ def download_plate_model(
         return ""
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 한국 번호판 검증
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def validate_korean_plate(text: str) -> tuple[bool, str, float]:
     """
@@ -237,9 +227,7 @@ def validate_korean_plate(text: str) -> tuple[bool, str, float]:
     return False, cleaned, fallback_score
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 한국 번호판 OCR 오인식 보정
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # 신형 번호판: 숫자2-3 + 한글1 + 숫자4  (예: 39가9665)
 # EasyOCR이 한글 자리를 숫자/영문으로 오인식하는 패턴 → 한글 후보 매핑
@@ -326,9 +314,7 @@ def correct_hangul_similarity(text: str) -> str:
     return "".join(result)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 한국 번호판 형식 교정 테이블
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # 번호판에 사용 가능한 한글 (용도별 분류)
 _VALID_PLATE_HANGUL_PRIVATE = set("가나다라마바사아자차카타파하")  # 자가용 (Row 1)
@@ -383,7 +369,7 @@ _HANGUL_PLATE_CORRECTION: dict[str, str] = {
     "혹": "호",
 }
 
-# ── OCR 오인식 한글 교정 확장 (EasyOCR/PaddleOCR 빈번 오인식) ──
+# OCR 오인식 한글 교정 확장 (EasyOCR/PaddleOCR 빈번 오인식)
 # 받침 포함 문자 → 용도 한글. dict 병합으로 흡수 (런타임 merge 루프 제거).
 # ※ 기존 키와 중복되는 항목(곧/볼/룰/줄)은 동일 값이라 생략 — 동작 보존.
 _HANGUL_PLATE_CORRECTION.update({
@@ -458,7 +444,7 @@ def _find_nearest_valid_hangul(ch: str) -> str | None:
     return best_ch if best_dist <= 5 else None
 
 
-# ── 지역명 교정 테이블 (개선4) ──
+# 지역명 교정 테이블 (개선4)
 _REGION_LIST = [
     '서울', '부산', '대구', '인천', '광주', '대전', '울산', '세종',
     '경기', '강원', '충북', '충남', '전북', '전남', '경북', '경남', '제주',
@@ -600,9 +586,7 @@ def validate_plate_format(text: str) -> tuple[str, float]:
     return text, 0.50  # 한글 자리 교정 실패
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # UK/국제 번호판 OCR 오인식 보정
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # OCR에서 자주 혼동되는 문자 쌍 (영문/숫자 구분)
 # 번호판 앞 2자리는 반드시 영문 → 숫자처럼 생긴 영문 복원
@@ -647,9 +631,7 @@ def correct_ocr_uk(text: str) -> str:
     return corrected_p1 + corrected_p2 + corrected_p3
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # PlateRecognizer 폴백 엔진 분리: plate_recognizer.py
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 2,026줄 거대 클래스를 별도 모듈로 캡슐화 (SRP). 본 파일은 한글/번호판 교정
 # 헬퍼 라이브러리로 축소되었다. 기존 import 경로 호환을 위해 PlateRecognizer를
 # PEP 562 모듈-레벨 __getattr__로 lazy 재공개한다 —

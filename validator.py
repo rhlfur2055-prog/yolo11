@@ -35,7 +35,7 @@ class PlateValidator:
       5) validate_plate_format 폴백 (자모 유사도)
     """
 
-    # ── 클래스 상수 (외부 참조 — 이름 유지 필수) ─────────────
+    # 클래스 상수 (외부 참조 — 이름 유지 필수)
     _KR_CONFUSION: dict = _HANGUL_PLATE_CORRECTION
     _COMMERCIAL_CHARS: set = set("비바사아자배하")
     _GOV_PREFIXES_2CHAR: List[str] = [
@@ -60,7 +60,7 @@ class PlateValidator:
         self.min_len: int = ThresholdConfig.PLATE_MIN_LEN
         self.max_len: int = ThresholdConfig.PLATE_MAX_LEN
 
-    # ── 내부 유틸 ─────────────────────────────────────────────
+    # 내부 유틸
     def _normalize_for_validation(self, text: str) -> str:
         """공백/특수문자 제거, OCR 글자 잘림 보정용 정규화."""
         s = re.sub(r"[\s\-\.\,\;\:\'\"]", "", text)
@@ -91,7 +91,7 @@ class PlateValidator:
                     return True, norm
         return False, text
 
-    # ── 공개 API ───────────────────────────────────────────────
+    # 공개 API
     def is_valid_length(self, text: str) -> bool:
         clean = self._normalize_for_validation(text)
         return self.min_len <= len(clean) <= self.max_len

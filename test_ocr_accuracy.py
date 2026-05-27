@@ -27,7 +27,7 @@ from typing import Iterable
 import cv2
 import numpy as np
 
-# ── 상수 ──
+# 상수
 BASE_DIR: Path = Path(__file__).resolve().parent
 IMG_DIR: Path = BASE_DIR / "22"
 DEFAULT_OUTPUT_DIR: Path = BASE_DIR / "test_results"
@@ -61,7 +61,7 @@ logger = logging.getLogger("test_ocr_accuracy")
 sys.path.insert(0, str(BASE_DIR))
 
 
-# ── 데이터 모델 ──
+# 데이터 모델
 @dataclass
 class PerImageResult:
     file: str
@@ -92,7 +92,7 @@ class TestReport:
     failure_cases: list[FailureCase] = field(default_factory=list)
 
 
-# ── 헬퍼 ──
+# 헬퍼
 def extract_ground_truth_from_filename(filename: str) -> str:
     """파일명에서 번호판 GT 추출.
 
@@ -192,7 +192,7 @@ def build_test_cases() -> list[tuple[str, str]]:
     return [(fname, extract_ground_truth_from_filename(fname)) for fname in TEST_FILENAMES]
 
 
-# ── 출력 ──
+# 출력
 def render_table(results: Iterable[PerImageResult]) -> None:
     print("-" * TABLE_WIDTH)
     print(f"{'#':>2}  {'파일명':<28} {'정답':<14} {'OCR결과':<22} {'시간':>7}  판정")
@@ -226,7 +226,7 @@ def save_report(report: TestReport, output_dir: Path) -> Path:
     return path
 
 
-# ── 파이프라인 ──
+# 파이프라인
 def load_engine(verbose: bool):
     """PlateEnginePro 인스턴스 + consecutive_required=1 보정."""
     print("[init] PlateEnginePro 로딩...")
@@ -285,7 +285,7 @@ def evaluate(engine, cases: list[tuple[str, str]], verbose: bool) -> TestReport:
     return report
 
 
-# ── CLI ──
+# CLI
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OCR 정확도 회귀 테스트 (PlateEnginePro 12장 베이스라인)"

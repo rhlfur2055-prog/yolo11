@@ -22,9 +22,7 @@ from typing import Any, Final, Mapping
 
 logger: Final[logging.Logger] = logging.getLogger(__name__)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 1. 환경 자동 감지 (모듈 레벨 상수)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 IS_WINDOWS: Final[bool] = sys.platform.startswith("win")
 IS_LINUX: Final[bool] = sys.platform.startswith("linux")
 IS_MAC: Final[bool] = sys.platform == "darwin"
@@ -33,9 +31,7 @@ BASE_DIR: Final[Path] = Path(__file__).resolve().parent
 USER_HOME: Final[Path] = Path.home()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 2. 경로 설정 (PathConfig)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class PathConfig:
     """모델/데이터/리소스 파일 경로 모음."""
 
@@ -181,9 +177,7 @@ class PathConfig:
         return False
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 3. 감지/인식 임계값 (ThresholdConfig)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ThresholdConfig:
     """YOLO 탐지, OCR 인식, 후처리 단계의 모든 임계값."""
 
@@ -246,9 +240,7 @@ class ThresholdConfig:
     ROI_Y2: int = 1080
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 4. OCR 설정 (OCRConfig)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class OCRConfig:
     """OCR 후처리(혼동 문자 보정, 한국 번호판 형식 검증)에 사용하는 상수."""
 
@@ -321,9 +313,7 @@ class OCRConfig:
     )
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 5. 서버 설정 (ServerConfig)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class ServerConfig:
     """API/WebSocket 서버 바인딩 설정."""
 
@@ -334,9 +324,7 @@ class ServerConfig:
     MAX_STREAM_LOG: int = 100
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 6. 디스플레이 설정 (DisplayConfig)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 class DisplayConfig:
     """GUI / 영상 표시 관련 해상도·타이밍 상수."""
 
@@ -357,9 +345,7 @@ class DisplayConfig:
     DOWNSCALE_TARGET: int = 1920
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 7. 디렉토리 자동 생성
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 _BOOTSTRAP_DIRS: Final[tuple[Path, ...]] = (
     PathConfig.MODEL_DIR,
     PathConfig.UPLOAD_DIR,
@@ -369,9 +355,7 @@ for _dir in _BOOTSTRAP_DIRS:
     _dir.mkdir(parents=True, exist_ok=True)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 8. 모델 워밍업
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 def warmup_model(model: Any, imgsz: int = 640) -> None:
     """YOLO 모델 워밍업 — 더미 프레임 1회 추론으로 첫 프레임 지연 제거."""
     import numpy as np  # 지연 import: config import 시 numpy 의존 회피

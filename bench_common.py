@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from typing import Callable, Iterator, List, Tuple
 
-# ── Constants ─────────────────────────────────────────────────────────────
+# Constants
 DEFAULT_VIDEO: str = r"C:/Users/jomg2/OneDrive/바탕 화면/movie/hiway.mp4"
 DEFAULT_MAX_FRAMES: int = 300
 DEFAULT_CAMERA_ID: str = "CAM01"
@@ -35,7 +35,7 @@ HANGUL_PATTERN: re.Pattern[str] = re.compile(r"[가-힣]")
 YOLO_VEHICLE_IMGSZ: int = 416
 
 
-# ── Boot ──────────────────────────────────────────────────────────────────
+# Boot
 def configure_utf8_stdout() -> None:
     """Windows 콘솔 UTF-8 강제. 한글 출력 깨짐 방지."""
     if sys.platform != "win32":
@@ -60,7 +60,7 @@ def fix_cwd_and_path() -> None:
     sys.path.insert(0, ".")
 
 
-# ── Argparse ──────────────────────────────────────────────────────────────
+# Argparse
 def build_arg_parser(description: str) -> argparse.ArgumentParser:
     """3개 벤치마크에서 공통으로 쓰는 argparse 빌더."""
     parser = argparse.ArgumentParser(
@@ -91,7 +91,7 @@ def build_arg_parser(description: str) -> argparse.ArgumentParser:
     return parser
 
 
-# ── Quiet print ───────────────────────────────────────────────────────────
+# Quiet print
 @contextmanager
 def silence_engine_logs() -> Iterator[Callable[..., None]]:
     """plate_engine_pro 의 [OCR-/[2STAGE/[PLATE-/[FALLBACK 로그 억제.
@@ -113,7 +113,7 @@ def silence_engine_logs() -> Iterator[Callable[..., None]]:
         builtins.print = original
 
 
-# ── Stats container ───────────────────────────────────────────────────────
+# Stats container
 @dataclass
 class OcrStats:
     """_run_ocr 호출을 분기별로 집계."""
@@ -131,7 +131,7 @@ class YoloStats:
     plate_ms: List[float] = field(default_factory=list)
 
 
-# ── Patches ───────────────────────────────────────────────────────────────
+# Patches
 def patch_run_ocr(stats: OcrStats) -> None:
     """plate_engine_pro._run_ocr 를 계측 버전으로 교체.
 
@@ -236,7 +236,7 @@ def patch_yolo_call(stats: YoloStats) -> None:
     YOLO.__call__ = timed  # type: ignore[assignment]
 
 
-# ── Video iteration ───────────────────────────────────────────────────────
+# Video iteration
 @contextmanager
 def open_video(path: str) -> Iterator[object]:
     """cv2.VideoCapture context manager — release 보장."""
@@ -251,7 +251,7 @@ def open_video(path: str) -> Iterator[object]:
         cap.release()
 
 
-# ── Output helpers ────────────────────────────────────────────────────────
+# Output helpers
 def format_summary_line(frames: int, elapsed: float) -> str:
     """공통 결과 헤더 라인."""
     fps = frames / elapsed if elapsed > 0 else 0.0

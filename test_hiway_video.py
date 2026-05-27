@@ -133,7 +133,7 @@ def main():
     cap.release()
     elapsed_total = time.time() - t_start
 
-    # ── 결과 출력 ──
+    # 결과 출력
     print(f"\n{'='*65}")
     print(f"  결과 요약")
     print(f"{'='*65}")
@@ -158,7 +158,7 @@ def main():
         avg_conf = sum(confs)/len(confs) if confs else 0
         print(f"    {plate:20s}  {cnt:3d}회  (평균 conf: {avg_conf:.0%})")
 
-    # ── 판정 ──
+    # 판정
     print(f"\n{'='*65}")
     has_plates = len(all_plates) > 0
     detect_rate = frames_with_plates / max(processed, 1)

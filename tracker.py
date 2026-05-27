@@ -14,9 +14,7 @@ from __future__ import annotations
 from typing import Final
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 매직 넘버 → Final 상수 (PEP 591 스타일)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 # 트랙에 OCR 결과가 있을 때, 마지막 OCR 이후 이 프레임 수 이상 지나면
 # 다른 차량이 같은 위치에 들어온 것으로 판단하고 OCR 결과를 지운다.
@@ -64,7 +62,7 @@ class PlateTracker:
       4. TTL 초과 track → 삭제 (화면에서 사라진 차량)
     """
 
-    # ── 클래스 상수(공개 API 호환 보존) ─────────────────────
+    # 클래스 상수(공개 API 호환 보존)
     # 외부 코드/테스트가 `PlateTracker.STALE_FRAME_GAP` 등 클래스 속성에
     # 접근할 수 있으므로 모듈 상수와 동일 값을 클래스에서도 노출한다.
     STALE_FRAME_GAP = STALE_FRAME_GAP
@@ -139,7 +137,7 @@ class PlateTracker:
             bbox = det.get("bbox", [])
 
             if best_iou >= self.iou_threshold and best_tid >= 0 and best_tid not in matched_track_ids:
-                # ── IoU 매칭됨: 같은 위치의 차량 ──
+                # IoU 매칭됨: 같은 위치의 차량
                 track = self.tracks[best_tid]
 
                 # ★ 프레임 갭 체크: GAP_TOLERANCE 프레임 이상 미감지 후 재매칭 → 다른 차량 가능성
@@ -259,7 +257,7 @@ class PlateTracker:
                 matched_track_ids.add(best_tid)
                 matched_det_indices.add(d_idx)
             elif d_idx not in matched_det_indices:
-                # ── 새 차량: 깨끗한 상태로 track 생성 ──
+                # 새 차량: 깨끗한 상태로 track 생성
                 new_id = self._next_id
                 self._next_id += 1
                 det_text = det.get("text", "")

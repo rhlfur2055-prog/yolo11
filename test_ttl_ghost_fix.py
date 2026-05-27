@@ -5,13 +5,11 @@ test_ttl_ghost_fix.py — TTL 고스트 버그 수정 검증 (TC1~TC9)
 import sys
 import time
 
-# ── PlateTracker.calculate_iou 가져오기 ──
+# PlateTracker.calculate_iou 가져오기
 sys.path.insert(0, __file__.rsplit("\\", 1)[0])
 from tracker import PlateTracker
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 수정된 병합 로직 (plate_gui.py _refresh_display와 동일)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def run_merge(phase1_dets, phase2_dets):
     """_refresh_display의 병합 로직 추출."""
@@ -52,9 +50,7 @@ def run_merge(phase1_dets, phase2_dets):
     return merged, phase1_only
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 테스트 헬퍼
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 results = []
 
@@ -66,9 +62,7 @@ def tc(name, cond, detail=""):
     return ok
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC1: Phase1 + IoU 성공 → 좌표 보정
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC1] Phase1 + IoU 성공 → 좌표 보정")
 p1 = [{"bbox": [100, 100, 300, 200], "confidence": 0.85, "phase": 1, "text": ""}]
 p2 = [{"bbox": [105,  98, 295, 198], "text": "12가3456", "ocr_confidence": 0.92, "is_valid_plate": True}]
@@ -82,9 +76,7 @@ tc("text = Phase2 텍스트", merged[0].get("text") == "12가3456",
 tc("Phase1_only 0개 (Phase2가 Phase1 흡수)", len(p1only) == 0, f"p1only={len(p1only)}")
 tc(f"IoU ≥ 0.10 (실측 {iou_val:.3f})", iou_val >= 0.10)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC2: Phase1 + IoU 실패 → skip (핵심 픽스)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC2] Phase1 + IoU 실패 → skip (고스트 방지)")
 p1 = [{"bbox": [500, 100, 700, 200], "confidence": 0.80, "phase": 1, "text": ""}]
 p2 = [{"bbox": [100, 100, 300, 200], "text": "12가3456", "ocr_confidence": 0.90, "is_valid_plate": True}]
@@ -95,9 +87,7 @@ tc("Phase1_only 1개 (탐지중 박스)", len(p1only) == 1, f"p1only={len(p1only
 tc(f"IoU < 0.10 (실측 {iou_val:.3f})", iou_val < 0.10)
 tc("고스트 텍스트 없음", all(d.get("text", "") == "" for d in merged), "merged에 텍스트 없음")
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC3: Phase1 없음 → Phase2 폴백
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC3] Phase1 없음 → Phase2 폴백")
 p1_empty = []
 p2 = [{"bbox": [100, 100, 300, 200], "text": "12가3456", "ocr_confidence": 0.90, "is_valid_plate": True}]
@@ -109,9 +99,7 @@ tc("text = Phase2 텍스트", merged[0].get("text") == "12가3456")
 merged_none, _ = run_merge([], p2)
 tc("phase1_dets=None 동일 (빈 리스트로 처리)", len(merged_none) == 1)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC4: TTL 0.5초 만료 동작
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC4] TTL 0.5초 만료 동작")
 TTL = 0.5
 # 시뮬레이션: _detection_ts를 현재에서 offset 초 전으로 설정
@@ -128,9 +116,7 @@ old_ttl_frames = int(1.0 / 0.033)  # TTL=1.0일 때 최대 고스트 프레임
 new_ttl_frames = int(0.5 / 0.033)  # TTL=0.5일 때
 tc(f"최대 고스트 프레임 반감 ({old_ttl_frames} → {new_ttl_frames})", new_ttl_frames <= old_ttl_frames // 2)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC5: 다중 번호판 — 1대 이동, 1대 정지
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC5] 다중 번호판 — 정지차 표시, 이동차 skip")
 p1 = [
     {"bbox": [100, 100, 300, 200], "confidence": 0.85, "phase": 1, "text": ""},  # 차A 정지
@@ -150,9 +136,7 @@ tc("차A 텍스트 표시됨", merged[0].get("text") == "12가3456", f"text={mer
 tc("차B 고스트 없음", all(d.get("text","") != "78나9012" for d in merged))
 tc("차B Phase1_only 탐지중 박스", len(p1only) >= 1)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC6: IoU = 0.10 경계값
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC6] IoU 0.10 경계값")
 # IoU ≈ 0.105 (성공 케이스)
 b1 = [0, 0, 100, 100]
@@ -178,9 +162,7 @@ tc(f"IoU={iou_miss:.3f} < 0.10 → 매칭 실패 merged=0", len(merged_miss) == 
    f"merged={len(merged_miss)}")
 tc("경계값 0.10 정확히 동작", iou_hit2 >= 0.10 and iou_miss < 0.10)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC7: 빈 결과 + proc ≥ 100ms → 즉시 클리어
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC7] 빈 결과 + proc ≥ 100ms → 즉시 클리어")
 def sim_result_update(latest_dets, proc_ms, validated):
     """_refresh_display의 결과 업데이트 로직 추출."""
@@ -197,9 +179,7 @@ tc("빈 결과 + 150ms → 클리어됨", result == [], f"len={len(result)}")
 result2 = sim_result_update(prev, proc_ms=500, validated=[])
 tc("빈 결과 + 500ms → 클리어됨", result2 == [])
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC8: 빈 결과 + proc < 100ms → 유지
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC8] 빈 결과 + proc < 100ms → 유지")
 prev = [{"bbox": [100,100,300,200], "text": "12가3456"}]
 result = sim_result_update(prev, proc_ms=30, validated=[])
@@ -208,9 +188,7 @@ tc("빈 결과 + 30ms(캐시) → 기존 유지", len(result) == 1 and result[0]
 result2 = sim_result_update(prev, proc_ms=0, validated=[])
 tc("빈 결과 + 0ms(캐시) → 기존 유지", len(result2) == 1)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # TC9: 고스트 프레임 수 — 수정 전후 비교
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n[TC9] 고스트 프레임 수 — 수정 전후 비교")
 
 def run_merge_OLD(phase1_dets, phase2_dets):
@@ -270,9 +248,7 @@ tc(f"수정 전 고스트 프레임 ≥ 15개 ({ghost_frames_old}개)", ghost_fr
 tc(f"수정 후 고스트 프레임 = 0개 ({ghost_frames_new}개)", ghost_frames_new == 0)
 tc("고스트 완전 제거", ghost_frames_new == 0)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 종합 판정
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 print("\n" + "=" * 60)
 passed = sum(results)
 total = len(results)

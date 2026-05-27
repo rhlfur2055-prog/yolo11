@@ -13,7 +13,7 @@ import cv2
 import numpy as np
 
 
-# ── 공용 커널/유틸 ─────────────────────────────────────────────
+# 공용 커널/유틸
 # sharpen ↔ deblur가 동일한 라플라시안 커널을 쓰던 중복을 단일 상수로 통합.
 _SHARPEN_KERNEL: np.ndarray = np.array(
     [[-1, -1, -1], [-1, 9, -1], [-1, -1, -1]], dtype=np.float32
@@ -64,7 +64,7 @@ class ImagePreprocessor:
     디스패치하는 기존 패턴을 유지하기 위해 클래스 형태를 보존한다.
     """
 
-    # ── ①~⑦ 기본 전처리 ────────────────────────────────────────
+    # ①~⑦ 기본 전처리
     @staticmethod
     def gray_threshold(img: np.ndarray) -> np.ndarray:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
@@ -149,7 +149,7 @@ class ImagePreprocessor:
                 )
         return img
 
-    # ── ⑧~⑮ 추가 전처리 ────────────────────────────────────────
+    # ⑧~⑮ 추가 전처리
 
     @staticmethod
     def median_blur(img: np.ndarray) -> np.ndarray:
@@ -245,7 +245,7 @@ class ImagePreprocessor:
         enhanced = cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
         return cv2.bitwise_not(enhanced)
 
-    # ── ⑳~㉒ 야간/역광 전처리 ─────────────────────────────────
+    # ⑳~㉒ 야간/역광 전처리
 
     @staticmethod
     def night_clahe(img: np.ndarray) -> np.ndarray:

@@ -27,7 +27,7 @@ import numpy as np
 from plate_recognition_4k import _VALID_PLATE_HANGUL_ALL
 from validator import PlateValidator
 
-# ── 매직 넘버 상수 ──
+# 매직 넘버 상수
 CRNN_INPUT_HEIGHT: int = 64          # CRNN 입력 표준 높이
 CRNN_INPUT_MAX_WIDTH: int = 256      # CRNN 입력 최대 너비 (패딩 기준)
 CRNN_CONF_MIN_TRUST: float = 0.70    # CRNN 결과 채택 최소 신뢰도
@@ -71,9 +71,9 @@ class CrnnVerifier:
         self.vocab: set[str] = set()
         self._load()
 
-    # ──────────────────────────────────────────────────────────────
+    # ─
     # public API
-    # ──────────────────────────────────────────────────────────────
+    # ─
     def read_plate(
         self,
         roi: np.ndarray,
@@ -126,7 +126,7 @@ class CrnnVerifier:
         if not crnn_text:
             return paddle_text
 
-        # ── 과적합 방어 1: CRNN 신뢰도 ──
+        # 과적합 방어 1: CRNN 신뢰도
         if crnn_conf < CRNN_CONF_MIN_TRUST:
             print(
                 f"[CRNN-SKIP] 신뢰도 부족 {crnn_conf:.2f}<{CRNN_CONF_MIN_TRUST:.2f}, "
@@ -135,7 +135,7 @@ class CrnnVerifier:
             )
             return paddle_text
 
-        # ── 과적합 방어 2: 숫자 교차검증 ──
+        # 과적합 방어 2: 숫자 교차검증
         paddle_digits = m.group(1) + m.group(3)
         crnn_digits = re.sub(r'[^0-9]', '', crnn_text)
         if crnn_digits and paddle_digits:
@@ -151,7 +151,7 @@ class CrnnVerifier:
                 )
                 return paddle_text
 
-        # ── 한글 추출 ──
+        # 한글 추출
         mc = re.match(r'^\d{2,3}([가-힣])\d{4}$', crnn_text)
         if not mc:
             crnn_hangul = [ch for ch in crnn_text if '가' <= ch <= '힣']
@@ -172,7 +172,7 @@ class CrnnVerifier:
             crnn_kr = mc.group(1)
 
         paddle_kr = m.group(2)
-        # ── 한글 교정 (conf ≥ 0.90) ──
+        # 한글 교정 (conf ≥ 0.90)
         kr_conf_ok = crnn_conf and crnn_conf >= CRNN_CONF_KR_REPLACE
         corrected_kr = (
             crnn_kr
@@ -186,7 +186,7 @@ class CrnnVerifier:
                 flush=True,
             )
 
-        # ── 앞자리 prefix 교정 (conf ≥ 0.88) ──
+        # 앞자리 prefix 교정 (conf ≥ 0.88)
         corrected_prefix = m.group(1)
         if mc and crnn_conf and crnn_conf >= CRNN_CONF_PREFIX_FIX:
             crnn_prefix_m = re.match(r'^(\d{2,3})[가-힣]\d{4}$', crnn_text)
@@ -210,9 +210,9 @@ class CrnnVerifier:
         result = corrected_prefix + corrected_kr + m.group(3)
         return result if result != paddle_text else paddle_text
 
-    # ──────────────────────────────────────────────────────────────
+    # ─
     # private helpers
-    # ──────────────────────────────────────────────────────────────
+    # ─
     def _load(self) -> None:
         """체크포인트 로드 (실패 시 self.model=None 유지)."""
         import torch

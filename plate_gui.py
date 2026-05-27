@@ -43,9 +43,7 @@ from PIL import Image, ImageDraw, ImageFont, ImageTk
 from config import PathConfig, DisplayConfig
 from tracker import PlateTracker  # noqa: F401 — re-export (외부 코드 호환)
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 상수
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 VIDEO_DISPLAY_W = 1280
 VIDEO_DISPLAY_H = 720
@@ -69,9 +67,7 @@ C_GREEN = "#00e676"
 C_ORANGE = "#ff9800"
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # bbox 검증 — YOLO 오탐지 필터링
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
     """YOLO bbox가 번호판으로 유효한지 검증.
@@ -112,9 +108,7 @@ def validate_bbox(bbox: list, frame_shape: tuple, confidence: float) -> bool:
     return True
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 한글 텍스트 오버레이 (PIL 기반)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 _font_cache: dict[int, ImageFont.FreeTypeFont] = {}
 
@@ -165,9 +159,7 @@ def draw_korean_text(
     return cv2.cvtColor(np.array(pil_img), cv2.COLOR_RGB2BGR)
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # VideoReader 스레드
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class VideoReader(threading.Thread):
     """영상 프레임을 읽어 display_queue / detection_queue에 전달."""
@@ -256,16 +248,12 @@ class VideoReader(threading.Thread):
         self.cap.release()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # DetectionWorker — detection_worker.py로 분리 (GUI ↔ 추론 책임 분리)
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 from detection_worker import DetectionWorker
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 메인 GUI
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 class PlateGUIApp(tk.Tk):
     def __init__(self, cli_args: argparse.Namespace):
@@ -326,7 +314,7 @@ class PlateGUIApp(tk.Tk):
         # 디스플레이 루프 시작
         self.after(REFRESH_MS, self._refresh_display)
 
-    # ─── 로깅 ───
+    # 로깅
 
     def _log(self, msg: str) -> None:
         import datetime
@@ -338,7 +326,7 @@ class PlateGUIApp(tk.Tk):
         except Exception:
             pass
 
-    # ─── UI 빌드 ───
+    # UI 빌드
 
     def _build_ui(self) -> None:
         """SARADA STEELHEAD CCTV 스타일 레이아웃:
@@ -351,7 +339,7 @@ class PlateGUIApp(tk.Tk):
         │  Control Bar + Status       │
         └─────────────────────────────┘
         """
-        # ── 맨 하단: 컨트롤 바 (먼저 pack → 나머지가 위에 채워짐) ──
+        # 맨 하단: 컨트롤 바 (먼저 pack → 나머지가 위에 채워짐)
         bar = tk.Frame(self, bg=C_SURFACE, height=44)
         bar.pack(side=tk.BOTTOM, fill=tk.X)
 
@@ -371,21 +359,21 @@ class PlateGUIApp(tk.Tk):
         tk.Label(bar, textvariable=self.stats_var, bg=C_SURFACE, fg=C_DIM,
                  font=("Consolas", 9)).pack(side=tk.LEFT, padx=12, pady=4, fill=tk.X, expand=True)
 
-        # ── 메인 영역: 좌측 영상 + 우측 감지 패널 ──
+        # 메인 영역: 좌측 영상 + 우측 감지 패널
         main = tk.Frame(self, bg=C_BG)
         main.pack(fill=tk.BOTH, expand=True)
 
-        # ── 우측 패널 제거 — 영상 전체 화면 ──
+        # 우측 패널 제거 — 영상 전체 화면
         self._det_count_var = tk.StringVar(value="0건")
         self._card_frame = tk.Frame(main, bg=C_PANEL)  # 더미 (호환용)
 
-        # ── 메인 영상 영역 (전체 화면) ──
+        # 메인 영상 영역 (전체 화면)
         video_frame = tk.Frame(main, bg="#000000")
         video_frame.pack(side=tk.LEFT, fill=tk.BOTH, expand=True, padx=4, pady=4)
         self.video_label = tk.Label(video_frame, bg="#000000", anchor="center")
         self.video_label.pack(fill=tk.BOTH, expand=True)
 
-        # ── 내부 변수 ──
+        # 내부 변수
         self.plate_text_var = tk.StringVar(value="---")
         self.conf_var = tk.StringVar(value="")
         self.engine_choice_var = tk.StringVar(value="Pro 엔진")
@@ -439,7 +427,7 @@ class PlateGUIApp(tk.Tk):
         except Exception as e:
             messagebox.showerror("저장 오류", str(e))
 
-    # ─── 영상 열기 (자동 시작) ───
+    # 영상 열기 (자동 시작)
 
     def _open_video(self, path: str) -> None:
         if not path or not os.path.isfile(path):
@@ -518,7 +506,7 @@ class PlateGUIApp(tk.Tk):
         _fast_t = threading.Thread(target=self._fast_yolo_loop, daemon=True)
         _fast_t.start()
 
-    # ─── Fast YOLO 스레드: 현재 표시 프레임에서 ~8fps YOLO 탐지 ───
+    # Fast YOLO 스레드: 현재 표시 프레임에서 ~8fps YOLO 탐지
 
     def _fast_yolo_loop(self):
         """현재 표시 프레임: YOLO detect_only → 즉시 bbox 표시 (~3-8fps).
@@ -562,7 +550,7 @@ class PlateGUIApp(tk.Tk):
                 pass
             time.sleep(0.02)  # YOLO ~200-500ms + 최소 딜레이
 
-    # ─── 디스플레이 루프 (30 FPS) ───
+    # 디스플레이 루프 (30 FPS)
 
     def _refresh_display(self) -> None:
         # 1) 인식 결과 수신 (엔진 트래커가 이미 처리 → GUI 트래커 제거)
@@ -573,7 +561,7 @@ class PlateGUIApp(tk.Tk):
                     raw_results = data["results"]
                     frame_idx = data.get("frame_idx", 0)
 
-                    # ── bbox 검증: 오탐지 필터링 ──
+                    # bbox 검증: 오탐지 필터링
                     validated = []
                     for det in raw_results:
                         bbox = det.get("bbox", [])
@@ -793,7 +781,7 @@ class PlateGUIApp(tk.Tk):
 
         self.after(REFRESH_MS, self._refresh_display)
 
-    # ─── 오버레이 그리기 (2단계) ───
+    # 오버레이 그리기 (2단계)
 
     # 오버레이 최대 표시 개수 (화면 정리용)
     MAX_PHASE2_DISPLAY = 5   # OCR 확정 박스 최대 표시 수
@@ -808,7 +796,7 @@ class PlateGUIApp(tk.Tk):
         result = frame  # ★ copy() 제거 — FPS 극대화
         h, w = result.shape[:2]
 
-        # ── 좌상단 시스템 정보 패널 ──
+        # 좌상단 시스템 정보 패널
         fps = 0
         if hasattr(self, '_det_fps_samples') and self._det_fps_samples:
             fps = sum(self._det_fps_samples) / len(self._det_fps_samples)
@@ -823,7 +811,7 @@ class PlateGUIApp(tk.Tk):
         cv2.putText(result, f"FPS: {fps:.0f}  |  {w}x{h}", (14, 50),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.45, (180, 180, 180), 1)
 
-        # ── 우측 감지 이력 사이드 패널 (최근 5건, PIL 한글 렌더링) ──
+        # 우측 감지 이력 사이드 패널 (최근 5건, PIL 한글 렌더링)
         _hist = getattr(self, '_detection_history', [])
         if _hist:
             _show_count = min(5, len(_hist))
@@ -862,7 +850,7 @@ class PlateGUIApp(tk.Tk):
                                font=_font_conf, fill=(0, 220, 220))
             result = cv2.cvtColor(np.array(_pil_img), cv2.COLOR_RGB2BGR)
 
-        # ── 번호판 bbox + 라벨 (MareArts 스타일: 라벨을 bbox 위에 배치) ──
+        # 번호판 bbox + 라벨 (MareArts 스타일: 라벨을 bbox 위에 배치)
         for det in detections:
             bbox = det.get("bbox", [])
             if len(bbox) < 4:
@@ -938,7 +926,7 @@ class PlateGUIApp(tk.Tk):
 
         return result
 
-    # ─── Detection Log ───
+    # Detection Log
 
     def _add_to_history(self, det: dict, timestamp: float = 0) -> None:
         text = (det.get("text") or det.get("plate", "")).strip()
@@ -1049,7 +1037,7 @@ class PlateGUIApp(tk.Tk):
         """인식 기록 카운트만 갱신 (우측 패널 제거됨)."""
         self._det_count_var.set(f"{len(self._detection_history)}건")
 
-    # ─── 상태 표시 ───
+    # 상태 표시
 
     def _update_stats(self, frame_idx: int, ts: float) -> None:
         if self.video_reader is None:
@@ -1077,7 +1065,7 @@ class PlateGUIApp(tk.Tk):
             print(f"[F{frame_idx}] DetFPS:{det_fps:.2f} Proc:{self._process_ms:.0f}ms "
                   f"Det:{n_det} Log:{len(self._detection_history)}", flush=True)
 
-    # ─── 종료 ───
+    # 종료
 
     def _stop_threads(self) -> None:
         if self.video_reader is not None:
@@ -1096,9 +1084,7 @@ class PlateGUIApp(tk.Tk):
         self.destroy()
 
 
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 # 엔트리포인트
-# ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 DEFAULT_VIDEO = os.path.join(
     os.path.dirname(os.path.abspath(__file__)),

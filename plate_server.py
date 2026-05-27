@@ -40,9 +40,9 @@ if sys.platform == "win32":
         pass
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # 상수
-# ────────────────────────────────────────────────────────────────
+# ─
 API_TITLE: Final[str] = "YOLO11 번호판 인식 API"
 API_DESCRIPTION: Final[str] = (
     "한국 차량 번호판 자동 인식 REST API (YOLO11x + PaddleOCR + CRNN 교차검증)"
@@ -52,9 +52,9 @@ IMAGE_CONTENT_TYPE_PREFIX: Final[str] = "image/"
 EMPTY_BBOX: Final[list[int]] = [0, 0, 0, 0]
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # 엔진 상태 (lifespan 에서 채워지고 Depends 로 주입)
-# ────────────────────────────────────────────────────────────────
+# ─
 @dataclass
 class EngineState:
     """프로세스 단일 인스턴스. lifespan 에서 채운다."""
@@ -85,9 +85,9 @@ def require_ready_engine(
     return state
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # Pydantic 스키마
-# ────────────────────────────────────────────────────────────────
+# ─
 class PlateResult(BaseModel):
     """인식된 번호판 1건."""
 
@@ -117,9 +117,9 @@ class HealthResponse(BaseModel):
     ready: bool
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # 라이프스팬: 엔진 초기화/정리
-# ────────────────────────────────────────────────────────────────
+# ─
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     """서버 시작 시 PlateEnginePro 초기화, 종료 시 close()."""
@@ -146,9 +146,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     print("[서버] 종료됨", flush=True)
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # FastAPI 앱
-# ────────────────────────────────────────────────────────────────
+# ─
 app = FastAPI(
     title=API_TITLE,
     description=API_DESCRIPTION,
@@ -164,9 +164,9 @@ app.add_middleware(
 )
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # 엔드포인트
-# ────────────────────────────────────────────────────────────────
+# ─
 @app.get("/health", response_model=HealthResponse, tags=["meta"])
 def health(state: EngineState = Depends(get_engine_state)) -> HealthResponse:
     """헬스체크 — 엔진 준비 여부 반환."""
@@ -272,9 +272,9 @@ async def detect(
     )
 
 
-# ────────────────────────────────────────────────────────────────
+# ─
 # 진입점
-# ────────────────────────────────────────────────────────────────
+# ─
 def _parse_cli_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=API_TITLE)
     parser.add_argument("--host", default=ServerConfig.HOST,
