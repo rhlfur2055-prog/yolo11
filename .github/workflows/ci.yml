@@ -1,0 +1,105 @@
+# ─────────────────────────────────────────────────────────────────────
+#  YOLO11 Korean Plate Recognition — Continuous Integration
+# ─────────────────────────────────────────────────────────────────────
+#  Trigger    : push / PR → main
+#  Matrix     : Python 3.10 / 3.11 / 3.12   (3.13 미지원 — paddleocr 의존)
+#  Strategy   : 모델(best.pt, plate_ocr_crnn.pth) 없이도 검증 가능한
+#               것만 실행한다 — import 가능성 + 모델 비의존 smoke 테스트.
+#               무거운 의존(torch / paddlepaddle / ultralytics / paddleocr)은
+#               CI 시간 단축을 위해 설치하지 않는다.
+#  See        : tests/test_modules_smoke.py  (preprocessor / validator / db / config)
+# ─────────────────────────────────────────────────────────────────────
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:  # 수동 실행 허용 (Actions 탭 → Run workflow)
+
+# 같은 브랜치/PR 의 이전 실행은 자동 취소 → 러너 비용 절감
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  smoke:
+    name: Smoke (py${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false  # 한 버전이 깨져도 나머지 버전은 끝까지 검증
+      matrix:
+        python-version: ["3.10", "3.11", "3.12"]
+
+    steps:
+      # ── 1. 소스 체크아웃 ────────────────────────────────────────
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      # ── 2. Python 설정 + pip 캐시 ─────────────────────────────
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      # ── 3. 최소 의존성 설치 (모델 비의존 검증용) ───────────────
+      #    paddleocr / torch / ultralytics 는 설치하지 않는다
+      #    (CI 시간 5분 → 1분 단축, 모델 없이 어차피 실패하므로)
+      - name: Install minimal deps
+        run: |
+          python -m pip install --upgrade pip
+          pip install pytest numpy Pillow opencv-python-headless
+
+      # ── 4. 환경 확인 (디버깅 편의) ─────────────────────────────
+      - name: Show environment
+        run: |
+          python --version
+          pip --version
+          pip list
+
+      # ── 5. config import 검증 (모델 비의존) ────────────────────
+      - name: Verify config import
+        run: python -c "import config; print('config import OK — PathConfig:', config.PathConfig.__name__)"
+
+      # ── 6. 핵심 모듈 import 검증 (preprocessor / validator / db) ─
+      - name: Verify core modules import
+        run: |
+          python -c "import preprocessor; print('preprocessor OK')"
+          python -c "import validator;    print('validator OK')"
+          python -c "import db;           print('db OK')"
+
+      # ── 7. Smoke 테스트 실행 (모델 비의존) ─────────────────────
+      #    실패해도 워크플로우는 통과시키지 않는다 — smoke 는 진짜 게이트
+      - name: Run smoke tests
+        run: pytest tests/ -v --tb=short
+
+  lint:
+    name: Lint (ruff, optional)
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    continue-on-error: true  # lint 실패가 머지를 막지는 않게 — 점진 도입
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install ruff
+        run: |
+          python -m pip install --upgrade pip
+          pip install ruff
+
+      # 프로젝트에 ruff 설정이 없어도 기본 규칙으로 동작 — 경고만 출력
+      - name: Ruff check
+        run: ruff check . --output-format=github || echo "::warning::ruff issues found (non-blocking)"
