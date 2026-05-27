@@ -5,6 +5,20 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 
 ---
 
+## 데모
+
+![Demo](docs/demo.gif)
+
+<!-- 데모 GIF 생성 방법 -->
+```bash
+# result_portfolio.mp4에서 10초 GIF 추출
+ffmpeg -ss 5 -t 10 -i result_portfolio.mp4 -vf "fps=10,scale=720:-1:flags=lanczos" docs/demo.gif
+```
+
+> (아직 GIF 미생성. `result_portfolio.mp4`는 `.gitignored`. 위 명령으로 `docs/demo.gif` 만들면 README가 자동 표시됨)
+
+---
+
 ## 셀링 포인트
 
 > **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,194 → 2,721줄 (-14.8%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
@@ -220,6 +234,28 @@ python test_ocr_accuracy.py
 - 분리 전후 동일 baseline 유지 → 리팩터링이 **regression-free** 임을 확인.
 
 > 다음 단계 후보: `detector.py`(YOLO 2-Stage), `ocr_runner.py`(`_ocr_plate_roi` 502줄), `voter.py`(투표 + 크로스 트랙 안정화), `tracker.py`(트랙 캐시 + Ghost 방지).
+
+---
+
+## 모델 / 데이터 다운로드
+
+GitHub 저장소에는 코드만 포함되어 있습니다. 다음 파일들은 모두 `.gitignore` 처리되어 **클론에 포함되지 않습니다** — 별도로 입수해 프로젝트 루트에 배치해야 합니다.
+
+| 파일 | 크기 | 역할 | 상태 |
+|------|------|------|------|
+| `best.pt` | 114 MB | YOLO11x 번호판 탐지 (mAP@50 = 98.4%, 내부 validation) | gitignored — 별도 다운로드 |
+| `plate_ocr_crnn.pth` | 42 MB | CRNN 한글 교차검증 (10.5M params) | gitignored — 별도 다운로드 |
+| `yolov8n.pt` | 6.5 MB | COCO fallback (best.pt 부재 시) | gitignored — 별도 다운로드 |
+| `22/` | 3.4 MB (18장) | 회귀 테스트 이미지 (정적 12장 + 확장 6장) | gitignored — 별도 다운로드 |
+| `result_portfolio.mp4` | 18 MB | 데모 영상 (위 데모 GIF 원본) | gitignored — 별도 다운로드 |
+
+### 다운로드 옵션 (3가지)
+
+1. **자체 호스팅 (TODO)** — 프로젝트 소유자에게 연락. Google Drive / HuggingFace 링크 제공 예정.
+2. **자체 학습** — `train_plate_ocr.py`가 v3+ 이력에 있으나 현재 정리됨. CRNN 재학습 시 별도 학습 데이터셋 확보 필요(실제 132장 + 합성 20,647장 구성).
+3. **유사 모델 대체** — `ultralytics/yolo11n.pt`(COCO 80클래스)로 폴백 가능. 단, **`best.pt` 없이는 plate-specific 인식 불가**(자동차 박스만 잡힘).
+
+> 📘 자동 폴백 흐름과 배치 검증 명령은 [`docs/SETUP.md` §3](docs/SETUP.md#3-모델--테스트-데이터-배치) 참고.
 
 ---
 

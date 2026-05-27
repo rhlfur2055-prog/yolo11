@@ -50,10 +50,12 @@ python test_ocr_accuracy.py
 ### 3.1 필수 파일
 
 | 파일 | 크기 | 위치 (프로젝트 루트 기준) | 출처 |
-|---|---:|---|---|
-| `best.pt` | 110 MB | `./best.pt` | YOLO11x 번호판 fine-tuned (별도 전달) |
-| `plate_ocr_crnn.pth` | 41 MB | `./plate_ocr_crnn.pth` | CRNN 한글 교차검증 (별도 전달) |
-| `22/` 폴더 | ~3 MB | `./22/*.png` | 회귀 테스트 12장 (별도 전달) |
+|---|---|---|---|
+| `best.pt` | 114 MB | `./best.pt` | YOLO11x 번호판 fine-tuned (별도 전달, §3.4 참조) |
+| `plate_ocr_crnn.pth` | 42 MB | `./plate_ocr_crnn.pth` | CRNN 한글 교차검증 (별도 전달, §3.4 참조) |
+| `yolov8n.pt` | 6.5 MB | `./yolov8n.pt` | COCO fallback (선택, `best.pt` 부재 시 안전망) |
+| `22/` 폴더 | 3.4 MB | `./22/*.png` | 회귀 테스트 12장 + 확장 6장 (총 18장) |
+| `result_portfolio.mp4` | 18 MB | `./result_portfolio.mp4` | 데모 영상 (`docs/demo.gif` 추출 원본) |
 
 **배치 후 확인:**
 ```bash
@@ -82,6 +84,52 @@ mkdir movie
 # movie/hiway.mp4 등 테스트용 영상을 배치
 python plate_gui.py movie/hiway.mp4
 ```
+
+### 3.4 모델 / 데이터 입수 경로 (3가지 옵션)
+
+§3.1의 파일들을 어떻게 확보할지에 대한 안내. 외부인 / 면접관 / 신규 합류자가 이 저장소만 받았을 때 따라갈 수 있는 경로를 명시한다.
+
+#### 옵션 1 — 자체 호스팅 (TODO)
+
+> **상태:** Google Drive / HuggingFace 링크 제공 예정.
+> **연락:** 프로젝트 소유자에게 요청. 인계 시 다음 5개 파일을 함께 전달:
+>
+> - `best.pt` (114 MB)
+> - `plate_ocr_crnn.pth` (42 MB)
+> - `yolov8n.pt` (6.5 MB, 선택)
+> - `22/` 디렉토리 (3.4 MB, 18장)
+> - `result_portfolio.mp4` (18 MB, 데모 GIF 원본)
+
+#### 옵션 2 — 자체 학습
+
+CRNN 모델을 직접 학습해 `plate_ocr_crnn.pth`를 재생산하는 경로.
+
+- 학습 스크립트 `train_plate_ocr.py`는 v3+ 이력에 있으나 **현재 리포지토리는 정리되어 미포함**.
+- 학습 데이터셋(실제 132장 + 합성 20,647장 = 21,967 샘플)도 **별도 확보 필요**.
+- 학습 환경: RTX 4060 (CUDA), 200 epoch, BiLSTM(2층) + CTC.
+- YOLO `best.pt`는 별도 fine-tuning 셋업이 필요(라벨링된 번호판 박스 데이터셋).
+
+> 면접/포트폴리오 용도라면 옵션 1을 권장. 옵션 2는 시간 투자가 크다(데이터셋만 수일~수주).
+
+#### 옵션 3 — 유사 모델 대체 (코드 동작만 확인)
+
+`best.pt` 없이도 파이프라인이 죽지 않도록 폴백 동작을 확인하고 싶을 때.
+
+```bash
+# Ultralytics 공식 YOLO11n (COCO 80클래스, ~6MB)
+pip install ultralytics
+python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
+# → ~/.cache/.../yolo11n.pt에 자동 다운로드
+```
+
+| 항목 | 결과 |
+|---|---|
+| YOLO 박스 탐지 | ✅ 동작 (자동차/트럭/버스 등 COCO 클래스) |
+| 번호판 특정 탐지 | ❌ 동작 안 함 (COCO에는 `license_plate` 클래스 없음) |
+| PaddleOCR 인식 | ❌ 의미 없음 (번호판 ROI가 안 들어옴) |
+| CRNN 교차검증 | ❌ 의미 없음 (입력 없음) |
+
+> **결론:** `best.pt` 없이는 **plate-specific 인식 불가**. §3.2의 HuggingFace 자동 폴백(`morsetechlab/yolov11-license-plate-detection`)이 현실적인 차선책.
 
 ---
 
