@@ -92,7 +92,7 @@ class SirenTrigger:
             # 사이렌 활성화
             self.is_active = True
             self.activate_time = time.time()
-            print(f"[SirenTrigger] 🚨 사이렌 활성화! (프레임 #{data.get('frame_idx', '?')})")
+            print(f"[SirenTrigger] 사이렌 활성화! (프레임 #{data.get('frame_idx', '?')})")
             # 사이렌 감지 이벤트 발행 → PlateEvidence가 추적 모드 시작
             self.event_bus.publish("SIREN_DETECTED", {
                 "frame_idx": data.get("frame_idx", 0),
@@ -116,7 +116,7 @@ class SirenTrigger:
 
         사이렌 활성화 상태:
             - 화면 상단에 빨간/파란 교대 깜빡임 바
-            - "🚨 긴급차량 경로 확보" 텍스트
+            - "긴급차량 경로 확보" 텍스트
             - 경과 시간 표시
             - 화면 테두리 빨간색
 

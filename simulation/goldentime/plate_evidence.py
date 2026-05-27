@@ -379,7 +379,7 @@ class PlateEvidence:
         })
 
         elapsed = record.continuous_duration
-        print(f"\n  🔴 [PlateEvidence] 채증 대상 등록: {record.plate_text}")
+        print(f"\n  [PlateEvidence] 채증 대상 등록: {record.plate_text}")
         print(f"     연속 감지: {elapsed:.1f}초 (기준: {self.config['continuous_threshold_sec']}초)")
         print(f"     총 감지 횟수: {record.detection_count}회")
         print(f"     → 전 {self.config['pre_buffer_sec']}초 버퍼 확보 ({len(pre_frames)} 프레임)")
@@ -450,7 +450,7 @@ class PlateEvidence:
             },
         })
 
-        print(f"\n  ✅ [PlateEvidence] 채증 완료: {plate_text}")
+        print(f"\n  [PlateEvidence] 채증 완료: {plate_text}")
         print(f"     총 {total_count} 프레임 ({total_sec:.1f}초)")
         print(f"     (전 {pre_count}프레임 + 후 {post_count}프레임)")
         print(f"     → EVIDENCE_COMPLETE 이벤트 발행 (계단 5에서 파일 저장)")

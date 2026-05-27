@@ -646,7 +646,7 @@ class DistanceChecker:
         })
 
         ratio_pct = bbox_ratio * 100
-        print(f"\n  ⚠️ [DistanceChecker] 거리 미확보 위반: {record.plate_text}")
+        print(f"\n  [DistanceChecker] 거리 미확보 위반: {record.plate_text}")
         print(f"     거리 추정: {record.last_distance_label} (bbox 비율: {ratio_pct:.3f}%)")
         print(f"     가까움 지속: {record.close_duration:.1f}초 (기준: {self.config['violation_duration_sec']}초)")
         print(f"     → DISTANCE_VIOLATION 이벤트 발행")
@@ -664,7 +664,7 @@ class DistanceChecker:
             "timestamp": self._current_timestamp,
             "frame_idx": self._current_frame_idx,
         })
-        print(f"\n  🟢 [DistanceChecker] 후진 양보 감지: {record.plate_text} (YIELD_DETECTED)")
+        print(f"\n  [DistanceChecker] 후진 양보 감지: {record.plate_text} (YIELD_DETECTED)")
 
     def _publish_blocking_suspected(self, record: PlateDistanceRecord) -> None:
         """고의적 길막 의심 이벤트 발행.
@@ -678,7 +678,7 @@ class DistanceChecker:
             "timestamp": self._current_timestamp,
             "frame_idx": self._current_frame_idx,
         })
-        print(f"\n  🚧 [DistanceChecker] 고의적 길막 의심: {record.plate_text} (BLOCKING_SUSPECTED)")
+        print(f"\n  [DistanceChecker] 고의적 길막 의심: {record.plate_text} (BLOCKING_SUSPECTED)")
 
     def _cleanup_stale_records(self, current_time: float) -> None:
         """오래된 거리 기록 정리

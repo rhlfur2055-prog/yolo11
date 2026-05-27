@@ -167,7 +167,7 @@ def run_gui_mode(args: argparse.Namespace) -> None:
     sim.event_bus.subscribe(
         "EVIDENCE_EXPORTED",
         lambda data: print(
-            f"\n  ★ 증거 패키지 저장 완료: {data['plate']} → {data['folder']}"
+            f"\n  증거 패키지 저장 완료: {data['plate']} → {data['folder']}"
         )
     )
 
@@ -289,7 +289,7 @@ def run_headless_mode(args: argparse.Namespace) -> None:
 
     def _on_export(data):
         export_results.append(data)
-        print(f"\n  ★ 증거 패키지 저장: {data['plate']} → {data['folder']}")
+        print(f"\n  증거 패키지 저장: {data['plate']} → {data['folder']}")
 
     event_bus.subscribe("EVIDENCE_EXPORTED", _on_export)
 

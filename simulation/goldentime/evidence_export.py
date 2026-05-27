@@ -142,7 +142,7 @@ class EvidenceExport:
         os.makedirs(folder_path, exist_ok=True)
         os.makedirs(screenshots_path, exist_ok=True)
 
-        print(f"\n  📦 [EvidenceExport] 증거 패키지 생성 시작: {plate}")
+        print(f"\n  [EvidenceExport] 증거 패키지 생성 시작: {plate}")
         print(f"     폴더: {folder_path}")
 
         # ── 1. 영상 저장 (video.mp4) ──
@@ -175,13 +175,13 @@ class EvidenceExport:
         # 이벤트 발행
         self.event_bus.publish("EVIDENCE_EXPORTED", export_info)
 
-        print(f"  📦 [EvidenceExport] 증거 패키지 저장 완료!")
-        print(f"     📹 video.mp4 ({len(all_frames)} 프레임)")
-        print(f"     📸 screenshots/ ({len(os.listdir(screenshots_path))}장)")
-        print(f"     📋 plates.json")
-        print(f"     📝 report.txt")
+        print(f"  [EvidenceExport] 증거 패키지 저장 완료!")
+        print(f"     video.mp4 ({len(all_frames)} 프레임)")
+        print(f"     screenshots/ ({len(os.listdir(screenshots_path))}장)")
+        print(f"     plates.json")
+        print(f"     report.txt")
         if violations:
-            print(f"     ⚠️ 거리 미확보 위반 {len(violations)}건 포함")
+            print(f"     거리 미확보 위반 {len(violations)}건 포함")
 
     # ───────────────────────────────────────────
     # 파일 저장 로직
@@ -224,7 +224,7 @@ class EvidenceExport:
                 frame_count += 1
 
         writer.release()
-        print(f"     📹 영상 저장: {frame_count} 프레임 → {video_path}")
+        print(f"     영상 저장: {frame_count} 프레임 → {video_path}")
 
     def _save_screenshots(self, screenshots_dir: str,
                           all_frames: list[dict],

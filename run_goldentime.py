@@ -165,7 +165,7 @@ def print_banner() -> None:
     """시작 배너 출력."""
     print()
     print("=" * BANNER_WIDTH)
-    print("  🚑 골든타임 2.0 — 긴급차량 통행방해 증거 확보 시뮬레이션")
+    print("  골든타임 2.0 — 긴급차량 통행방해 증거 확보 시뮬레이션")
     print("=" * BANNER_WIDTH)
     print()
 
@@ -310,7 +310,7 @@ def _on_evidence_exported(data: dict[str, Any]) -> None:
     folder = data.get("folder", "")
     print()
     print("  " + "=" * SUB_WIDTH)
-    print(f"  📦 증거 패키지 저장됨: {folder}")
+    print(f"  증거 패키지 저장됨: {folder}")
     print("  " + "=" * SUB_WIDTH)
 
 

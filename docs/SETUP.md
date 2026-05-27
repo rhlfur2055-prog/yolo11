@@ -9,8 +9,8 @@
 
 | 항목 | 요구 | 비고 |
 |---|---|---|
-| Python | **3.10 / 3.11 / 3.12** | 3.13 ❌ (`paddlepaddle` 미지원) |
-| OS | Windows 11 ✅ 테스트됨 / Linux / macOS | 한글 폰트 경로만 차이 (§5 참조) |
+| Python | **3.10 / 3.11 / 3.12** | 3.13 (`paddlepaddle` 미지원) |
+| OS | Windows 11 테스트됨 / Linux / macOS | 한글 폰트 경로만 차이 (§5 참조) |
 | RAM | **16 GB 권장** (최소 8 GB) | PaddleOCR + CRNN + YOLO11x 동시 로드 |
 | 디스크 | **5 GB 이상 여유** | 모델 ~160 MB + PaddleOCR 캐시 ~1 GB |
 | GPU | 선택 (CUDA 11.8+) | CPU로도 동작 (이미지당 ~1.35초) |
@@ -39,7 +39,7 @@ python test_ocr_accuracy.py
 #   기대 결과: 11/12 (91.7%) — §4 참조
 ```
 
-> ⚠️ **3-4 사이 누락 단계가 있음** — `best.pt` / `plate_ocr_crnn.pth` / `22/` 폴더는 `.gitignore` 처리되어 **클론에 포함되지 않는다**. §3에서 배치 방법을 안내한다.
+> **3-4 사이 누락 단계가 있음** — `best.pt` / `plate_ocr_crnn.pth` / `22/` 폴더는 `.gitignore` 처리되어 **클론에 포함되지 않는다**. §3에서 배치 방법을 안내한다.
 
 ---
 
@@ -124,10 +124,10 @@ python -c "from ultralytics import YOLO; YOLO('yolo11n.pt')"
 
 | 항목 | 결과 |
 |---|---|
-| YOLO 박스 탐지 | ✅ 동작 (자동차/트럭/버스 등 COCO 클래스) |
-| 번호판 특정 탐지 | ❌ 동작 안 함 (COCO에는 `license_plate` 클래스 없음) |
-| PaddleOCR 인식 | ❌ 의미 없음 (번호판 ROI가 안 들어옴) |
-| CRNN 교차검증 | ❌ 의미 없음 (입력 없음) |
+| YOLO 박스 탐지 | 동작 (자동차/트럭/버스 등 COCO 클래스) |
+| 번호판 특정 탐지 | 동작 안 함 (COCO에는 `license_plate` 클래스 없음) |
+| PaddleOCR 인식 | 의미 없음 (번호판 ROI가 안 들어옴) |
+| CRNN 교차검증 | 의미 없음 (입력 없음) |
 
 > **결론:** `best.pt` 없이는 **plate-specific 인식 불가**. §3.2의 HuggingFace 자동 폴백(`morsetechlab/yolov11-license-plate-detection`)이 현실적인 차선책.
 
@@ -240,9 +240,9 @@ print(result)   # [{'plate': '01나8060', 'confidence': 0.92, 'bbox': (...)}]
 
 ## 7. 다음 단계
 
-- 🏗️ 아키텍처 / 7단계 파이프라인 → [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)
-- 📊 회귀 baseline 상세 / 알려진 실패 케이스 → [`README.md` § 성능](../README.md)
-- 🧪 새 변경사항 검증 순서:
+- 아키텍처 / 7단계 파이프라인 → [`docs/ARCHITECTURE.md`](ARCHITECTURE.md)
+- 회귀 baseline 상세 / 알려진 실패 케이스 → [`README.md` § 성능](../README.md)
+- 새 변경사항 검증 순서:
   ```bash
   pytest tests/test_modules_smoke.py && python test_ocr_accuracy.py
   ```

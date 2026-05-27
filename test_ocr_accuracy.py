@@ -325,7 +325,7 @@ def main(argv: list[str] | None = None) -> int:
         rel_path = json_path.relative_to(BASE_DIR)
     except ValueError:
         rel_path = json_path
-    print(f"\n📄 JSON 리포트: {rel_path}")
+    print(f"\nJSON 리포트: {rel_path}")
     print("=" * TABLE_WIDTH)
 
     return 0 if report.accuracy >= ACCURACY_PASS_THRESHOLD else 1

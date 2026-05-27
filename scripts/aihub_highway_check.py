@@ -138,10 +138,10 @@ def main():
     under = []
     for path, name, mb in sorted(files, key=lambda x: -x[2]):
         if mb <= MAX_MB:
-            status = "✅ 다운로드(검증 대상)"
+            status = "다운로드(검증 대상)"
             under.append((path, name, mb))
         else:
-            status = "❌ 100MB 초과 금지"
+            status = "100MB 초과 금지"
         print(f"{name} | {mb:.1f}MB | {status}")
 
     # 100MB 이하 파일에 대해 첫 프레임 분석
