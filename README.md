@@ -13,20 +13,6 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 
 ---
 
-## 데모
-
-![Demo](docs/demo.gif)
-
-<!-- 데모 GIF 생성 방법 -->
-```bash
-# result_portfolio.mp4에서 10초 GIF 추출
-ffmpeg -ss 5 -t 10 -i result_portfolio.mp4 -vf "fps=10,scale=720:-1:flags=lanczos" docs/demo.gif
-```
-
-> (아직 GIF 미생성. `result_portfolio.mp4`는 `.gitignored`. 위 명령으로 `docs/demo.gif` 만들면 README가 자동 표시됨)
-
----
-
 ## 핵심 요약
 
 > **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,194 → 2,721줄 (-14.8%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
