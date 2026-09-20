@@ -135,8 +135,8 @@ class ImagePreprocessor:
         )
         if lines is not None:
             angles = []
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
+            # OpenCV 버전에 따라 (N,1,4) 또는 (N,4)로 반환된다
+            for x1, y1, x2, y2 in np.asarray(lines).reshape(-1, 4):
                 angle = np.degrees(np.arctan2(y2 - y1, x2 - x1))
                 if abs(angle) < 30:
                     angles.append(angle)

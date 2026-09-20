@@ -1,6 +1,6 @@
 # ARCHITECTURE — 한국 차량 번호판 인식 시스템
 
-> **30초 요약** — YOLO11x로 번호판을 탐지하고, 18종 전처리 × PaddleOCR로 후보를 만들고, CRNN으로 한글을 교차검증해 위치 투표·형식검증·트래커를 거쳐 GUI에 출력한다. 회귀 baseline: 정적 12장 **11/12 (91.7%)**, 실시간 Ghost Detection **5/5 PASS**.
+> **30초 요약** — YOLO11x로 번호판을 탐지하고, 다중 전처리(10종) × PaddleOCR로 후보를 만들고, CRNN으로 한글을 교차검증해 위치 투표·형식검증·트래커를 거쳐 GUI에 출력한다. 회귀 baseline: 정적 12장 **11/12 (91.7%)**, 실시간 Ghost Detection **5/5 PASS**.
 
 ---
 
@@ -20,7 +20,7 @@
 ```mermaid
 flowchart LR
     F[1. 영상 입력<br/>ndarray BGR] --> Y[2. YOLO11x 탐지<br/>mAP 98.4%]
-    Y --> P[3. ROI 크롭 + 18종 전처리<br/>preprocessor.py]
+    Y --> P[3. ROI 크롭 + 다중 전처리 10종<br/>preprocessor.py]
     P --> O[4. PaddleOCR<br/>한국어 단독, conf≥0.40]
     O --> C[5. CRNN 교차검증<br/>10.5M params]
     C --> V[6. 위치 투표 + 형식 검증<br/>validator.py]
@@ -33,7 +33,7 @@ flowchart LR
 |---|---|---|---|
 | 1 | 프레임 캡처 | `plate_gui.py` (OpenCV `VideoCapture`) | `np.ndarray (H,W,3) uint8 BGR` |
 | 2 | 번호판 bbox 탐지 | `plate_engine_pro.PlateEnginePro.detect_only` | `list[dict{bbox, conf}]` |
-| 3 | 크롭+업스케일+18종 변형 | `preprocessor.ImagePreprocessor` | `dict[name → ndarray]` (×18) |
+| 3 | 크롭+업스케일+10종 변형 | `preprocessor.ImagePreprocessor` | `dict[name → ndarray]` (×최대 10) |
 | 4 | OCR 추론 | `PlateEnginePro._run_ocr` (PaddleOCR) | `list[tuple[str, float]]` (18 후보) |
 | 5 | CRNN 한글 재판독 | `PlateEnginePro._verify_korean_with_crnn` | `str` (교정된 plate) |
 | 6 | 자릿수 투표 + 형식 검증 | `validator.PlateValidator` | `str` (확정 plate) 또는 reject |
@@ -48,9 +48,9 @@ flowchart LR
 | 모듈 | LOC | 단일 책임 | 외부 의존 |
 |---|---:|---|---|
 | `plate_gui.py` | 1,658 | UI 루프 / 영상 입력 / 사용자 입력 처리 | tkinter, cv2, PIL |
-| `plate_engine_pro.py` | 2,721 | 추론 오케스트레이션 (YOLO + OCR + CRNN + 투표 + 트래커) | ultralytics, paddleocr, torch |
+| `plate_engine_pro.py` | 2,459 | 추론 오케스트레이션 (YOLO + OCR + CRNN + 투표 + 트래커) | ultralytics, paddleocr, torch |
 | `plate_recognition_4k.py` | 2,778 | 한글 자모 교정 함수 라이브러리 (순수 함수) | — |
-| `preprocessor.py` | **282** | 18종 이미지 전처리 (정적 메서드 모음, stateless) | cv2, numpy |
+| `preprocessor.py` | **282** | 이미지 전처리 (정적 메서드 모음, stateless — 파이프라인은 그중 10종 사용) | cv2, numpy |
 | `validator.py` | **205** | 한국 번호판 형식·자모 검증 + 패턴 복원 | — (plate_recognition_4k 재사용) |
 | `db.py` | **115** | SQLite 기록 + 수배차량(alert) 조회 | sqlite3 |
 | `config.py` | 379 | 경로 / 임계값 / OCR / 디스플레이 설정 (4개 dataclass) | — |
@@ -110,10 +110,10 @@ flowchart TD
   ▼  PlateEnginePro.detect_only(frame)  ← ultralytics YOLO11x best.pt
 [2] Detections : list[{bbox: (x1,y1,x2,y2), conf: float}]
   │
-  ▼  ImagePreprocessor.{원본,gray,clahe,sharpen,binary,...}(roi)  × 18종
-[3] Variants  : dict[str, ndarray]   (18장 전처리 이미지)
+  ▼  ImagePreprocessor.{원본,gray,clahe,sharpen,binary,...}(roi)  × 10종 (PREPROCESS_METHODS)
+[3] Variants  : dict[str, ndarray]   (전처리 이미지, 최대 10장)
   │
-  ▼  PlateEnginePro._run_ocr("paddle", paddle, image)  × 18회
+  ▼  PlateEnginePro._run_ocr("paddle", paddle, image)  × 전처리별 (조기 종료 · 0.5초 상한)
 [4] Candidates: list[(text: str, conf: float)]   (PaddleOCR conf ≥ 0.40 필터)
   │
   ▼  PlateEnginePro._verify_korean_with_crnn(paddle_text, roi, ...)
@@ -133,11 +133,11 @@ GUI 렌더링 (Tkinter) + PlateDatabase.record_plate(...) → SQLite
 
 ## 6. Refactoring Journey
 
-### Before — God class (`plate_engine_pro.py` 3,194 LOC)
+### Before — God class (`plate_engine_pro.py` 3,212 LOC)
 
 ```mermaid
 flowchart TD
-    GOD[plate_engine_pro.py<br/>3,194 LOC<br/>YOLO + 전처리 + OCR + CRNN<br/>+ 투표 + 검증 + 트래커 + DB<br/>+ UI helper]
+    GOD[plate_engine_pro.py<br/>3,212 LOC<br/>YOLO + 전처리 + OCR + CRNN<br/>+ 투표 + 검증 + 트래커 + DB<br/>+ UI helper]
     GOD -.> EVERY[모든 책임]
 ```
 
@@ -151,7 +151,7 @@ flowchart TD
 
 ```mermaid
 flowchart TD
-    ENG[plate_engine_pro.py<br/>2,721 LOC<br/>오케스트레이션 전담]
+    ENG[plate_engine_pro.py<br/>2,459 LOC<br/>오케스트레이션 전담]
     PRE[preprocessor.py<br/>282 LOC<br/>전처리만]
     VAL[validator.py<br/>205 LOC<br/>검증만]
     DB[db.py<br/>115 LOC<br/>SQLite만]
@@ -162,7 +162,7 @@ flowchart TD
 
 | 지표 | Before | After | 변화 |
 |---|---:|---:|---:|
-| `plate_engine_pro.py` 줄 수 | 3,194 | **2,721** | **-473 (-14.8%)** |
+| `plate_engine_pro.py` 줄 수 | 3,212 | **2,459** | **-753 (-23.4%)** |
 | 신규 분리 모듈 | 0 | 3 | preprocessor(282) + validator(205) + db(115) |
 | `preprocessor.py` 프로젝트 의존 | — | **0** | self-contained → 재사용 OK |
 | 단위 테스트 가능성 | YOLO·PaddleOCR 강결합 | smoke test 분리 실행 OK | `tests/test_modules_smoke.py` |
@@ -196,7 +196,7 @@ flowchart LR
 
 ## 8. 향후 분리 후보 — 로드맵
 
-`plate_engine_pro.py` 2,721 LOC 내부의 다음 5개 도메인을 SRP 후속 분리 대상으로 식별.
+`plate_engine_pro.py` 2,459 LOC 내부의 다음 5개 도메인을 SRP 후속 분리 대상으로 식별.
 
 | 우선순위 | 모듈 후보 | 현재 위치 | 책임 | 예상 LOC | 비고 |
 |---:|---|---|---|---:|---|

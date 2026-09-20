@@ -15,7 +15,7 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 
 ## 핵심 요약
 
-> **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,194 → 2,721줄 (-14.8%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
+> **YOLO11x + PaddleOCR + CRNN 3-tier 검증 파이프라인 · `plate_engine_pro.py` 3,212 → 2,459줄 (-23.4%) SRP 리팩터링 · 정적 회귀 11/12 (91.7%) 정직 공개.**
 
 > 본 저장소는 4인 팀 프로젝트 [violet-1205/Golden_Time](https://github.com/violet-1205/Golden_Time)에서
 > 본인이 담당한 OCR 파이프라인을 프로젝트 종료 후 단독으로 확장·리팩터링한 결과물입니다.
@@ -25,19 +25,19 @@ YOLO11x 객체 탐지 + PaddleOCR + CRNN 교차검증 기반의 한국 차량 �
 
 ## 아키텍처
 
-7단계 파이프라인을 **단일 책임 원칙(SRP)** 으로 모듈화. 비대해진 `plate_engine_pro.py`에서 전처리 / 형식 검증 / DB 책임을 신규 3개 모듈로 분리하고, 엔진 본체는 orchestrator로 축소.
+7단계 파이프라인을 **단일 책임 원칙(SRP)** 으로 모듈화. 비대해진 `plate_engine_pro.py`에서 전처리 / 형식 검증 / DB / 설정 / CRNN 검증 책임을 별도 모듈로 분리하고, 엔진 본체는 orchestrator로 축소.
 
 ```mermaid
 flowchart TB
     A[영상 프레임] --> B[YOLO11x 탐지<br/>best.pt]
     B --> C{박스 유효성<br/>면적·종횡비·크기}
-    C -->|Pass| D[ROI 크롭 + 18종 전처리<br/>preprocessor.py]
+    C -->|Pass| D[ROI 크롭 + 다중 전처리 10종<br/>preprocessor.py]
     C -->|Fail| X[Drop frame]
-    D --> E[PaddleOCR 18회 인식<br/>plate_engine_pro.py]
+    D --> E[PaddleOCR 인식 — 전처리별<br/>조기 종료 · 0.5초 상한]
     E --> F[자릿수별 다수결 투표]
-    F --> G{confidence ≥ 0.9?<br/>한글 자릿수 모호?}
-    G -->|Pass| J[형식 검증<br/>validator.py]
-    G -->|Need check| H[CRNN 교차검증<br/>plate_ocr_crnn.pth]
+    F --> G{인식 결과에<br/>한글 포함?}
+    G -->|No| J[형식 검증<br/>validator.py]
+    G -->|Yes| H[CRNN 교차검증<br/>CRNN 신뢰도 ≥ 0.90일 때만 한글 교체]
     H --> J
     J --> K[PlateTracker<br/>IoU + Ghost 방지]
     K --> L[(plates.db)]
@@ -47,20 +47,22 @@ flowchart TB
 ### 왜 Hybrid OCR인가
 
 PaddleOCR 단독으로는 한글 자모 혼동(나↔라, 버↔아, 누↔두)이 빈번했습니다.
-모든 프레임을 CRNN으로 처리하면 latency가 2배가 되므로,
-confidence 게이트로 분기를 만들었습니다.
+그래서 인식 결과에 한글이 있으면 같은 ROI를 직접 학습한 CRNN으로 한 번 더 읽고,
+**CRNN 신뢰도가 충분할 때만** 결과를 반영합니다 (`crnn_verifier.py`).
 
-| 케이스 | 처리 경로 | 비용 |
-|---|---|---|
-| PaddleOCR confidence ≥ 0.9 | PaddleOCR 단독 | 측정 중 |
-| confidence < 0.9 또는 한글 자릿수 모호 | + CRNN 교차검증 | 측정 중 |
+| 조건 | 처리 |
+|---|---|
+| 인식 결과에 한글 없음 | PaddleOCR 결과 그대로 (숫자 4자리만 읽힌 경우는 CRNN으로 복원 시도) |
+| 한글 있음 · CRNN 신뢰도 < 0.70 | CRNN 결과 무시 |
+| 한글 있음 · CRNN 신뢰도 ≥ 0.90 | 한글 글자를 CRNN 결과로 교체 (앞자리 교정은 ≥ 0.88) |
 
-이 분기로 평균 latency 1.35s 유지하면서 한글 정확도를 단독 대비 개선.
+같은 차량은 추적 캐시로 OCR을 건너뛰어(`_should_skip_ocr`) 매 프레임 다시 읽지 않습니다.
+CRNN을 붙이기 전후의 한글 정확도 차이는 아직 따로 재지 않았습니다.
 
 | 모듈 | 줄 수 | 책임 |
 |------|------:|------|
-| `plate_engine_pro.py` | **2,721** | 엔진 orchestrator — YOLO 2-Stage · OCR · CRNN · 투표 · 트래킹 |
-| `preprocessor.py` | 282 | `ImagePreprocessor` — 22종 정적 전처리 (`OCRConfig.PREPROCESS_METHODS` 디스패치) |
+| `plate_engine_pro.py` | **2,459** | 엔진 orchestrator — YOLO 2-Stage · OCR · CRNN · 투표 · 트래킹 |
+| `preprocessor.py` | 282 | `ImagePreprocessor` — 정적 전처리 메서드 모음. 그중 10종을 `OCRConfig.PREPROCESS_METHODS`로 디스패치 |
 | `validator.py` | 205 | `PlateValidator` — 한국 번호판 정규식 · 길이 · 한글 보정 |
 | `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력/수배 |
 
@@ -71,7 +73,7 @@ confidence 게이트로 분기를 만들었습니다.
 ## 파이프라인 (7단계)
 
 ```
-[1] 영상 입력 → [2] YOLO11x 탐지 → [3] ROI 크롭 + 18종 전처리
+[1] 영상 입력 → [2] YOLO11x 탐지 → [3] ROI 크롭 + 다중 전처리(10종)
 → [4] PaddleOCR 인식 → [5] CRNN 교차검증
 → [6] 위치 기반 투표 + 형식 검증 → [7] PlateTracker 추적 + GUI 출력
 ```
@@ -97,24 +99,24 @@ confidence 게이트로 분기를 만들었습니다.
 | 종횡비 필터 | 2.0 ≤ w/h ≤ 6.0 (`PLATE_MIN/MAX_ASPECT`) |
 | 면적 비율 상한 | 프레임의 8% (`PLATE_MAX_AREA_RATIO`) |
 
-### 3단계 — ROI 크롭 + 18종 전처리
-탐지 박스를 잘라낸 뒤 OCR이 잘 읽도록 18가지 방식으로 변형.
+### 3단계 — ROI 크롭 + 다중 전처리 (10종)
+탐지 박스를 잘라낸 뒤 OCR이 잘 읽도록 10가지 방식으로 변형 (`config.py`의 `PREPROCESS_METHODS`).
 
 | 항목 | 값 |
 |------|----|
 | 크롭 마진 | 좌우 35%, 상하 40% |
 | 업스케일 | 500px |
-| 전처리 종류 | 원본, 흑백, CLAHE, 샤프닝, 이진화, 컬러 채널별 등 18종 |
+| 전처리 종류 | 원본, CLAHE, 샤프닝, 색 반전, 녹색판·노란판 마스크, 컬러판 CLAHE, 야간 CLAHE, 역광 보정, 밝기 정규화 (10종) |
 | 목적 | 조명·각도·해상도 변동에 대한 robustness 확보 |
 
 ### 4단계 — PaddleOCR 문자 인식
-한국어 특화 PaddleOCR로 18장 전처리 이미지 각각에 대해 OCR 수행.
+한국어 특화 PaddleOCR로 전처리 이미지마다 OCR 수행. 고신뢰 후보가 나오면 나머지 전처리를 건너뛰고(조기 종료), 0.5초를 넘기면 중단한다.
 
 | 항목 | 값 |
 |------|----|
 | 모델 | PaddleOCR (한국어 단독) |
 | 신뢰도 필터 | 0.40 이상만 후보 채택 |
-| 출력 | 18개의 (text, confidence) 후보 |
+| 출력 | 전처리별 (text, confidence) 후보 (최대 10개) |
 
 ### 5단계 — CRNN 교차검증
 PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN으로 재판독.
@@ -132,7 +134,7 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 
 | 컴포넌트 | 역할 |
 |----------|------|
-| 위치 기반 분해 투표 | 자릿수마다 18개 후보 중 다수결 (예: 15/18이 `7` → `7` 확정) |
+| 위치 기반 분해 투표 | 자릿수마다 후보들 중 다수결 (예: 후보 8개 중 6개가 `7` → `7` 확정) |
 | `PlateValidator` | 한국 번호판 형식(7자리/2줄) 검증 |
 | `HangulClassifier` | 초성 기준 한글 교차검증 |
 
@@ -153,8 +155,8 @@ PaddleOCR이 잘 틀리는 한글 부분(`나↔라`, `버↔아` 등)을 CRNN�
 
 | 파일 | 줄 수 | 역할 |
 |------|------:|------|
-| `plate_engine_pro.py` | **2,721** | OCR 엔진 orchestrator (YOLO 2-Stage + PaddleOCR + CRNN + 투표 + 추적) — *분리: `+ preprocessor.py + validator.py + db.py`* |
-| `preprocessor.py` | 282 | `ImagePreprocessor` — 22종 전처리 (CLAHE / 샤프닝 / Gamma / Otsu / 컬러판 마스크 등) |
+| `plate_engine_pro.py` | **2,459** | OCR 엔진 orchestrator (YOLO 2-Stage + PaddleOCR + CRNN + 투표 + 추적) — *분리: `+ preprocessor.py + validator.py + db.py + engine_config.py + ui_text.py + crnn_verifier.py`* |
+| `preprocessor.py` | 282 | `ImagePreprocessor` — 전처리 메서드 모음 (CLAHE / 샤프닝 / Gamma / Otsu / 컬러판 마스크 등). 실제 파이프라인은 그중 10종 사용 |
 | `validator.py` | 205 | `PlateValidator` — 한국 번호판 형식 검증 + OCR 노이즈 클린업 |
 | `db.py` | 115 | `PlateDatabase` — SQLite 인식 이력 / 수배 차량 관리 |
 | `plate_gui.py` | – | Tkinter GUI + 실시간 영상 루프 (진입점) |
@@ -245,13 +247,13 @@ python test_ocr_accuracy.py
 
 | 항목 | Before | After | Δ |
 |------|-------:|------:|---:|
-| `plate_engine_pro.py` | 3,194 줄 | **2,721 줄** | **−473 (−14.8%)** |
-| 신규 분리 모듈 | 0 | 3 (`preprocessor` · `validator` · `db`) | +3 |
+| `plate_engine_pro.py` | 3,212 줄 (`fa33d962`) | **2,459 줄** | **−753 (−23.4%)** |
+| 신규 분리 모듈 | 0 | 6 (`preprocessor` · `validator` · `db` · `engine_config` · `ui_text` · `crnn_verifier`) | +6 |
 | 회귀 테스트 baseline | 11~12 / 12 | **11~12 / 12 유지** | 동일 (regression-free) |
 
 ### 핵심 결정
 
-- **`ImagePreprocessor` 분리** — 22종 정적 메서드를 `preprocessor.py`로 추출. 호출 측은 `OCRConfig.PREPROCESS_METHODS`의 이름 문자열로 `getattr` 디스패치하는 패턴을 그대로 유지 → **호출자 코드 무변경**.
+- **`ImagePreprocessor` 분리** — 정적 전처리 메서드를 `preprocessor.py`로 추출. 호출 측은 `OCRConfig.PREPROCESS_METHODS`의 이름 문자열로 `getattr` 디스패치하는 패턴을 그대로 유지 → **호출자 코드 무변경**.
 - **중복 커널 통합** — `sharpen` ↔ `deblur`가 동일한 라플라시안 커널을 따로 쓰던 중복을 단일 모듈 상수 `_SHARPEN_KERNEL`로 정리.
 - **`PlateValidator` 분리** — 한국 번호판 정규식 · 길이 · 한글 보정 로직을 `validator.py`로 모음. 검증 규칙 변경이 엔진 본체에 누수되지 않음.
 - **`PlateDatabase` 분리** — SQLite I/O 캡슐화. DB 스키마 변경 영향 범위를 `db.py`로 한정.

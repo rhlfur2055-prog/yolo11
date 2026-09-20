@@ -677,7 +677,8 @@ class PlateRecognizer:
         lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=min(img.shape[1] // 3, 80))
         if lines is not None and len(lines) > 0:
             angles = []
-            for rho, theta in lines[:20, 0]:
+            # OpenCV 버전에 따라 (N,1,2) 또는 (N,2)로 반환된다
+            for rho, theta in np.asarray(lines).reshape(-1, 2)[:20]:
                 deg = np.degrees(theta) - 90  # 수평선 기준 각도
                 if abs(deg) < 20:  # 수평에 가까운 선만
                     angles.append(deg)
